@@ -1,0 +1,40 @@
+name: "Reusable Ktlint Workflow"
+
+on:
+  workflow_call:
+    inputs:
+      java-version:
+        description: 'The version of Java to use'
+        required: true
+        type: string
+
+jobs:
+  ktlint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install KTLint
+        run: |
+          curl -sSLO https://github.com/pinterest/ktlint/releases/download/1.2.1/ktlint && chmod a+x ktlint && sudo mv ktlint /usr/local/bin/
+
+      - name: Auto-correct with KTLint
+        run: |
+          ktlint --format --editorconfig=.editorconfig
+        continue-on-error: true
+
+      - name: Check remaining KTLint issues
+        run: |
+          ktlint --editorconfig=.editorconfig || true
+
+      - name: Run KTLint and generate report
+        run: |
+          ktlint --editorconfig=.editorconfig --reporter=checkstyle,output=build/ktlint-report.xml || true
+        continue-on-error: true
+
+      - name: Upload KTLint report
+        uses: yutailang0119/action-ktlint@v4
+        with:
+          report-path: build/*.xml
+          ignore-warnings: true

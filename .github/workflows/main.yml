@@ -1,0 +1,23 @@
+# .github/workflows/main-ci.yml
+name: Main CI Workflow
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  zap-scan:
+    uses: signapse/reusable-workflows/.github/workflows/zap-reusable-workflow.yml@main
+    with:
+      environment: "test"
+      #secrets:
+      #ZAP_API_KEY: ${{ secrets.ZAP_API_KEY }}
+
+  linting:
+    uses: signapse/reusable-workflows/.github/workflows/ktlint-reusable.yml@main
+    with:
+      java-version: '17'  # Specify the required Java version

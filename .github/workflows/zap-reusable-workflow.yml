@@ -1,0 +1,32 @@
+# .github/workflows/zap-reusable-workflow.yml
+name: Reusable ZAP Scan Workflow
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        required: true
+        type: string
+        default: "test"
+        #secrets:
+        #ZAP_API_KEY:
+        #required: true
+
+jobs:
+  zap-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v2
+
+      - name: Start OWASP ZAP in Docker
+        run: |
+          docker run -d -u zap -p 8090:8080 ghcr.io/zaproxy/zaproxy:stable zap.sh -daemon -port 8080 -config api.addrs.addr.name=0.0.0.0 -config api.addrs.addr.regex=true
+
+      - name: Wait for ZAP to start
+        run: |
+          sleep 15  # Wait for ZAP to initialize (adjust time as needed)
+
+      - name: Run OWASP ZAP Scan
+        run: |
+          docker run --network host --rm ghcr.io/zaproxy/zaproxy:stable zap.sh -cmd -quickurl http://localhost:8090 -quickout ./report.html
