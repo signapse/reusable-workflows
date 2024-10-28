@@ -1,4 +1,4 @@
-name: "Reusable Ktlint Workflow"
+name: "Kotlin linting workflow"
 
 on:
   workflow_call:
@@ -7,13 +7,21 @@ on:
         description: 'The version of Java to use'
         required: true
         type: string
+        default: '21'
 
 jobs:
   ktlint:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v3
+
+      - name: Set up Java
+        uses: actions/setup-java@v2
+        with:
+          java-version: ${{ inputs.java-version }}
+          distribution: 'corretto'
+
 
       - name: Install KTLint
         run: |
