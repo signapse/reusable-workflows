@@ -16,12 +16,11 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v3
 
-      - name: Set up Java
-        uses: actions/setup-java@v2
+      - name: Install Java
+        uses: actions/setup-java@v4
         with:
-          java-version: ${{ inputs.java-version }}
           distribution: 'corretto'
-
+          java-version: ${{ inputs.java-version }}
 
       - name: Install KTLint
         run: |
