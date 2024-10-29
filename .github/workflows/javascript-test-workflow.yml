@@ -1,0 +1,29 @@
+name: "JavaScript Test Reusable Workflow"
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        description: 'Node.js version to use'
+        required: false
+        type: string
+        default: '16'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: ${{ inputs.node-version }}
+
+      - name: Install dependencies
+        run: npm install # Use yarn install if using Yarn
+
+      - name: Run Tests
+        run: npm test # Replace with your test script (e.g., jest)
