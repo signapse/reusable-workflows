@@ -12,6 +12,9 @@ on:
         #ZAP_API_KEY:
         #required: true
 
+  schedule:
+    - cron: '0 0 * * 2'
+
 jobs:
   zap-scan:
     runs-on: ubuntu-latest
