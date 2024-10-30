@@ -1,0 +1,75 @@
+name: "Python Linter"
+
+on:
+  workflow_call:
+    inputs:
+      python-version:
+        required: false
+        type: string
+      line-length:
+        required: false
+        type: string
+        default: 88  # Default line length for Black
+
+jobs:
+  flake8:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - name: Install dependencies
+        run: |
+          pip install flake8
+          # Optionally install other dependencies
+          # pip install -r requirements.txt
+
+      - name: Run Flake8
+        run: flake8 .
+
+  isort:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - name: Install isort
+        run: |
+          pip install isort
+          # Optionally install other dependencies if needed
+          # pip install -r requirements.txt
+
+      - name: Run isort
+        run: |
+          isort .
+
+  black:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - name: Install Black
+        run: pip install black
+
+      - name: Run Black
+        run: |
+          black --line-length ${{ inputs.line-length }} .
