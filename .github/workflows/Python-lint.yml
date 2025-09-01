@@ -9,7 +9,7 @@ on:
       line-length:
         required: false
         type: string
-        default: 88  # Default line length for Black
+        default: 120 # Default line length for Black
 
 jobs:
   flake8:
