@@ -1,0 +1,17 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  lint:
+    uses: signapse/reusable-workflows/.github/workflows/super-lint.yml@main
+    with:
+      run-lint: true
+
+  unit-tests:
+    uses: signapse/reusable-workflows/.github/workflows/unit-tests.yml@main
+    with:
+      python-version: '3.12'
+      node-version: '16'

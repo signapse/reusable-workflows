@@ -1,0 +1,43 @@
+# Example: Complete workflow for EKS/Kubernetes deployment
+
+name: Build and Deploy to EKS
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  # Step 1: Build and push
+  build:
+    uses: your-org/reusable-workflows/.github/workflows/build-and-push-ecr.yml@main
+    with:
+      ecr_repository_uri: "123456789.dkr.ecr.us-east-1.amazonaws.com/my-app"
+      aws_region: "us-east-1"
+      iam_role_arn: "arn:aws:iam::123456789:role/github-actions"
+      image_tag: ${{ github.ref_name }}
+    permissions:
+      id-token: write
+      contents: read
+
+  # Step 2: Deploy to EKS
+  deploy:
+    needs: build
+    uses: your-org/reusable-workflows/.github/workflows/deploy-docker-image.yml@main
+    with:
+      service_type: eks
+      service_name: my-app
+      cluster_name: my-cluster
+      namespace: production
+      container_name: my-app-container
+      image_uri: 123456789.dkr.ecr.us-east-1.amazonaws.com/my-app:${{ github.ref_name }}
+      aws_region: us-east-1
+      iam_role_arn: arn:aws:iam::123456789:role/github-actions-deploy
+      wait_for_completion: true
+    permissions:
+      id-token: write
+      contents: read

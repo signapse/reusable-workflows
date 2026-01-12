@@ -1,0 +1,62 @@
+# Example: Complete workflow using both reusable workflows
+#
+# This shows the recommended pattern:
+# 1. Use build-and-push-ecr.yml to build and push Docker image
+# 2. Use deploy-docker-image.yml to deploy to Lambda
+
+name: Build and Deploy to Lambda
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  # Step 1: Build Docker image and push to ECR
+  build:
+    uses: your-org/reusable-workflows/.github/workflows/build-and-push-ecr.yml@main
+    with:
+      ecr_repository_uri: "827204657141.dkr.ecr.eu-west-2.amazonaws.com/text2gloss"
+      aws_region: "eu-west-2"
+      iam_role_arn: "arn:aws:iam::827204657141:role/github-actions-build"
+      image_tag: ${{ github.event.release.tag_name }}
+      docker_build_args: |
+        MAXIMUM_HEAP_SIZE=2048m
+        MINIMUM_HEAP_SIZE=512m
+    permissions:
+      id-token: write
+      contents: read
+
+  # Step 2: Deploy to Lambda Dev
+  deploy-dev:
+    needs: build
+    uses: your-org/reusable-workflows/.github/workflows/deploy-docker-image.yml@main
+    with:
+      service_type: lambda
+      service_name: text2gloss-dev
+      image_uri: 827204657141.dkr.ecr.eu-west-2.amazonaws.com/text2gloss:${{ github.event.release.tag_name }}
+      aws_region: eu-west-2
+      iam_role_arn: arn:aws:iam::887333319954:role/github-access
+      wait_for_completion: true
+    permissions:
+      id-token: write
+      contents: read
+
+  # Step 3: Deploy to Lambda Prod (with approval)
+  deploy-prod:
+    needs: deploy-dev
+    environment: production  # Requires manual approval
+    uses: your-org/reusable-workflows/.github/workflows/deploy-docker-image.yml@main
+    with:
+      service_type: lambda
+      service_name: text2gloss-prod
+      image_uri: 827204657141.dkr.ecr.eu-west-2.amazonaws.com/text2gloss:${{ github.event.release.tag_name }}
+      aws_region: eu-west-2
+      iam_role_arn: arn:aws:iam::999999999999:role/github-access-prod
+      wait_for_completion: true
+    permissions:
+      id-token: write
+      contents: read

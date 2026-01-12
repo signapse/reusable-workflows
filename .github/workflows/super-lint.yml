@@ -1,0 +1,27 @@
+name: Super Linter
+
+on:
+  workflow_call:
+    inputs:
+      run-lint:
+        description: "Run Super-Linter"
+        required: false
+        type: boolean
+        default: true
+
+jobs:
+  lint:
+    if: ${{ inputs.run-lint }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Run Super-Linter
+        uses: github/super-linter@v6
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VALIDATE_ALL_CODEBASE: true
+          DEFAULT_BRANCH: main
+          FAIL_ON_WARNINGS: true
+          ACTIONS_RUNNER_DEBUG: true

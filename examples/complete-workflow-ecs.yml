@@ -1,0 +1,40 @@
+# Example: Complete workflow for ECS deployment
+
+name: Build and Deploy to ECS
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  # Step 1: Build and push
+  build:
+    uses: your-org/reusable-workflows/.github/workflows/build-and-push-ecr.yml@main
+    with:
+      ecr_repository_uri: "123456789.dkr.ecr.us-east-1.amazonaws.com/my-app"
+      aws_region: "us-east-1"
+      iam_role_arn: "arn:aws:iam::123456789:role/github-actions"
+      image_tag: ${{ github.sha }}
+    permissions:
+      id-token: write
+      contents: read
+
+  # Step 2: Deploy to ECS
+  deploy:
+    needs: build
+    uses: your-org/reusable-workflows/.github/workflows/deploy-docker-image.yml@main
+    with:
+      service_type: ecs
+      service_name: my-service
+      cluster_name: my-cluster
+      image_uri: 123456789.dkr.ecr.us-east-1.amazonaws.com/my-app:${{ github.sha }}
+      aws_region: us-east-1
+      iam_role_arn: arn:aws:iam::123456789:role/github-actions-deploy
+      wait_for_completion: true
+    permissions:
+      id-token: write
+      contents: read

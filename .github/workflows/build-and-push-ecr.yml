@@ -1,0 +1,139 @@
+name: Build and Push to ECR
+
+on:
+  workflow_call:
+    inputs:
+      ecr_repository_uri:
+        description: 'ECR repository URI (e.g., 123456789.dkr.ecr.us-east-1.amazonaws.com/my-app)'
+        required: true
+        type: string
+
+      aws_region:
+        description: 'AWS region where ECR repository is located'
+        required: true
+        type: string
+
+      iam_role_arn:
+        description: 'IAM role ARN for AWS authentication via OIDC'
+        required: true
+        type: string
+
+      image_tag:
+        description: 'Docker image tag (e.g., v1.0.0, release-tag). Will also tag as "latest"'
+        required: true
+        type: string
+
+      docker_build_args:
+        description: 'Docker build arguments (one per line, format: KEY=VALUE)'
+        required: false
+        type: string
+        default: ''
+
+      dockerfile_path:
+        description: 'Path to Dockerfile (default: ./Dockerfile)'
+        required: false
+        type: string
+        default: './Dockerfile'
+
+      docker_context:
+        description: 'Docker build context path (default: .)'
+        required: false
+        type: string
+        default: '.'
+
+      push_latest:
+        description: 'Whether to push :latest tag in addition to specified tag'
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ inputs.iam_role_arn }}
+          role-session-name: GitHub_to_AWS_via_FederatedOIDC
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build Docker Image
+        id: build
+        run: |
+          # Parse build args if provided
+          BUILD_ARGS=""
+          if [ -n "${{ inputs.docker_build_args }}" ]; then
+            while IFS= read -r line; do
+              if [ -n "$line" ]; then
+                BUILD_ARGS="$BUILD_ARGS --build-arg $line"
+              fi
+            done <<< "${{ inputs.docker_build_args }}"
+          fi
+
+          echo "Building Docker image with tag: ${{ inputs.image_tag }}"
+          echo "Build args: $BUILD_ARGS"
+
+          # Build image with latest tag
+          docker build $BUILD_ARGS \
+            -f ${{ inputs.dockerfile_path }} \
+            -t ${{ inputs.ecr_repository_uri }}:latest \
+            ${{ inputs.docker_context }}
+
+      - name: Tag Docker Image
+        run: |
+          # Tag with specified version
+          docker tag ${{ inputs.ecr_repository_uri }}:latest \
+            ${{ inputs.ecr_repository_uri }}:${{ inputs.image_tag }}
+
+          echo "Tagged image with: ${{ inputs.image_tag }}"
+
+      - name: Push Docker Images to ECR
+        run: |
+          # Push versioned tag
+          echo "Pushing ${{ inputs.ecr_repository_uri }}:${{ inputs.image_tag }}"
+          docker push ${{ inputs.ecr_repository_uri }}:${{ inputs.image_tag }}
+
+          # Push latest tag if enabled
+          if [ "${{ inputs.push_latest }}" == "true" ]; then
+            echo "Pushing ${{ inputs.ecr_repository_uri }}:latest"
+            docker push ${{ inputs.ecr_repository_uri }}:latest
+          fi
+
+      - name: Create deploy_info.json
+        run: |
+          cat <<EOF > deploy_info.json
+          {
+            "image_uri_latest": "${{ inputs.ecr_repository_uri }}:latest",
+            "image_uri_release": "${{ inputs.ecr_repository_uri }}:${{ inputs.image_tag }}",
+            "version": "${{ inputs.image_tag }}",
+            "commit_sha": "${{ github.sha }}",
+            "repository": "${{ github.repository }}",
+            "workflow_run_id": "${{ github.run_id }}",
+            "workflow_run_number": "${{ github.run_number }}",
+            "actor": "${{ github.actor }}",
+            "timestamp": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+          }
+          EOF
+
+          echo "Deploy info created:"
+          cat deploy_info.json
+
+      - name: Upload deploy_info.json artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: deploy_info
+          path: deploy_info.json
+          retention-days: 90
