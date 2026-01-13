@@ -9,9 +9,10 @@ on:
         type: string
 
       service_name:
-        description: 'Service/function name (Lambda function name, ECS service name, EKS deployment name)'
-        required: true
+        description: 'Service/function name (Lambda function name, ECS service name, EKS deployment name). Can be provided via input or secret.'
+        required: false
         type: string
+        default: ''
 
       image_uri:
         description: 'Full Docker image URI including tag (e.g., 123456789.dkr.ecr.us-east-1.amazonaws.com/my-app:v1.0.0)'
@@ -53,6 +54,11 @@ on:
         type: boolean
         default: true
 
+    secrets:
+      service_name_secret:
+        description: 'Service/function name from secrets (alternative to service_name input)'
+        required: false
+
 permissions:
   id-token: write
   contents: read
@@ -61,6 +67,10 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
 
+    env:
+      # Use input service_name if provided, otherwise use secret
+      SERVICE_NAME: ${{ inputs.service_name != '' && inputs.service_name || secrets.service_name_secret }}
+
     steps:
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -68,6 +78,14 @@ jobs:
           role-to-assume: ${{ inputs.iam_role_arn }}
           role-session-name: GitHub_to_AWS_via_FederatedOIDC
           aws-region: ${{ inputs.aws_region }}
+
+      - name: Validate inputs
+        run: |
+          if [ -z "$SERVICE_NAME" ]; then
+            echo "❌ Error: service_name must be provided either as input or secret (service_name_secret)"
+            exit 1
+          fi
+          echo "✅ Service name: $SERVICE_NAME"
 
       - name: Validate service type
         run: |
@@ -88,13 +106,13 @@ jobs:
           echo "=========================================="
           echo "🚀 Deploying to AWS Lambda"
           echo "=========================================="
-          echo "Function: ${{ inputs.service_name }}"
+          echo "Function: $SERVICE_NAME"
           echo "Image: ${{ inputs.image_uri }}"
           echo "Region: ${{ inputs.aws_region }}"
           echo "=========================================="
 
           aws lambda update-function-code \
-            --function-name "${{ inputs.service_name }}" \
+            --function-name "$SERVICE_NAME" \
             --image-uri "${{ inputs.image_uri }}" \
             --publish
 
@@ -110,7 +128,7 @@ jobs:
 
           while [ $attempt -lt $max_attempts ]; do
             STATUS=$(aws lambda get-function \
-              --function-name "${{ inputs.service_name }}" \
+              --function-name "$SERVICE_NAME" \
               --query 'Configuration.LastUpdateStatus' \
               --output text)
 
@@ -122,7 +140,7 @@ jobs:
             elif [ "$STATUS" == "Failed" ]; then
               echo "❌ Deployment failed!"
               aws lambda get-function \
-                --function-name "${{ inputs.service_name }}" \
+                --function-name "$SERVICE_NAME" \
                 --query 'Configuration.LastUpdateStatusReason'
               exit 1
             fi
@@ -141,7 +159,7 @@ jobs:
           echo "📋 Lambda Function Details"
           echo "=========================================="
           aws lambda get-function \
-            --function-name "${{ inputs.service_name }}" \
+            --function-name "$SERVICE_NAME" \
             --query 'Configuration.{Name:FunctionName,Version:Version,State:State,LastModified:LastModified}' \
             --output table
           echo "=========================================="
@@ -161,14 +179,14 @@ jobs:
           echo "🚀 Deploying to Amazon ECS"
           echo "=========================================="
           echo "Cluster: ${{ inputs.cluster_name }}"
-          echo "Service: ${{ inputs.service_name }}"
+          echo "Service: $SERVICE_NAME"
           echo "Image: ${{ inputs.image_uri }}"
           echo "=========================================="
 
           # Force new deployment with the new image
           aws ecs update-service \
             --cluster "${{ inputs.cluster_name }}" \
-            --service "${{ inputs.service_name }}" \
+            --service "$SERVICE_NAME" \
             --force-new-deployment
 
           echo "✅ ECS service update initiated"
@@ -180,7 +198,7 @@ jobs:
 
           aws ecs wait services-stable \
             --cluster "${{ inputs.cluster_name }}" \
-            --services "${{ inputs.service_name }}"
+            --services "$SERVICE_NAME"
 
           echo "✅ ECS deployment completed successfully!"
 
@@ -192,7 +210,7 @@ jobs:
           echo "=========================================="
           aws ecs describe-services \
             --cluster "${{ inputs.cluster_name }}" \
-            --services "${{ inputs.service_name }}" \
+            --services "$SERVICE_NAME" \
             --query 'services[0].{Name:serviceName,Status:status,Running:runningCount,Desired:desiredCount}' \
             --output table
           echo "=========================================="
@@ -212,7 +230,7 @@ jobs:
           echo "🚀 Deploying to Amazon EKS"
           echo "=========================================="
           echo "Cluster: ${{ inputs.cluster_name }}"
-          echo "Deployment: ${{ inputs.service_name }}"
+          echo "Deployment: $SERVICE_NAME"
           echo "Namespace: ${{ inputs.namespace }}"
           echo "Image: ${{ inputs.image_uri }}"
           echo "=========================================="
@@ -225,11 +243,11 @@ jobs:
           # Determine container name (use input or deployment name)
           CONTAINER_NAME="${{ inputs.container_name }}"
           if [ -z "$CONTAINER_NAME" ]; then
-            CONTAINER_NAME="${{ inputs.service_name }}"
+            CONTAINER_NAME="$SERVICE_NAME"
           fi
 
           # Update deployment image
-          kubectl set image deployment/${{ inputs.service_name }} \
+          kubectl set image deployment/$SERVICE_NAME \
             $CONTAINER_NAME=${{ inputs.image_uri }} \
             --namespace ${{ inputs.namespace }}
 
@@ -240,7 +258,7 @@ jobs:
         run: |
           echo "⏳ Waiting for EKS rollout to complete..."
 
-          kubectl rollout status deployment/${{ inputs.service_name }} \
+          kubectl rollout status deployment/$SERVICE_NAME \
             --namespace ${{ inputs.namespace }} \
             --timeout=10m
 
@@ -252,13 +270,13 @@ jobs:
           echo "=========================================="
           echo "📋 EKS Deployment Details"
           echo "=========================================="
-          kubectl get deployment ${{ inputs.service_name }} \
+          kubectl get deployment $SERVICE_NAME \
             --namespace ${{ inputs.namespace }} \
             --output wide
           echo ""
           kubectl get pods \
             --namespace ${{ inputs.namespace }} \
-            --selector=app=${{ inputs.service_name }} \
+            --selector=app=$SERVICE_NAME \
             --output wide
           echo "=========================================="
 
@@ -273,7 +291,7 @@ jobs:
           echo "✨ Deployment Summary"
           echo "=========================================="
           echo "Service Type: ${{ inputs.service_type }}"
-          echo "Service Name: ${{ inputs.service_name }}"
+          echo "Service Name: $SERVICE_NAME"
           echo "Image URI: ${{ inputs.image_uri }}"
           echo "Region: ${{ inputs.aws_region }}"
           echo "Timestamp: $(date -u +"%Y-%m-%d %H:%M:%S UTC")"
