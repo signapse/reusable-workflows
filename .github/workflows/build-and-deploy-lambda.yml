@@ -1,0 +1,495 @@
+name: Build and Deploy Lambda Function
+
+on:
+  workflow_call:
+    inputs:
+      # AWS Configuration
+      aws_region:
+        description: 'AWS region where Lambda function is located'
+        required: true
+        type: string
+
+      iam_role_arn:
+        description: 'IAM role ARN for AWS authentication via OIDC'
+        required: true
+        type: string
+
+      # Lambda Configuration
+      function_name:
+        description: 'Lambda function name'
+        required: true
+        type: string
+
+      runtime:
+        description: 'Lambda runtime (nodejs18.x, nodejs20.x, python3.11, python3.12, java17, etc.)'
+        required: true
+        type: string
+
+      # Build Configuration
+      build_command:
+        description: 'Command to build/prepare the function (e.g., "npm install --production", "pip install -r requirements.txt -t .")'
+        required: false
+        type: string
+        default: ''
+
+      source_dir:
+        description: 'Directory containing Lambda function code (default: .)'
+        required: false
+        type: string
+        default: '.'
+
+      exclude_patterns:
+        description: 'Patterns to exclude from zip (one per line, e.g., "*.git*", "tests/", ".env")'
+        required: false
+        type: string
+        default: |
+          .git*
+          .github/
+          tests/
+          __tests__/
+          *.test.js
+          *.spec.js
+          .env*
+          .DS_Store
+          README.md
+          .vscode/
+          .idea/
+
+      include_files:
+        description: 'Specific files/directories to include (space-separated, default: all)'
+        required: false
+        type: string
+        default: ''
+
+      # S3 Configuration (optional backup/audit)
+      s3_bucket:
+        description: 'S3 bucket to store Lambda deployment packages (optional)'
+        required: false
+        type: string
+        default: ''
+
+      s3_prefix:
+        description: 'S3 key prefix/folder (default: lambda-deployments/FUNCTION_NAME/)'
+        required: false
+        type: string
+        default: ''
+
+      # Deployment Options
+      publish_version:
+        description: 'Publish a new Lambda version after deployment'
+        required: false
+        type: boolean
+        default: true
+
+      update_alias:
+        description: 'Lambda alias to update (e.g., "live", "production")'
+        required: false
+        type: string
+        default: ''
+
+      environment_variables:
+        description: 'Environment variables as JSON object (e.g., {"KEY1":"value1","KEY2":"value2"})'
+        required: false
+        type: string
+        default: ''
+
+      memory_size:
+        description: 'Memory size in MB (optional, only set if you want to update)'
+        required: false
+        type: number
+        default: 0
+
+      timeout:
+        description: 'Timeout in seconds (optional, only set if you want to update)'
+        required: false
+        type: number
+        default: 0
+
+      # Advanced Options
+      layers:
+        description: 'Lambda layer ARNs (one per line)'
+        required: false
+        type: string
+        default: ''
+
+      architecture:
+        description: 'Lambda architecture (x86_64 or arm64)'
+        required: false
+        type: string
+        default: 'x86_64'
+
+      pre_build_command:
+        description: 'Command to run before build (e.g., setup, generate files)'
+        required: false
+        type: string
+        default: ''
+
+      post_build_command:
+        description: 'Command to run after build, before zip (e.g., cleanup)'
+        required: false
+        type: string
+        default: ''
+
+      deploy_from_s3:
+        description: 'Deploy from S3 instead of direct zip upload (recommended for >50MB)'
+        required: false
+        type: boolean
+        default: false
+
+    outputs:
+      version:
+        description: 'Published Lambda version number'
+        value: ${{ jobs.deploy.outputs.version }}
+      zip_size:
+        description: 'Size of deployment package in bytes'
+        value: ${{ jobs.deploy.outputs.zip_size }}
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.update-function.outputs.version }}
+      zip_size: ${{ steps.create-package.outputs.zip_size }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        if: startsWith(inputs.runtime, 'nodejs')
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.runtime == 'nodejs20.x' && '20' || '18' }}
+
+      - name: Setup Python
+        if: startsWith(inputs.runtime, 'python')
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.runtime == 'python3.12' && '3.12' || inputs.runtime == 'python3.11' && '3.11' || '3.10' }}
+
+      - name: Setup Java
+        if: startsWith(inputs.runtime, 'java')
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'corretto'
+          java-version: ${{ inputs.runtime == 'java17' && '17' || inputs.runtime == 'java11' && '11' || '21' }}
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ inputs.iam_role_arn }}
+          role-session-name: GitHub_to_AWS_via_FederatedOIDC
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Run pre-build command
+        if: inputs.pre_build_command != ''
+        working-directory: ${{ inputs.source_dir }}
+        run: ${{ inputs.pre_build_command }}
+
+      - name: Install dependencies and build
+        if: inputs.build_command != ''
+        working-directory: ${{ inputs.source_dir }}
+        run: |
+          echo "=========================================="
+          echo "🔧 Building Lambda function"
+          echo "=========================================="
+          echo "Runtime: ${{ inputs.runtime }}"
+          echo "Build command: ${{ inputs.build_command }}"
+          echo "=========================================="
+
+          ${{ inputs.build_command }}
+
+          echo "✅ Build completed"
+
+      - name: Run post-build command
+        if: inputs.post_build_command != ''
+        working-directory: ${{ inputs.source_dir }}
+        run: ${{ inputs.post_build_command }}
+
+      - name: Create deployment package
+        id: create-package
+        run: |
+          echo "=========================================="
+          echo "📦 Creating deployment package"
+          echo "=========================================="
+
+          cd ${{ inputs.source_dir }}
+
+          # Create exclude file
+          cat > /tmp/exclude.txt <<'EOF'
+          ${{ inputs.exclude_patterns }}
+          EOF
+
+          # Create zip with exclusions
+          if [ -n "${{ inputs.include_files }}" ]; then
+            # Include specific files only
+            echo "Including specific files: ${{ inputs.include_files }}"
+            zip -r /tmp/lambda-deployment.zip ${{ inputs.include_files }} -x@/tmp/exclude.txt
+          else
+            # Include everything except exclusions
+            echo "Including all files except exclusions"
+            zip -r /tmp/lambda-deployment.zip . -x@/tmp/exclude.txt
+          fi
+
+          # Get zip size
+          ZIP_SIZE=$(stat -f%z /tmp/lambda-deployment.zip 2>/dev/null || stat -c%s /tmp/lambda-deployment.zip)
+          ZIP_SIZE_MB=$(echo "scale=2; $ZIP_SIZE / 1024 / 1024" | bc)
+
+          echo "zip_size=$ZIP_SIZE" >> $GITHUB_OUTPUT
+
+          echo ""
+          echo "✅ Package created: ${ZIP_SIZE_MB}MB"
+          echo ""
+
+          # List contents
+          echo "Package contents:"
+          unzip -l /tmp/lambda-deployment.zip | head -50
+
+          if [ $ZIP_SIZE -gt 52428800 ]; then
+            echo ""
+            echo "⚠️  Warning: Package size (${ZIP_SIZE_MB}MB) exceeds 50MB"
+            echo "Deployment will use S3 (direct upload limit is 50MB)"
+          fi
+
+      - name: Upload to S3
+        if: inputs.s3_bucket != '' || steps.create-package.outputs.zip_size > 52428800
+        id: upload-s3
+        run: |
+          # Determine bucket
+          if [ -n "${{ inputs.s3_bucket }}" ]; then
+            BUCKET="${{ inputs.s3_bucket }}"
+          else
+            echo "❌ Package >50MB requires S3 bucket. Please set s3_bucket input."
+            exit 1
+          fi
+
+          # Determine S3 key
+          if [ -n "${{ inputs.s3_prefix }}" ]; then
+            PREFIX="${{ inputs.s3_prefix }}"
+          else
+            PREFIX="lambda-deployments/${{ inputs.function_name }}"
+          fi
+
+          TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+          S3_KEY="${PREFIX}/${{ inputs.function_name }}-${TIMESTAMP}-${{ github.sha }}.zip"
+
+          echo "=========================================="
+          echo "☁️  Uploading to S3"
+          echo "=========================================="
+          echo "Bucket: s3://${BUCKET}"
+          echo "Key: ${S3_KEY}"
+          echo "=========================================="
+
+          aws s3 cp /tmp/lambda-deployment.zip "s3://${BUCKET}/${S3_KEY}"
+
+          echo "s3_bucket=$BUCKET" >> $GITHUB_OUTPUT
+          echo "s3_key=$S3_KEY" >> $GITHUB_OUTPUT
+
+          echo "✅ Uploaded to s3://${BUCKET}/${S3_KEY}"
+
+      - name: Update Lambda function code
+        id: update-function
+        run: |
+          echo "=========================================="
+          echo "🚀 Updating Lambda function"
+          echo "=========================================="
+          echo "Function: ${{ inputs.function_name }}"
+          echo "Region: ${{ inputs.aws_region }}"
+          echo "=========================================="
+
+          # Determine deployment method
+          if [ "${{ inputs.deploy_from_s3 }}" == "true" ] || [ "${{ steps.create-package.outputs.zip_size }}" -gt "52428800" ]; then
+            echo "Deploying from S3..."
+            aws lambda update-function-code \
+              --function-name "${{ inputs.function_name }}" \
+              --s3-bucket "${{ steps.upload-s3.outputs.s3_bucket }}" \
+              --s3-key "${{ steps.upload-s3.outputs.s3_key }}" \
+              --publish=${{ inputs.publish_version }} \
+              --architectures ${{ inputs.architecture }} \
+              --output json > /tmp/update-result.json
+          else
+            echo "Deploying from local zip..."
+            aws lambda update-function-code \
+              --function-name "${{ inputs.function_name }}" \
+              --zip-file fileb:///tmp/lambda-deployment.zip \
+              --publish=${{ inputs.publish_version }} \
+              --architectures ${{ inputs.architecture }} \
+              --output json > /tmp/update-result.json
+          fi
+
+          # Extract version
+          VERSION=$(jq -r '.Version' /tmp/update-result.json)
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+          echo ""
+          echo "✅ Function updated to version: $VERSION"
+
+      - name: Wait for function update
+        run: |
+          echo "⏳ Waiting for function to be ready..."
+
+          max_attempts=30
+          attempt=0
+
+          while [ $attempt -lt $max_attempts ]; do
+            STATE=$(aws lambda get-function \
+              --function-name "${{ inputs.function_name }}" \
+              --query 'Configuration.State' \
+              --output text)
+
+            LAST_UPDATE_STATUS=$(aws lambda get-function \
+              --function-name "${{ inputs.function_name }}" \
+              --query 'Configuration.LastUpdateStatus' \
+              --output text)
+
+            echo "Attempt $((attempt + 1))/$max_attempts - State: $STATE, Update Status: $LAST_UPDATE_STATUS"
+
+            if [ "$STATE" == "Active" ] && [ "$LAST_UPDATE_STATUS" == "Successful" ]; then
+              echo "✅ Function is ready!"
+              exit 0
+            elif [ "$LAST_UPDATE_STATUS" == "Failed" ]; then
+              echo "❌ Update failed!"
+              aws lambda get-function \
+                --function-name "${{ inputs.function_name }}" \
+                --query 'Configuration.LastUpdateStatusReason'
+              exit 1
+            fi
+
+            attempt=$((attempt + 1))
+            sleep 10
+          done
+
+          echo "❌ Timeout waiting for function update"
+          exit 1
+
+      - name: Update function configuration
+        if: inputs.environment_variables != '' || inputs.memory_size > 0 || inputs.timeout > 0 || inputs.layers != ''
+        run: |
+          echo "=========================================="
+          echo "⚙️  Updating function configuration"
+          echo "=========================================="
+
+          UPDATE_CMD="aws lambda update-function-configuration --function-name ${{ inputs.function_name }}"
+
+          # Environment variables
+          if [ -n "${{ inputs.environment_variables }}" ]; then
+            echo "Setting environment variables..."
+            UPDATE_CMD="$UPDATE_CMD --environment Variables='${{ inputs.environment_variables }}'"
+          fi
+
+          # Memory size
+          if [ "${{ inputs.memory_size }}" -gt "0" ]; then
+            echo "Setting memory size: ${{ inputs.memory_size }}MB"
+            UPDATE_CMD="$UPDATE_CMD --memory-size ${{ inputs.memory_size }}"
+          fi
+
+          # Timeout
+          if [ "${{ inputs.timeout }}" -gt "0" ]; then
+            echo "Setting timeout: ${{ inputs.timeout }}s"
+            UPDATE_CMD="$UPDATE_CMD --timeout ${{ inputs.timeout }}"
+          fi
+
+          # Layers
+          if [ -n "${{ inputs.layers }}" ]; then
+            echo "Setting layers..."
+            LAYER_ARNS=$(echo "${{ inputs.layers }}" | tr '\n' ',' | sed 's/,$//')
+            UPDATE_CMD="$UPDATE_CMD --layers $LAYER_ARNS"
+          fi
+
+          eval $UPDATE_CMD
+
+          echo "✅ Configuration updated"
+
+      - name: Update alias
+        if: inputs.update_alias != ''
+        run: |
+          echo "=========================================="
+          echo "🏷️  Updating alias: ${{ inputs.update_alias }}"
+          echo "=========================================="
+
+          # Check if alias exists
+          if aws lambda get-alias \
+            --function-name "${{ inputs.function_name }}" \
+            --name "${{ inputs.update_alias }}" \
+            >/dev/null 2>&1; then
+
+            echo "Updating existing alias..."
+            aws lambda update-alias \
+              --function-name "${{ inputs.function_name }}" \
+              --name "${{ inputs.update_alias }}" \
+              --function-version "${{ steps.update-function.outputs.version }}"
+          else
+            echo "Creating new alias..."
+            aws lambda create-alias \
+              --function-name "${{ inputs.function_name }}" \
+              --name "${{ inputs.update_alias }}" \
+              --function-version "${{ steps.update-function.outputs.version }}"
+          fi
+
+          echo "✅ Alias updated to version ${{ steps.update-function.outputs.version }}"
+
+      - name: Test function
+        id: test-function
+        continue-on-error: true
+        run: |
+          echo "=========================================="
+          echo "🧪 Testing function"
+          echo "=========================================="
+
+          # Simple invoke test
+          aws lambda invoke \
+            --function-name "${{ inputs.function_name }}" \
+            --payload '{}' \
+            /tmp/response.json
+
+          echo "Response:"
+          cat /tmp/response.json
+          echo ""
+
+      - name: Create deployment artifact
+        run: |
+          cat > /tmp/lambda-deploy-info.json <<EOF
+          {
+            "function_name": "${{ inputs.function_name }}",
+            "runtime": "${{ inputs.runtime }}",
+            "version": "${{ steps.update-function.outputs.version }}",
+            "zip_size_bytes": ${{ steps.create-package.outputs.zip_size }},
+            "s3_bucket": "${{ steps.upload-s3.outputs.s3_bucket || 'N/A' }}",
+            "s3_key": "${{ steps.upload-s3.outputs.s3_key || 'N/A' }}",
+            "commit_sha": "${{ github.sha }}",
+            "repository": "${{ github.repository }}",
+            "workflow_run_id": "${{ github.run_id }}",
+            "actor": "${{ github.actor }}",
+            "timestamp": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+          }
+          EOF
+
+          echo "Deployment info:"
+          cat /tmp/lambda-deploy-info.json
+
+      - name: Upload deployment info
+        uses: actions/upload-artifact@v4
+        with:
+          name: lambda-deploy-info-${{ inputs.function_name }}-${{ github.sha }}
+          path: /tmp/lambda-deploy-info.json
+          retention-days: 90
+
+      - name: Deployment Summary
+        if: always()
+        run: |
+          echo ""
+          echo "=========================================="
+          echo "✨ Deployment Summary"
+          echo "=========================================="
+          echo "Function: ${{ inputs.function_name }}"
+          echo "Runtime: ${{ inputs.runtime }}"
+          echo "Version: ${{ steps.update-function.outputs.version }}"
+          echo "Package Size: $(echo "scale=2; ${{ steps.create-package.outputs.zip_size }} / 1024 / 1024" | bc)MB"
+          echo "Region: ${{ inputs.aws_region }}"
+          echo "Commit: ${{ github.sha }}"
+          echo "Timestamp: $(date -u +"%Y-%m-%d %H:%M:%S UTC")"
+          echo "=========================================="

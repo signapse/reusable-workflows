@@ -1,0 +1,18 @@
+# IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Examples (kept locally but not in git)
+examples/
+
+# Temporary files
+*.tmp
+*.bak
+.*.swp

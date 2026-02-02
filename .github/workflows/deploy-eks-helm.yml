@@ -1,0 +1,422 @@
+name: Deploy to EKS with Helm
+
+on:
+  workflow_call:
+    inputs:
+      # AWS Configuration
+      aws_region:
+        description: 'AWS region where EKS cluster is located'
+        required: true
+        type: string
+
+      iam_role_arn:
+        description: 'IAM role ARN for AWS authentication via OIDC'
+        required: true
+        type: string
+
+      # EKS Configuration
+      cluster_name:
+        description: 'EKS cluster name'
+        required: true
+        type: string
+
+      namespace:
+        description: 'Kubernetes namespace to deploy to'
+        required: false
+        type: string
+        default: 'default'
+
+      create_namespace:
+        description: 'Create namespace if it does not exist'
+        required: false
+        type: boolean
+        default: true
+
+      # Helm Configuration
+      release_name:
+        description: 'Helm release name'
+        required: true
+        type: string
+
+      chart_path:
+        description: 'Path to Helm chart (local path or chart reference, e.g., ./helm/chart or bitnami/nginx)'
+        required: true
+        type: string
+
+      chart_version:
+        description: 'Helm chart version (optional, for remote charts)'
+        required: false
+        type: string
+        default: ''
+
+      values_file:
+        description: 'Path to Helm values file (e.g., ./helm/values-dev.yaml)'
+        required: false
+        type: string
+        default: ''
+
+      values_inline:
+        description: 'Inline Helm values as YAML (will be merged with values_file)'
+        required: false
+        type: string
+        default: ''
+
+      set_values:
+        description: 'Helm --set values (one per line, format: key=value)'
+        required: false
+        type: string
+        default: ''
+
+      # Docker Image Override
+      image_uri:
+        description: 'Docker image URI to override in values (optional, e.g., 123456789.dkr.ecr.us-east-1.amazonaws.com/my-app:v1.0.0)'
+        required: false
+        type: string
+        default: ''
+
+      image_tag:
+        description: 'Image tag to override (optional, used with image_uri or separately)'
+        required: false
+        type: string
+        default: ''
+
+      # Deployment Options
+      atomic:
+        description: 'If set, upgrade process rolls back changes made in case of failed upgrade (--atomic)'
+        required: false
+        type: boolean
+        default: true
+
+      wait:
+        description: 'Wait for all Pods to be ready before marking release as successful'
+        required: false
+        type: boolean
+        default: true
+
+      timeout:
+        description: 'Time to wait for Kubernetes operations (e.g., 5m, 10m)'
+        required: false
+        type: string
+        default: '10m'
+
+      force:
+        description: 'Force resource updates through a replacement strategy'
+        required: false
+        type: boolean
+        default: false
+
+      dry_run:
+        description: 'Perform a dry-run (simulate deployment without applying)'
+        required: false
+        type: boolean
+        default: false
+
+      # Helm Repository (for remote charts)
+      helm_repo_name:
+        description: 'Helm repository name (required for remote charts)'
+        required: false
+        type: string
+        default: ''
+
+      helm_repo_url:
+        description: 'Helm repository URL (required for remote charts)'
+        required: false
+        type: string
+        default: ''
+
+      # Additional Options
+      post_deploy_command:
+        description: 'Custom kubectl/helm command to run after deployment (e.g., kubectl get pods -n namespace)'
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy-helm:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ inputs.iam_role_arn }}
+          role-session-name: GitHub_to_AWS_via_FederatedOIDC
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: 'latest'
+
+      - name: Configure kubectl for EKS
+        run: |
+          echo "=========================================="
+          echo "🔧 Configuring kubectl for EKS"
+          echo "=========================================="
+          echo "Cluster: ${{ inputs.cluster_name }}"
+          echo "Region: ${{ inputs.aws_region }}"
+          echo "=========================================="
+
+          aws eks update-kubeconfig \
+            --name "${{ inputs.cluster_name }}" \
+            --region "${{ inputs.aws_region }}"
+
+          echo "✅ kubectl configured"
+
+          # Verify connection
+          echo ""
+          echo "📋 Cluster Info:"
+          kubectl cluster-info
+          echo ""
+
+      - name: Create namespace
+        if: inputs.create_namespace
+        run: |
+          echo "🔧 Ensuring namespace exists: ${{ inputs.namespace }}"
+          kubectl create namespace ${{ inputs.namespace }} --dry-run=client -o yaml | kubectl apply -f -
+          echo "✅ Namespace ready"
+
+      - name: Add Helm repository
+        if: inputs.helm_repo_name != '' && inputs.helm_repo_url != ''
+        run: |
+          echo "📦 Adding Helm repository"
+          helm repo add ${{ inputs.helm_repo_name }} ${{ inputs.helm_repo_url }}
+          helm repo update
+          echo "✅ Helm repository added and updated"
+
+      - name: Prepare Helm values
+        id: prepare-values
+        run: |
+          echo "🔧 Preparing Helm values"
+
+          # Create temporary values file for inline values
+          if [ -n "${{ inputs.values_inline }}" ]; then
+            echo "Creating inline values file..."
+            cat <<'EOF' > /tmp/values-inline.yaml
+          ${{ inputs.values_inline }}
+          EOF
+            echo "inline_values_file=/tmp/values-inline.yaml" >> $GITHUB_OUTPUT
+          else
+            echo "inline_values_file=" >> $GITHUB_OUTPUT
+          fi
+
+          # Build --set arguments
+          SET_ARGS=""
+
+          # Add image URI if provided
+          if [ -n "${{ inputs.image_uri }}" ]; then
+            # Parse repository and tag from full URI
+            IMAGE_REPO=$(echo "${{ inputs.image_uri }}" | cut -d: -f1)
+            IMAGE_TAG=$(echo "${{ inputs.image_uri }}" | cut -d: -f2)
+            SET_ARGS="$SET_ARGS --set image.repository=$IMAGE_REPO --set image.tag=$IMAGE_TAG"
+          fi
+
+          # Add image tag if provided separately
+          if [ -n "${{ inputs.image_tag }}" ]; then
+            SET_ARGS="$SET_ARGS --set image.tag=${{ inputs.image_tag }}"
+          fi
+
+          # Add custom --set values
+          if [ -n "${{ inputs.set_values }}" ]; then
+            while IFS= read -r line; do
+              if [ -n "$line" ]; then
+                SET_ARGS="$SET_ARGS --set $line"
+              fi
+            done <<< "${{ inputs.set_values }}"
+          fi
+
+          echo "set_args=$SET_ARGS" >> $GITHUB_OUTPUT
+          echo "✅ Values prepared"
+
+          if [ -n "$SET_ARGS" ]; then
+            echo "Set arguments: $SET_ARGS"
+          fi
+
+      - name: Helm diff (dry-run preview)
+        if: inputs.dry_run == false
+        continue-on-error: true
+        run: |
+          echo "=========================================="
+          echo "📊 Helm Diff Preview"
+          echo "=========================================="
+
+          # Install helm-diff plugin if not present
+          if ! helm plugin list | grep -q diff; then
+            echo "Installing helm-diff plugin..."
+            helm plugin install https://github.com/databus23/helm-diff || true
+          fi
+
+          # Build helm upgrade command for diff
+          HELM_CMD="helm diff upgrade ${{ inputs.release_name }} ${{ inputs.chart_path }}"
+          HELM_CMD="$HELM_CMD --namespace ${{ inputs.namespace }}"
+          HELM_CMD="$HELM_CMD --allow-unreleased"
+
+          # Add values file
+          if [ -n "${{ inputs.values_file }}" ]; then
+            HELM_CMD="$HELM_CMD --values ${{ inputs.values_file }}"
+          fi
+
+          # Add inline values
+          if [ -n "${{ steps.prepare-values.outputs.inline_values_file }}" ]; then
+            HELM_CMD="$HELM_CMD --values ${{ steps.prepare-values.outputs.inline_values_file }}"
+          fi
+
+          # Add set arguments
+          if [ -n "${{ steps.prepare-values.outputs.set_args }}" ]; then
+            HELM_CMD="$HELM_CMD ${{ steps.prepare-values.outputs.set_args }}"
+          fi
+
+          # Add chart version if specified
+          if [ -n "${{ inputs.chart_version }}" ]; then
+            HELM_CMD="$HELM_CMD --version ${{ inputs.chart_version }}"
+          fi
+
+          echo "Running: $HELM_CMD"
+          eval $HELM_CMD || echo "⚠️  Diff preview failed (this may be expected for new releases)"
+
+          echo "=========================================="
+
+      - name: Deploy with Helm
+        id: helm-deploy
+        run: |
+          echo "=========================================="
+          echo "🚀 Deploying with Helm"
+          echo "=========================================="
+          echo "Release: ${{ inputs.release_name }}"
+          echo "Chart: ${{ inputs.chart_path }}"
+          echo "Namespace: ${{ inputs.namespace }}"
+          echo "Dry-run: ${{ inputs.dry_run }}"
+          echo "=========================================="
+
+          # Build helm upgrade command
+          HELM_CMD="helm upgrade --install ${{ inputs.release_name }} ${{ inputs.chart_path }}"
+          HELM_CMD="$HELM_CMD --namespace ${{ inputs.namespace }}"
+
+          # Add values file
+          if [ -n "${{ inputs.values_file }}" ]; then
+            HELM_CMD="$HELM_CMD --values ${{ inputs.values_file }}"
+          fi
+
+          # Add inline values
+          if [ -n "${{ steps.prepare-values.outputs.inline_values_file }}" ]; then
+            HELM_CMD="$HELM_CMD --values ${{ steps.prepare-values.outputs.inline_values_file }}"
+          fi
+
+          # Add set arguments
+          if [ -n "${{ steps.prepare-values.outputs.set_args }}" ]; then
+            HELM_CMD="$HELM_CMD ${{ steps.prepare-values.outputs.set_args }}"
+          fi
+
+          # Add chart version if specified
+          if [ -n "${{ inputs.chart_version }}" ]; then
+            HELM_CMD="$HELM_CMD --version ${{ inputs.chart_version }}"
+          fi
+
+          # Add deployment options
+          if [ "${{ inputs.atomic }}" == "true" ]; then
+            HELM_CMD="$HELM_CMD --atomic"
+          fi
+
+          if [ "${{ inputs.wait }}" == "true" ]; then
+            HELM_CMD="$HELM_CMD --wait"
+          fi
+
+          if [ "${{ inputs.force }}" == "true" ]; then
+            HELM_CMD="$HELM_CMD --force"
+          fi
+
+          if [ "${{ inputs.dry_run }}" == "true" ]; then
+            HELM_CMD="$HELM_CMD --dry-run"
+          fi
+
+          HELM_CMD="$HELM_CMD --timeout ${{ inputs.timeout }}"
+
+          # Execute helm command
+          echo ""
+          echo "Executing: $HELM_CMD"
+          echo ""
+          eval $HELM_CMD
+
+          echo ""
+          echo "✅ Helm deployment completed"
+
+      - name: Verify deployment
+        if: inputs.dry_run == false && inputs.wait == true
+        run: |
+          echo "=========================================="
+          echo "🔍 Verifying Deployment"
+          echo "=========================================="
+
+          # Get Helm release status
+          echo "📋 Helm Release Status:"
+          helm status ${{ inputs.release_name }} --namespace ${{ inputs.namespace }}
+
+          echo ""
+          echo "📋 Kubernetes Resources:"
+
+          # Get all resources for this release
+          kubectl get all -n ${{ inputs.namespace }} -l app.kubernetes.io/instance=${{ inputs.release_name }} || \
+          kubectl get all -n ${{ inputs.namespace }} -l app=${{ inputs.release_name }} || \
+          kubectl get all -n ${{ inputs.namespace }}
+
+          echo "=========================================="
+
+      - name: Run post-deployment command
+        if: inputs.post_deploy_command != '' && inputs.dry_run == false
+        run: |
+          echo "=========================================="
+          echo "🔧 Running post-deployment command"
+          echo "=========================================="
+          echo "Command: ${{ inputs.post_deploy_command }}"
+          echo ""
+
+          ${{ inputs.post_deploy_command }}
+
+          echo "✅ Post-deployment command completed"
+
+      - name: Get Pod logs (on failure)
+        if: failure() && inputs.dry_run == false
+        continue-on-error: true
+        run: |
+          echo "=========================================="
+          echo "📋 Fetching Pod logs for debugging"
+          echo "=========================================="
+
+          # Try different label selectors
+          kubectl get pods -n ${{ inputs.namespace }} -l app.kubernetes.io/instance=${{ inputs.release_name }} -o name | while read pod; do
+            echo ""
+            echo "Logs for $pod:"
+            kubectl logs $pod -n ${{ inputs.namespace }} --tail=50 || true
+          done
+
+          kubectl get pods -n ${{ inputs.namespace }} -l app=${{ inputs.release_name }} -o name | while read pod; do
+            echo ""
+            echo "Logs for $pod:"
+            kubectl logs $pod -n ${{ inputs.namespace }} --tail=50 || true
+          done
+
+          echo "=========================================="
+
+      - name: Deployment Summary
+        if: always()
+        run: |
+          echo ""
+          echo "=========================================="
+          echo "✨ Deployment Summary"
+          echo "=========================================="
+          echo "Release Name: ${{ inputs.release_name }}"
+          echo "Chart: ${{ inputs.chart_path }}"
+          echo "Namespace: ${{ inputs.namespace }}"
+          echo "Cluster: ${{ inputs.cluster_name }}"
+          echo "Region: ${{ inputs.aws_region }}"
+          echo "Image URI: ${{ inputs.image_uri }}"
+          echo "Dry-run: ${{ inputs.dry_run }}"
+          echo "Timestamp: $(date -u +"%Y-%m-%d %H:%M:%S UTC")"
+          echo "=========================================="
