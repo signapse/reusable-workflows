@@ -12,6 +12,7 @@ This repository provides a shared foundation of reusable workflows that individu
 .github/workflows/
 ├── build-and-push-ecr.yml          # Build Docker images and push to ECR
 ├── deploy-docker-image.yml         # Deploy Docker images to AWS (Lambda/ECS/EKS)
+├── deploy-eks-helm.yml             # Deploy to EKS using Helm charts
 └── super-lint.yml                  # Code linting with Super-Linter
 
 examples/
@@ -20,6 +21,9 @@ examples/
 ├── video-translation-platform-deployment.yml      # Video Translation release workflow
 ├── video-translation-platform-deploy-prod.yml     # Video Translation production deployment
 ├── text2gloss-deployment.yml                      # Text2Gloss Lambda deployment
+├── dev-portal-eks-helm-deployment.yml             # Dev Portal EKS Helm deployment example
+├── simple-eks-helm-inline-values.yml              # EKS Helm with inline values example
+├── remote-helm-chart-deployment.yml               # Remote Helm chart deployment example
 ├── deploy-dev.yml                                 # Generic dev deployment example
 └── release.yml                                    # Generic release example
 ```
@@ -120,7 +124,152 @@ jobs:
       contents: read
 ```
 
-### 3. Super Linter (`super-lint.yml`)
+### 3. Deploy to EKS with Helm (`deploy-eks-helm.yml`)
+
+Advanced EKS deployment workflow using Helm charts for Kubernetes application management.
+
+**Purpose**: Deploy applications to Amazon EKS using Helm charts with full configuration flexibility
+
+**Key Features**:
+- 🎯 Helm 3 support with upgrade/install functionality
+- 🔧 Flexible values configuration (files, inline, or --set parameters)
+- 🐳 Automatic image URI override support
+- 📊 Helm diff preview before deployment
+- ⚡ Atomic rollbacks on failure
+- 🔍 Automatic deployment verification
+- 📦 Support for both local and remote Helm charts
+
+**Inputs**:
+
+*AWS Configuration:*
+- `aws_region` (required): AWS region where EKS cluster is located
+- `iam_role_arn` (required): IAM role ARN for OIDC authentication
+
+*EKS Configuration:*
+- `cluster_name` (required): EKS cluster name
+- `namespace` (optional): Kubernetes namespace (default: `default`)
+- `create_namespace` (optional): Create namespace if missing (default: `true`)
+
+*Helm Configuration:*
+- `release_name` (required): Helm release name
+- `chart_path` (required): Path to Helm chart (local path or chart reference)
+- `chart_version` (optional): Helm chart version (for remote charts)
+- `values_file` (optional): Path to Helm values file
+- `values_inline` (optional): Inline Helm values as YAML
+- `set_values` (optional): Helm --set values (one per line)
+
+*Docker Image Override:*
+- `image_uri` (optional): Full Docker image URI to override in values
+- `image_tag` (optional): Image tag to override
+
+*Deployment Options:*
+- `atomic` (optional): Rollback on failure (default: `true`)
+- `wait` (optional): Wait for Pods to be ready (default: `true`)
+- `timeout` (optional): Timeout for operations (default: `10m`)
+- `force` (optional): Force resource updates (default: `false`)
+- `dry_run` (optional): Simulate deployment (default: `false`)
+
+*Helm Repository (for remote charts):*
+- `helm_repo_name` (optional): Helm repository name
+- `helm_repo_url` (optional): Helm repository URL
+
+*Additional:*
+- `post_deploy_command` (optional): Custom kubectl/helm command after deployment
+
+**Usage Example (Local Chart with Values File)**:
+```yaml
+jobs:
+  deploy-dev:
+    uses: signapse/reusable-workflows/.github/workflows/deploy-eks-helm.yml@main
+    with:
+      # AWS Configuration
+      aws_region: "eu-west-2"
+      iam_role_arn: "arn:aws:iam::887333319954:role/github-access"
+
+      # EKS Configuration
+      cluster_name: "dev-cluster"
+      namespace: "dev-portal"
+      create_namespace: true
+
+      # Helm Configuration
+      release_name: "dev-portal"
+      chart_path: "./helm/dev-portal"
+      values_file: "./helm/values-dev.yaml"
+
+      # Image Override
+      image_uri: "827204657141.dkr.ecr.eu-west-2.amazonaws.com/dev-portal:v1.0.0"
+
+      # Deployment Options
+      atomic: true
+      wait: true
+      timeout: "10m"
+    permissions:
+      id-token: write
+      contents: read
+```
+
+**Usage Example (Inline Values)**:
+```yaml
+jobs:
+  deploy:
+    uses: signapse/reusable-workflows/.github/workflows/deploy-eks-helm.yml@main
+    with:
+      aws_region: "eu-west-2"
+      iam_role_arn: "arn:aws:iam::887333319954:role/github-access"
+      cluster_name: "dev-cluster"
+      namespace: "app"
+      release_name: "my-app"
+      chart_path: "./helm/chart"
+
+      # Inline YAML values
+      values_inline: |
+        replicaCount: 2
+        image:
+          repository: my-repo
+          tag: v1.0.0
+        service:
+          type: ClusterIP
+          port: 80
+
+      # Additional overrides with --set
+      set_values: |
+        autoscaling.enabled=true
+        autoscaling.minReplicas=2
+    permissions:
+      id-token: write
+      contents: read
+```
+
+**Usage Example (Remote Chart from Helm Repository)**:
+```yaml
+jobs:
+  deploy-nginx:
+    uses: signapse/reusable-workflows/.github/workflows/deploy-eks-helm.yml@main
+    with:
+      aws_region: "eu-west-2"
+      iam_role_arn: "arn:aws:iam::887333319954:role/github-access"
+      cluster_name: "prod-cluster"
+      namespace: "nginx"
+
+      # Remote chart configuration
+      release_name: "nginx-ingress"
+      chart_path: "bitnami/nginx"
+      chart_version: "15.0.0"
+
+      # Helm repository
+      helm_repo_name: "bitnami"
+      helm_repo_url: "https://charts.bitnami.com/bitnami"
+
+      # Configuration
+      set_values: |
+        service.type=LoadBalancer
+        replicaCount=3
+    permissions:
+      id-token: write
+      contents: read
+```
+
+### 4. Super Linter (`super-lint.yml`)
 
 Code quality and linting workflow using GitHub Super-Linter.
 
@@ -338,6 +487,83 @@ jobs:
           # ECS deployment logic here
 ```
 
+### Pattern 3: Build and Deploy to EKS with Helm
+
+Complete workflow for building Docker images and deploying to EKS using Helm charts:
+
+```yaml
+name: Build and Deploy to EKS
+
+on:
+  push:
+    branches: [main]
+  release:
+    types: [published]
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  # Build Docker image
+  build:
+    uses: signapse/reusable-workflows/.github/workflows/build-and-push-ecr.yml@main
+    with:
+      ecr_repository_uri: "827204657141.dkr.ecr.eu-west-2.amazonaws.com/my-app"
+      aws_region: "eu-west-2"
+      iam_role_arn: "arn:aws:iam::827204657141:role/github-actions-connect"
+      image_tag: ${{ github.event_name == 'release' && github.event.release.tag_name || github.sha }}
+      push_latest: false
+    permissions:
+      id-token: write
+      contents: read
+
+  # Deploy to Development (automatic on push)
+  deploy-dev:
+    if: github.event_name == 'push'
+    needs: build
+    uses: signapse/reusable-workflows/.github/workflows/deploy-eks-helm.yml@main
+    with:
+      aws_region: "eu-west-2"
+      iam_role_arn: "arn:aws:iam::887333319954:role/github-access"
+      cluster_name: "dev-cluster"
+      namespace: "my-app"
+      release_name: "my-app"
+      chart_path: "./helm/my-app"
+      values_file: "./helm/values-dev.yaml"
+      image_uri: "827204657141.dkr.ecr.eu-west-2.amazonaws.com/my-app:${{ github.sha }}"
+      atomic: true
+      wait: true
+    permissions:
+      id-token: write
+      contents: read
+
+  # Deploy to Production (only on release)
+  deploy-prod:
+    if: github.event_name == 'release'
+    needs: build
+    environment: production  # Requires manual approval
+    uses: signapse/reusable-workflows/.github/workflows/deploy-eks-helm.yml@main
+    with:
+      aws_region: "eu-west-2"
+      iam_role_arn: "arn:aws:iam::430916267664:role/github-access"
+      cluster_name: "prod-cluster"
+      namespace: "my-app"
+      release_name: "my-app"
+      chart_path: "./helm/my-app"
+      values_file: "./helm/values-prod.yaml"
+      image_uri: "827204657141.dkr.ecr.eu-west-2.amazonaws.com/my-app:${{ github.event.release.tag_name }}"
+      atomic: true
+      wait: true
+      timeout: "15m"
+      set_values: |
+        replicaCount=3
+        autoscaling.minReplicas=3
+    permissions:
+      id-token: write
+      contents: read
+```
+
 ## AWS Infrastructure Requirements
 
 ### Account Structure
@@ -488,6 +714,9 @@ See the `examples/` directory for complete working examples:
 - **Hub Platform**: Multi-environment ECS deployment with automatic dev deployment
 - **Video Translation Platform**: Multi-environment ECS deployment
 - **Text2Gloss**: Lambda deployment with dev/prod stages
+- **Dev Portal EKS Helm**: Complete build and Helm deployment to EKS with multiple environments
+- **Simple EKS Helm**: Inline values example for EKS Helm deployments
+- **Remote Helm Chart**: Deploying charts from remote repositories (Bitnami, Jetstack, etc.)
 - **Generic Examples**: Reference implementations for common patterns
 
 ## Migration Guide
@@ -567,14 +796,16 @@ See the `examples/` directory for complete working examples:
 
 Potential additions to the reusable workflow framework:
 
+- [x] ~~Helm-based EKS deployment workflow~~ ✅ **Completed** (`deploy-eks-helm.yml`)
 - [ ] Test reporting workflow (JUnit XML, coverage reports)
 - [ ] Security scanning integration (Trivy, Snyk, etc.)
 - [ ] Slack/Teams notification workflow
 - [ ] Database migration workflow
 - [ ] Terraform/IaC deployment workflow
 - [ ] Multi-region deployment workflow
-- [ ] Blue/green deployment support
-- [ ] Rollback workflow
+- [ ] Blue/green deployment support for EKS
+- [ ] Canary deployment support for EKS
+- [ ] Automated rollback workflow
 
 ## Contributing
 
