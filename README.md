@@ -13,6 +13,7 @@ This repository provides a shared foundation of reusable workflows that individu
 ├── build-and-push-ecr.yml          # Build Docker images and push to ECR
 ├── deploy-docker-image.yml         # Deploy Docker images to AWS (Lambda/ECS/EKS)
 ├── deploy-eks-helm.yml             # Deploy to EKS using Helm charts
+├── build-and-deploy-lambda.yml     # Build and deploy Lambda functions
 └── super-lint.yml                  # Code linting with Super-Linter
 
 examples/
@@ -24,6 +25,10 @@ examples/
 ├── dev-portal-eks-helm-deployment.yml             # Dev Portal EKS Helm deployment example
 ├── simple-eks-helm-inline-values.yml              # EKS Helm with inline values example
 ├── remote-helm-chart-deployment.yml               # Remote Helm chart deployment example
+├── lambda-nodejs-deployment.yml                   # Node.js Lambda deployment example
+├── lambda-python-deployment.yml                   # Python Lambda deployment example
+├── lambda-simple-deployment.yml                   # Simple Lambda (no build) example
+├── lambda-with-layers.yml                         # Lambda with layers example
 ├── deploy-dev.yml                                 # Generic dev deployment example
 └── release.yml                                    # Generic release example
 ```
@@ -269,7 +274,167 @@ jobs:
       contents: read
 ```
 
-### 4. Super Linter (`super-lint.yml`)
+### 4. Build and Deploy Lambda (`build-and-deploy-lambda.yml`)
+
+Comprehensive Lambda deployment workflow that builds, packages, and deploys Lambda functions with S3 backup and versioning.
+
+**Purpose**: Automate Lambda function deployments across different runtimes with consistent packaging and deployment strategies
+
+**Key Features**:
+- 📦 Automatic zip package creation
+- ☁️ S3 backup for audit trail and packages >50MB
+- 🔄 Version publishing and alias management
+- 🎯 Multi-runtime support (Node.js, Python, Java, Go, etc.)
+- ⚙️ Configurable build commands for any build process
+- 🚀 Direct upload (<50MB) or S3 deployment (>50MB)
+- 🔧 Environment variables and configuration updates
+- 📊 Layer support for shared dependencies
+
+**Required Inputs**:
+- `aws_region` (required): AWS region
+- `iam_role_arn` (required): IAM role ARN for OIDC authentication
+- `function_name` (required): Lambda function name
+- `runtime` (required): Lambda runtime (nodejs18.x, nodejs20.x, python3.11, python3.12, java17, etc.)
+
+**Common Optional Inputs**:
+- `build_command`: Command to build/install dependencies (e.g., `npm ci --production`, `pip install -r requirements.txt -t .`)
+- `source_dir`: Directory containing function code (default: `.`)
+- `exclude_patterns`: Files to exclude from zip (default: tests, .git, .env, etc.)
+- `include_files`: Specific files to include (default: all files)
+- `s3_bucket`: S3 bucket for deployment packages (required for >50MB)
+- `s3_prefix`: S3 key prefix (default: `lambda-deployments/FUNCTION_NAME/`)
+- `publish_version`: Publish a new version (default: `true`)
+- `update_alias`: Alias to update (e.g., `live`, `production`)
+- `environment_variables`: JSON object of env vars
+- `memory_size`: Memory in MB
+- `timeout`: Timeout in seconds
+- `layers`: Layer ARNs (one per line)
+
+**Outputs**:
+- `version`: Published Lambda version number
+- `zip_size`: Size of deployment package in bytes
+- Artifact: `lambda-deploy-info.json` with deployment metadata
+
+**Usage Example (Python):**
+```yaml
+jobs:
+  deploy:
+    uses: signapse/reusable-workflows/.github/workflows/build-and-deploy-lambda.yml@main
+    with:
+      # AWS Configuration
+      aws_region: "eu-west-2"
+      iam_role_arn: "arn:aws:iam::123456789:role/github-access"
+
+      # Lambda Configuration
+      function_name: "my-python-function"
+      runtime: "python3.12"
+
+      # Build Configuration
+      build_command: "pip install -r requirements.txt -t ."
+
+      # Exclude test files
+      exclude_patterns: |
+        tests/
+        __pycache__/
+        *.pyc
+        .env*
+
+      # S3 Backup
+      s3_bucket: "my-lambda-deployments"
+      s3_prefix: "my-function/dev"
+
+      # Deployment Options
+      publish_version: true
+      update_alias: "live"
+      environment_variables: '{"ENV":"dev","LOG_LEVEL":"DEBUG"}'
+      memory_size: 512
+      timeout: 30
+    permissions:
+      id-token: write
+      contents: read
+```
+
+**Usage Example (Node.js with TypeScript):**
+```yaml
+jobs:
+  deploy:
+    uses: signapse/reusable-workflows/.github/workflows/build-and-deploy-lambda.yml@main
+    with:
+      aws_region: "eu-west-2"
+      iam_role_arn: "arn:aws:iam::123456789:role/github-access"
+      function_name: "my-nodejs-function"
+      runtime: "nodejs20.x"
+
+      # Build TypeScript
+      build_command: |
+        npm ci
+        npm run build
+
+      # Include only built files and production dependencies
+      build_command: "npm ci --production"
+      include_files: "dist/ node_modules/ package.json"
+
+      # Exclude source files
+      exclude_patterns: |
+        src/
+        *.ts
+        tsconfig.json
+
+      s3_bucket: "my-lambda-deployments"
+      publish_version: true
+      update_alias: "production"
+    permissions:
+      id-token: write
+      contents: read
+```
+
+**Usage Example (Simple - No Build):**
+```yaml
+jobs:
+  deploy:
+    uses: signapse/reusable-workflows/.github/workflows/build-and-deploy-lambda.yml@main
+    with:
+      aws_region: "eu-west-2"
+      iam_role_arn: "arn:aws:iam::123456789:role/github-access"
+      function_name: "simple-function"
+      runtime: "python3.12"
+      # No build_command needed
+      s3_bucket: "my-lambda-deployments"
+      publish_version: true
+    permissions:
+      id-token: write
+      contents: read
+```
+
+**Usage Example (With Layers):**
+```yaml
+jobs:
+  deploy:
+    uses: signapse/reusable-workflows/.github/workflows/build-and-deploy-lambda.yml@main
+    with:
+      aws_region: "eu-west-2"
+      iam_role_arn: "arn:aws:iam::123456789:role/github-access"
+      function_name: "my-function"
+      runtime: "python3.12"
+
+      # Only package app code
+      source_dir: "src"
+
+      # Dependencies in layers
+      layers: |
+        arn:aws:lambda:eu-west-2:123456789:layer:dependencies:1
+        arn:aws:lambda:eu-west-2:123456789:layer:shared-utils:2
+
+      s3_bucket: "my-lambda-deployments"
+      publish_version: true
+    permissions:
+      id-token: write
+      contents: read
+```
+
+**See also:** [Lambda Deployment Guide](./docs/LAMBDA-DEPLOYMENT-GUIDE.md) for detailed documentation, runtime-specific examples, and best practices.
+
+### 5. Super Linter (`super-lint.yml`)
 
 Code quality and linting workflow using GitHub Super-Linter.
 
@@ -711,13 +876,22 @@ All build workflows upload a `deploy_info-{tag}` artifact containing deployment 
 
 See the `examples/` directory for complete working examples:
 
+**ECS/EKS Deployments:**
 - **Hub Platform**: Multi-environment ECS deployment with automatic dev deployment
 - **Video Translation Platform**: Multi-environment ECS deployment
-- **Text2Gloss**: Lambda deployment with dev/prod stages
 - **Dev Portal EKS Helm**: Complete build and Helm deployment to EKS with multiple environments
 - **Simple EKS Helm**: Inline values example for EKS Helm deployments
 - **Remote Helm Chart**: Deploying charts from remote repositories (Bitnami, Jetstack, etc.)
-- **Generic Examples**: Reference implementations for common patterns
+
+**Lambda Deployments:**
+- **Text2Gloss**: Lambda deployment with dev/prod stages
+- **Node.js Lambda**: TypeScript build and deployment
+- **Python Lambda**: Python dependencies and deployment
+- **Simple Lambda**: No-build deployment for simple scripts
+- **Lambda with Layers**: Using shared layers for dependencies
+
+**Generic Examples:**
+- Reference implementations for common patterns
 
 ## Migration Guide
 
@@ -797,6 +971,7 @@ See the `examples/` directory for complete working examples:
 Potential additions to the reusable workflow framework:
 
 - [x] ~~Helm-based EKS deployment workflow~~ ✅ **Completed** (`deploy-eks-helm.yml`)
+- [x] ~~Lambda build and deployment workflow~~ ✅ **Completed** (`build-and-deploy-lambda.yml`)
 - [ ] Test reporting workflow (JUnit XML, coverage reports)
 - [ ] Security scanning integration (Trivy, Snyk, etc.)
 - [ ] Slack/Teams notification workflow
@@ -804,8 +979,9 @@ Potential additions to the reusable workflow framework:
 - [ ] Terraform/IaC deployment workflow
 - [ ] Multi-region deployment workflow
 - [ ] Blue/green deployment support for EKS
-- [ ] Canary deployment support for EKS
+- [ ] Canary deployment support for EKS and Lambda
 - [ ] Automated rollback workflow
+- [ ] Lambda layer build and publish workflow
 
 ## Contributing
 
