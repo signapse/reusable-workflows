@@ -1,17 +1,72 @@
 name: CI
 
 on:
-  push:
-  pull_request:
+  workflow_call:
+    inputs:
+      node-version:
+        description: 'Node.js version to use'
+        required: false
+        type: string
+        default: '18'
+
+      package-manager:
+        description: 'Package manager (npm, yarn, pnpm)'
+        required: false
+        type: string
+        default: 'npm'
+
+      run-lint:
+        description: 'Run Super-Linter'
+        required: false
+        type: boolean
+        default: true
+
+      run-tests:
+        description: 'Run unit tests'
+        required: false
+        type: boolean
+        default: true
+
+      run-build:
+        description: 'Run build step'
+        required: false
+        type: boolean
+        default: true
+
+      build-command:
+        description: 'Build command to run'
+        required: false
+        type: string
+        default: 'npm run build'
+
+      lint-command:
+        description: 'Lint command to run'
+        required: false
+        type: string
+        default: 'npm run lint'
+
+      test-command:
+        description: 'Test command to run'
+        required: false
+        type: string
+        default: 'npm test'
 
 jobs:
   lint:
+    if: ${{ inputs.run-lint }}
     uses: signapse/reusable-workflows/.github/workflows/super-lint.yml@main
     with:
       run-lint: true
 
-  unit-tests:
-    uses: signapse/reusable-workflows/.github/workflows/unit-tests.yml@main
+  frontend-ci:
+    if: ${{ inputs.run-tests || inputs.run-build }}
+    uses: signapse/reusable-workflows/.github/workflows/frontend-ci.yml@main
     with:
-      python-version: '3.12'
-      node-version: '16'
+      node-version: ${{ inputs.node-version }}
+      package-manager: ${{ inputs.package-manager }}
+      run-lint: false
+      run-tests: ${{ inputs.run-tests }}
+      run-build: ${{ inputs.run-build }}
+      build-command: ${{ inputs.build-command }}
+      lint-command: ${{ inputs.lint-command }}
+      test-command: ${{ inputs.test-command }}
