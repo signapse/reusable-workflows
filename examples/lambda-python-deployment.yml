@@ -1,0 +1,105 @@
+name: Deploy Python Lambda
+
+# Example: Deploy a Python Lambda function on release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy-dev:
+    uses: signapse/reusable-workflows/.github/workflows/build-and-deploy-lambda.yml@main
+    with:
+      # AWS Configuration
+      aws_region: "eu-west-2"
+      iam_role_arn: "arn:aws:iam::887333319954:role/github-access"
+
+      # Lambda Configuration
+      function_name: "my-python-function-dev"
+      runtime: "python3.12"
+
+      # Build Configuration
+      # Install dependencies into the current directory (required for Lambda)
+      build_command: |
+        pip install -r requirements.txt -t .
+        pip install -r requirements-dev.txt -t . || true
+
+      # Python functions typically include everything in source dir
+      source_dir: "."
+
+      # Exclude test files and dev dependencies
+      exclude_patterns: |
+        .git*
+        .github/
+        tests/
+        __pycache__/
+        *.pyc
+        *.pyo
+        *.pyd
+        .pytest_cache/
+        .coverage
+        .env*
+        venv/
+        .venv/
+        *.dist-info/
+        *.egg-info/
+
+      # S3 Configuration
+      s3_bucket: "my-lambda-deployments"
+      s3_prefix: "python-function/dev"
+
+      # Deployment Options
+      publish_version: true
+      update_alias: "dev"
+
+      # Lambda Configuration
+      environment_variables: '{"ENVIRONMENT":"development","LOG_LEVEL":"DEBUG"}'
+      memory_size: 512
+      timeout: 30
+
+    permissions:
+      id-token: write
+      contents: read
+
+  deploy-prod:
+    needs: deploy-dev
+    environment: production
+    uses: signapse/reusable-workflows/.github/workflows/build-and-deploy-lambda.yml@main
+    with:
+      aws_region: "eu-west-2"
+      iam_role_arn: "arn:aws:iam::430916267664:role/github-access"
+
+      function_name: "my-python-function-prod"
+      runtime: "python3.12"
+
+      build_command: |
+        pip install -r requirements.txt -t .
+
+      source_dir: "."
+
+      exclude_patterns: |
+        .git*
+        .github/
+        tests/
+        __pycache__/
+        *.pyc
+        .env*
+        venv/
+
+      s3_bucket: "my-lambda-deployments-prod"
+      s3_prefix: "python-function/prod"
+
+      publish_version: true
+      update_alias: "production"
+
+      environment_variables: '{"ENVIRONMENT":"production","LOG_LEVEL":"INFO"}'
+      memory_size: 1024
+      timeout: 60
+
+    permissions:
+      id-token: write
+      contents: read

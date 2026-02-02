@@ -1,0 +1,103 @@
+name: Frontend CI
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        description: 'Node.js version to use'
+        required: false
+        type: string
+        default: '18'
+
+      package-manager:
+        description: 'Package manager (npm, yarn, pnpm)'
+        required: false
+        type: string
+        default: 'npm'
+
+      run-build:
+        description: 'Run build step'
+        required: false
+        type: boolean
+        default: true
+
+      run-lint:
+        description: 'Run lint step'
+        required: false
+        type: boolean
+        default: true
+
+      run-tests:
+        description: 'Run test step'
+        required: false
+        type: boolean
+        default: true
+
+      build-command:
+        description: 'Build command to run'
+        required: false
+        type: string
+        default: 'npm run build'
+
+      lint-command:
+        description: 'Lint command to run'
+        required: false
+        type: string
+        default: 'npm run lint'
+
+      test-command:
+        description: 'Test command to run'
+        required: false
+        type: string
+        default: 'npm test'
+
+jobs:
+  frontend-ci:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: ${{ inputs.package-manager }}
+
+      - name: Install dependencies (npm)
+        if: inputs.package-manager == 'npm'
+        run: npm ci
+
+      - name: Install dependencies (yarn)
+        if: inputs.package-manager == 'yarn'
+        run: yarn install --frozen-lockfile
+
+      - name: Install dependencies (pnpm)
+        if: inputs.package-manager == 'pnpm'
+        run: |
+          npm install -g pnpm
+          pnpm install --frozen-lockfile
+
+      - name: Run lint
+        if: inputs.run-lint
+        run: ${{ inputs.lint-command }}
+
+      - name: Run tests
+        if: inputs.run-tests
+        run: ${{ inputs.test-command }}
+
+      - name: Run build
+        if: inputs.run-build
+        run: ${{ inputs.build-command }}
+
+      - name: CI Summary
+        if: always()
+        run: |
+          echo "## Frontend CI Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Node Version**: ${{ inputs.node-version }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Package Manager**: ${{ inputs.package-manager }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Lint**: ${{ inputs.run-lint && '✅ Ran' || '⏭️ Skipped' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Tests**: ${{ inputs.run-tests && '✅ Ran' || '⏭️ Skipped' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Build**: ${{ inputs.run-build && '✅ Ran' || '⏭️ Skipped' }}" >> $GITHUB_STEP_SUMMARY

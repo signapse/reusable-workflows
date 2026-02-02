@@ -1,0 +1,24 @@
+# Hub Platform CI Workflow
+#
+# Copy this file to your hub-platform repo at: .github/workflows/ci.yml
+#
+# This runs on every push and pull request to validate code quality
+
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+
+jobs:
+  CI:
+    uses: signapse/reusable-workflows/.github/workflows/ci.yml@main
+    with:
+      node-version: '18'
+      package-manager: 'npm'
+      run-lint: true
+      run-tests: true
+      run-build: true

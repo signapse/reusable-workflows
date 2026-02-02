@@ -1,0 +1,50 @@
+name: Deploy Lambda with Layers
+
+# Example: Deploy Lambda function with shared layers
+# Useful for large dependencies or shared code
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    uses: signapse/reusable-workflows/.github/workflows/build-and-deploy-lambda.yml@main
+    with:
+      # AWS Configuration
+      aws_region: "eu-west-2"
+      iam_role_arn: "arn:aws:iam::887333319954:role/github-access"
+
+      # Lambda Configuration
+      function_name: "my-function-with-layers"
+      runtime: "python3.12"
+
+      # Build only application code (dependencies are in layers)
+      build_command: |
+        echo "Dependencies are in layers, just package app code"
+
+      source_dir: "src"
+
+      # S3 Configuration
+      s3_bucket: "my-lambda-deployments"
+
+      # Deployment Options
+      publish_version: true
+
+      # Lambda Layers (shared dependencies)
+      layers: |
+        arn:aws:lambda:eu-west-2:123456789:layer:my-dependencies:1
+        arn:aws:lambda:eu-west-2:123456789:layer:shared-utils:2
+
+      # Configuration
+      environment_variables: '{"LAYER_VERSION":"v1"}'
+      memory_size: 256
+      timeout: 15
+
+    permissions:
+      id-token: write
+      contents: read

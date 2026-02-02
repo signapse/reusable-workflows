@@ -1,0 +1,67 @@
+name: Deploy Video Translation Platform to Production
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to deploy (e.g., 1.1.54)'
+        required: true
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy-production:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::430916267664:role/github-access
+          aws-region: eu-west-2
+
+      - name: Update ECS Service (Production)
+        run: |
+          # Update task definition with new image
+          TASK_FAMILY="video-translation-platform-production"
+          IMAGE_URI="827204657141.dkr.ecr.eu-west-2.amazonaws.com/video-translation-platform:production-${{ inputs.version }}"
+
+          echo "==========================================="
+          echo "Deploying to Production"
+          echo "==========================================="
+          echo "Task Family: $TASK_FAMILY"
+          echo "Image: $IMAGE_URI"
+          echo "==========================================="
+
+          # Get current task definition
+          TASK_DEF=$(aws ecs describe-task-definition --task-definition $TASK_FAMILY --query 'taskDefinition')
+
+          # Create new task definition with updated image
+          NEW_TASK_DEF=$(echo $TASK_DEF | jq --arg IMAGE "$IMAGE_URI" \
+            '.containerDefinitions[0].image = $IMAGE |
+             del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy)')
+
+          # Register new task definition
+          NEW_REVISION=$(aws ecs register-task-definition --cli-input-json "$NEW_TASK_DEF" --query 'taskDefinition.revision' --output text)
+          echo "Registered new task definition revision: $NEW_REVISION"
+
+          # Update service to use new task definition
+          aws ecs update-service \
+            --cluster fargate-production \
+            --service video-translation-platform-production \
+            --task-definition $TASK_FAMILY \
+            --force-new-deployment
+
+          echo "Service update initiated"
+
+      - name: Wait for ECS deployment to complete
+        run: |
+          echo "Waiting for deployment to stabilize..."
+          aws ecs wait services-stable \
+            --cluster fargate-production \
+            --services video-translation-platform-production
+
+          echo "✅ Production deployment completed successfully!"

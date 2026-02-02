@@ -1,0 +1,106 @@
+name: Video Translation Platform Release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  docker-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: Dockerfile
+
+  build-development:
+    needs: docker-lint
+    uses: signapse/reusable-workflows/.github/workflows/build-and-push-ecr.yml@main
+    with:
+      ecr_repository_uri: "827204657141.dkr.ecr.eu-west-2.amazonaws.com/video-translation-platform"
+      aws_region: "eu-west-2"
+      iam_role_arn: "arn:aws:iam::827204657141:role/github-actions-connect"
+      image_tag: development-${{ github.event.release.tag_name }}
+      docker_build_args: |
+        MODE=development
+      push_latest: false
+    permissions:
+      id-token: write
+      contents: read
+
+
+  build-staging:
+    needs: docker-lint
+    uses: signapse/reusable-workflows/.github/workflows/build-and-push-ecr.yml@main
+    with:
+      ecr_repository_uri: "827204657141.dkr.ecr.eu-west-2.amazonaws.com/video-translation-platform"
+      aws_region: "eu-west-2"
+      iam_role_arn: "arn:aws:iam::827204657141:role/github-actions-connect"
+      image_tag: staging-${{ github.event.release.tag_name }}
+      docker_build_args: |
+        MODE=staging
+      push_latest: false
+    permissions:
+      id-token: write
+      contents: read
+
+
+  build-production:
+    needs: docker-lint
+    uses: signapse/reusable-workflows/.github/workflows/build-and-push-ecr.yml@main
+    with:
+      ecr_repository_uri: "827204657141.dkr.ecr.eu-west-2.amazonaws.com/video-translation-platform"
+      aws_region: "eu-west-2"
+      iam_role_arn: "arn:aws:iam::827204657141:role/github-actions-connect"
+      image_tag: production-${{ github.event.release.tag_name }}
+      docker_build_args: |
+        MODE=production
+      push_latest: false
+    permissions:
+      id-token: write
+      contents: read
+
+  # Deploy to ECS Development
+  deploy-dev-ecs:
+    needs: build-development
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::887333319954:role/github-access
+          aws-region: eu-west-2
+
+      - name: Update ECS Service (Development)
+        run: |
+          # Update task definition with new image
+          TASK_FAMILY="video-translation-platform-dev"
+          IMAGE_URI="827204657141.dkr.ecr.eu-west-2.amazonaws.com/video-translation-platform:development-${{ github.event.release.tag_name }}"
+
+          # Get current task definition
+          TASK_DEF=$(aws ecs describe-task-definition --task-definition $TASK_FAMILY --query 'taskDefinition')
+
+          # Create new task definition with updated image
+          NEW_TASK_DEF=$(echo $TASK_DEF | jq --arg IMAGE "$IMAGE_URI" \
+            '.containerDefinitions[0].image = $IMAGE |
+             del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy)')
+
+          # Register new task definition
+          aws ecs register-task-definition --cli-input-json "$NEW_TASK_DEF"
+
+          # Update service to use new task definition
+          aws ecs update-service \
+            --cluster fargate-dev \
+            --service video-translation-platform-dev \
+            --task-definition $TASK_FAMILY \
+            --force-new-deployment
+
+      - name: Wait for ECS deployment to complete
+        run: |
+          aws ecs wait services-stable \
+            --cluster fargate-dev \
+            --services video-translation-platform-dev

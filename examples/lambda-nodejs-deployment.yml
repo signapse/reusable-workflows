@@ -1,0 +1,96 @@
+name: Deploy Node.js Lambda
+
+# Example: Deploy a Node.js Lambda function on release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  # ========================================
+  # Deploy to Development
+  # ========================================
+  deploy-dev:
+    uses: signapse/reusable-workflows/.github/workflows/build-and-deploy-lambda.yml@main
+    with:
+      # AWS Configuration
+      aws_region: "eu-west-2"
+      iam_role_arn: "arn:aws:iam::887333319954:role/github-access"
+
+      # Lambda Configuration
+      function_name: "my-function-dev"
+      runtime: "nodejs20.x"
+
+      # Build Configuration
+      build_command: |
+        npm ci --production
+        npm run build
+
+      # What to include in the zip
+      source_dir: "."
+      include_files: "dist/ node_modules/ package.json"
+
+      # Exclude patterns (optional, defaults are good)
+      exclude_patterns: |
+        .git*
+        .github/
+        tests/
+        src/
+        *.test.js
+        .env*
+
+      # S3 backup (optional but recommended)
+      s3_bucket: "my-lambda-deployments"
+      s3_prefix: "my-function/dev"
+
+      # Deployment options
+      publish_version: true
+      update_alias: "live"
+
+      # Lambda configuration
+      environment_variables: '{"NODE_ENV":"development","LOG_LEVEL":"debug"}'
+      memory_size: 512
+      timeout: 30
+
+    permissions:
+      id-token: write
+      contents: read
+
+  # ========================================
+  # Deploy to Production (with approval)
+  # ========================================
+  deploy-prod:
+    needs: deploy-dev
+    environment: production  # Requires manual approval
+    uses: signapse/reusable-workflows/.github/workflows/build-and-deploy-lambda.yml@main
+    with:
+      aws_region: "eu-west-2"
+      iam_role_arn: "arn:aws:iam::430916267664:role/github-access"
+
+      function_name: "my-function-prod"
+      runtime: "nodejs20.x"
+
+      build_command: |
+        npm ci --production
+        npm run build
+
+      source_dir: "."
+      include_files: "dist/ node_modules/ package.json"
+
+      s3_bucket: "my-lambda-deployments-prod"
+      s3_prefix: "my-function/prod"
+
+      publish_version: true
+      update_alias: "production"
+
+      environment_variables: '{"NODE_ENV":"production","LOG_LEVEL":"info"}'
+      memory_size: 1024
+      timeout: 60
+
+    permissions:
+      id-token: write
+      contents: read

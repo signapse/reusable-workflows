@@ -1,0 +1,58 @@
+name: Deploy Simple Lambda (No Build)
+
+# Example: Deploy a simple Lambda function that doesn't need compilation
+# Perfect for simple Python/Node.js scripts
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      environment:
+        type: choice
+        options: [dev, prod]
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    uses: signapse/reusable-workflows/.github/workflows/build-and-deploy-lambda.yml@main
+    with:
+      # AWS Configuration
+      aws_region: "eu-west-2"
+      iam_role_arn: "${{
+        github.event.inputs.environment == 'prod' &&
+        'arn:aws:iam::430916267664:role/github-access' ||
+        'arn:aws:iam::887333319954:role/github-access'
+      }}"
+
+      # Lambda Configuration
+      function_name: "simple-function-${{ github.event.inputs.environment || 'dev' }}"
+      runtime: "python3.12"
+
+      # No build needed - just package the files
+      # build_command is optional, leave it empty
+
+      # Simple function - include everything
+      source_dir: "."
+
+      # Basic exclusions
+      exclude_patterns: |
+        .git*
+        .github/
+        tests/
+        __pycache__/
+        *.pyc
+        .env*
+
+      # S3 backup (optional)
+      s3_bucket: "my-lambda-deployments"
+
+      # Deployment options
+      publish_version: true
+
+    permissions:
+      id-token: write
+      contents: read
