@@ -1,0 +1,201 @@
+name: Deploy to ECS
+
+on:
+  workflow_call:
+    inputs:
+      # AWS Configuration
+      aws_region:
+        description: 'AWS region'
+        required: true
+        type: string
+
+      iam_role_arn:
+        description: 'IAM role ARN for AWS authentication via OIDC'
+        required: true
+        type: string
+
+      # ECS Configuration
+      cluster_name:
+        description: 'ECS cluster name (e.g., fargate-dev, fargate-production)'
+        required: true
+        type: string
+
+      service_name:
+        description: 'ECS service name'
+        required: true
+        type: string
+
+      task_family:
+        description: 'Task definition family name. Defaults to service_name if not set.'
+        required: false
+        type: string
+        default: ''
+
+      container_name:
+        description: 'Container name to update in the task definition. Defaults to service_name if not set.'
+        required: false
+        type: string
+        default: ''
+
+      # Image
+      image_uri:
+        description: 'Full Docker image URI including tag (e.g., 123456789.dkr.ecr.eu-west-2.amazonaws.com/my-app:v1.0.0)'
+        required: true
+        type: string
+
+      # Options
+      wait_for_completion:
+        description: 'Wait for the deployment to stabilise before completing'
+        required: false
+        type: boolean
+        default: true
+
+      wait_timeout:
+        description: 'Timeout in seconds to wait for stabilisation'
+        required: false
+        type: number
+        default: 300
+
+    outputs:
+      new_task_revision:
+        description: 'The revision number of the newly registered task definition'
+        value: ${{ jobs.deploy.outputs.new_task_revision }}
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    outputs:
+      new_task_revision: ${{ steps.register-task.outputs.revision }}
+
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ inputs.iam_role_arn }}
+          role-session-name: GitHub_to_AWS_via_FederatedOIDC
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Resolve defaults
+        id: resolve
+        run: |
+          TASK_FAMILY="${{ inputs.task_family }}"
+          if [ -z "$TASK_FAMILY" ]; then
+            TASK_FAMILY="${{ inputs.service_name }}"
+          fi
+
+          CONTAINER_NAME="${{ inputs.container_name }}"
+          if [ -z "$CONTAINER_NAME" ]; then
+            CONTAINER_NAME="${{ inputs.service_name }}"
+          fi
+
+          echo "task_family=$TASK_FAMILY" >> $GITHUB_OUTPUT
+          echo "container_name=$CONTAINER_NAME" >> $GITHUB_OUTPUT
+
+      - name: Fetch current task definition
+        id: fetch-task
+        run: |
+          echo "=========================================="
+          echo "📋 Fetching task definition"
+          echo "=========================================="
+          echo "Task family: ${{ steps.resolve.outputs.task_family }}"
+          echo "=========================================="
+
+          aws ecs describe-task-definition \
+            --task-definition "${{ steps.resolve.outputs.task_family }}" \
+            --query 'taskDefinition' \
+            --output json > /tmp/task-definition.json
+
+          echo "Current task definition:"
+          jq '.containerDefinitions[] | {name, image}' /tmp/task-definition.json
+
+      - name: Update image in task definition
+        id: update-task
+        run: |
+          echo "=========================================="
+          echo "🔧 Updating task definition"
+          echo "=========================================="
+          echo "Container: ${{ steps.resolve.outputs.container_name }}"
+          echo "New image: ${{ inputs.image_uri }}"
+          echo "=========================================="
+
+          # Update the image for the target container and strip fields
+          # that are read-only and can't be passed back to register-task-definition
+          jq \
+            --arg container "${{ steps.resolve.outputs.container_name }}" \
+            --arg image "${{ inputs.image_uri }}" \
+            '.containerDefinitions |= map(if .name == $container then .image = $image else . end)
+             | del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy)' \
+            /tmp/task-definition.json > /tmp/task-definition-updated.json
+
+          echo "Updated container definitions:"
+          jq '.containerDefinitions[] | {name, image}' /tmp/task-definition-updated.json
+
+      - name: Register new task definition
+        id: register-task
+        run: |
+          echo "=========================================="
+          echo "📝 Registering new task definition"
+          echo "=========================================="
+
+          REVISION=$(aws ecs register-task-definition \
+            --cli-input-json file:///tmp/task-definition-updated.json \
+            --query 'taskDefinition.revision' \
+            --output text)
+
+          echo "revision=$REVISION" >> $GITHUB_OUTPUT
+          echo "✅ Registered revision: $REVISION"
+
+      - name: Update ECS service
+        run: |
+          echo "=========================================="
+          echo "🚀 Updating ECS service"
+          echo "=========================================="
+          echo "Cluster: ${{ inputs.cluster_name }}"
+          echo "Service: ${{ inputs.service_name }}"
+          echo "Task revision: ${{ steps.register-task.outputs.revision }}"
+          echo "=========================================="
+
+          aws ecs update-service \
+            --cluster "${{ inputs.cluster_name }}" \
+            --service "${{ inputs.service_name }}" \
+            --task-definition "${{ steps.resolve.outputs.task_family }}:${{ steps.register-task.outputs.revision }}" \
+            --force-new-deployment
+
+          echo "✅ Service update initiated"
+
+      - name: Wait for deployment to stabilise
+        if: inputs.wait_for_completion
+        run: |
+          echo "⏳ Waiting for service to stabilise (timeout: ${{ inputs.wait_timeout }}s)..."
+
+          aws ecs wait services-stable \
+            --cluster "${{ inputs.cluster_name }}" \
+            --services "${{ inputs.service_name }}"
+
+          echo "✅ Service is stable"
+
+      - name: Deployment summary
+        if: always()
+        run: |
+          echo ""
+          echo "=========================================="
+          echo "✨ Deployment Summary"
+          echo "=========================================="
+          echo "Cluster:        ${{ inputs.cluster_name }}"
+          echo "Service:        ${{ inputs.service_name }}"
+          echo "Task family:    ${{ steps.resolve.outputs.task_family }}"
+          echo "Task revision:  ${{ steps.register-task.outputs.revision }}"
+          echo "Image:          ${{ inputs.image_uri }}"
+          echo "Region:         ${{ inputs.aws_region }}"
+          echo "=========================================="
+
+          # Print current service state
+          aws ecs describe-services \
+            --cluster "${{ inputs.cluster_name }}" \
+            --services "${{ inputs.service_name }}" \
+            --query 'services[0].{Service:serviceName,Status:status,Running:runningCount,Desired:desiredCount,LastDeployment:deployments[0].status}' \
+            --output table 2>/dev/null || true

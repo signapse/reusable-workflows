@@ -11,7 +11,8 @@ This repository provides a shared foundation of reusable workflows that individu
 ```
 .github/workflows/
 ├── build-and-push-ecr.yml          # Build Docker images and push to ECR
-├── deploy-docker-image.yml         # Deploy Docker images to AWS (Lambda/ECS/EKS)
+├── deploy-docker-image.yml         # Deploy Docker images to AWS (Lambda/ECS/EKS) [legacy]
+├── deploy-ecs.yml                  # Deploy to ECS Fargate (updates task definition)
 ├── deploy-eks-helm.yml             # Deploy to EKS using Helm charts
 ├── build-and-deploy-lambda.yml     # Build and deploy Lambda functions
 └── super-lint.yml                  # Code linting with Super-Linter
@@ -73,7 +74,9 @@ jobs:
       contents: read
 ```
 
-### 2. Deploy Docker Image (`deploy-docker-image.yml`)
+### 2. Deploy Docker Image (`deploy-docker-image.yml`) [Legacy]
+
+> **Note:** The ECS path in this workflow does not update the task definition with the new image -- it only forces a redeployment of the existing one. Use `deploy-ecs.yml` for ECS instead. The Lambda and EKS paths in this workflow are also superseded by `build-and-deploy-lambda.yml` and `deploy-eks-helm.yml` respectively. This workflow is kept for backward compatibility only.
 
 Generic deployment workflow supporting Lambda, ECS, and EKS services.
 
@@ -111,25 +114,61 @@ jobs:
       contents: read
 ```
 
-**Usage Example (ECS)**:
+### 3. Deploy to ECS Fargate (`deploy-ecs.yml`)
+
+Handles the full ECS deployment flow: fetches the current task definition, updates the container image, registers a new revision, and deploys it to the service. Replaces the broken ECS path in `deploy-docker-image.yml`.
+
+**Purpose**: Correctly update and deploy ECS Fargate services with a new image
+
+**Inputs**:
+- `aws_region` (required): AWS region
+- `iam_role_arn` (required): IAM role ARN for OIDC authentication
+- `cluster_name` (required): ECS cluster name (e.g., `fargate-dev`)
+- `service_name` (required): ECS service name
+- `image_uri` (required): Full image URI including tag
+- `task_family` (optional): Task definition family. Defaults to `service_name`
+- `container_name` (optional): Container to update in the task definition. Defaults to `service_name`
+- `wait_for_completion` (optional): Wait for stabilisation (default: `true`)
+
+**Outputs**:
+- `new_task_revision`: Revision number of the registered task definition
+
+**Usage Example**:
 ```yaml
 jobs:
-  deploy:
-    uses: signapse/reusable-workflows/.github/workflows/deploy-docker-image.yml@main
+  deploy-dev:
+    uses: signapse/reusable-workflows/.github/workflows/deploy-ecs.yml@main
     with:
-      service_type: ecs
-      image_uri: 827204657141.dkr.ecr.eu-west-2.amazonaws.com/my-app:v1.0.0
-      aws_region: eu-west-2
-      iam_role_arn: arn:aws:iam::887333319954:role/github-access
-      cluster_name: fargate-dev
-      service_name: my-app-dev
-      wait_for_completion: true
+      aws_region: "eu-west-2"
+      iam_role_arn: "arn:aws:iam::887333319954:role/github-access"
+      cluster_name: "fargate-dev"
+      service_name: "my-app-dev"
+      image_uri: "827204657141.dkr.ecr.eu-west-2.amazonaws.com/my-app:development-v1.0.0"
     permissions:
       id-token: write
       contents: read
 ```
 
-### 3. Deploy to EKS with Helm (`deploy-eks-helm.yml`)
+**Usage Example (task family differs from service name)**:
+```yaml
+jobs:
+  deploy-prod:
+    environment: production
+    uses: signapse/reusable-workflows/.github/workflows/deploy-ecs.yml@main
+    with:
+      aws_region: "eu-west-2"
+      iam_role_arn: "arn:aws:iam::430916267664:role/github-access"
+      cluster_name: "fargate-production"
+      service_name: "my-app-production"
+      task_family: "my-app-production"
+      container_name: "my-app"
+      image_uri: "827204657141.dkr.ecr.eu-west-2.amazonaws.com/my-app:production-v1.0.0"
+    permissions:
+      id-token: write
+      contents: read
+```
+
+### 4. Deploy to EKS with Helm (`deploy-eks-helm.yml`)
 
 Advanced EKS deployment workflow using Helm charts for Kubernetes application management.
 
@@ -274,7 +313,7 @@ jobs:
       contents: read
 ```
 
-### 4. Build and Deploy Lambda (`build-and-deploy-lambda.yml`)
+### 5. Build and Deploy Lambda (`build-and-deploy-lambda.yml`)
 
 Comprehensive Lambda deployment workflow that builds, packages, and deploys Lambda functions with S3 backup and versioning.
 
@@ -434,7 +473,7 @@ jobs:
 
 **See also:** [Lambda Deployment Guide](./docs/LAMBDA-DEPLOYMENT-GUIDE.md) for detailed documentation, runtime-specific examples, and best practices.
 
-### 5. Super Linter (`super-lint.yml`)
+### 6. Super Linter (`super-lint.yml`)
 
 Code quality and linting workflow using GitHub Super-Linter.
 
@@ -879,6 +918,7 @@ See the `examples/` directory for complete working examples:
 **ECS/EKS Deployments:**
 - **Hub Platform**: Multi-environment ECS deployment with automatic dev deployment
 - **Video Translation Platform**: Multi-environment ECS deployment
+- **Video Translation API**: Java/Gradle build with ECS Fargate deployment (replaces Octopus Deploy)
 - **Dev Portal EKS Helm**: Complete build and Helm deployment to EKS with multiple environments
 - **Simple EKS Helm**: Inline values example for EKS Helm deployments
 - **Remote Helm Chart**: Deploying charts from remote repositories (Bitnami, Jetstack, etc.)
