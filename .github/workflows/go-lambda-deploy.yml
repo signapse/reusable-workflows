@@ -1,0 +1,138 @@
+name: Deploy Go Lambda (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      go_version:
+        description: 'Go version to use'
+        required: false
+        type: string
+        default: '1.23'
+
+      main_file_path:
+        description: 'Path to the main.go file (e.g., cmd/api/lambda/main.go)'
+        required: true
+        type: string
+
+      output_binary_name:
+        description: 'Name of the output binary'
+        required: false
+        type: string
+        default: 'bootstrap'
+
+      zip_file_name:
+        description: 'Name of the zip file to create'
+        required: true
+        type: string
+
+      lambda_function_name:
+        description: 'Name of the Lambda function to update'
+        required: true
+        type: string
+
+      s3_bucket:
+        description: 'S3 bucket name for Lambda deployment'
+        required: true
+        type: string
+
+      s3_key:
+        description: 'S3 key/path for the Lambda zip file (e.g., hub-platform-api/function.zip)'
+        required: true
+        type: string
+
+      aws_region:
+        description: 'AWS region'
+        required: false
+        type: string
+        default: 'eu-west-2'
+
+      aws_role_arn:
+        description: 'AWS IAM role ARN for OIDC authentication'
+        required: true
+        type: string
+
+      goprivate:
+        description: 'GOPRIVATE environment variable value'
+        required: false
+        type: string
+        default: 'github.com/signapse/*'
+
+      enable_private_repos:
+        description: 'Enable access to private repos using PAT'
+        required: false
+        type: boolean
+        default: false
+
+    secrets:
+      github_pat:
+        description: 'GitHub PAT for accessing private repositories'
+        required: false
+
+permissions:
+  id-token: write   # Required for OIDC authentication
+  contents: read    # Required to checkout code
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ inputs.go_version }}
+
+      - name: Configure access to private repos
+        if: ${{ inputs.enable_private_repos }}
+        run: |
+          git config --global url."https://${{ secrets.github_pat }}@github.com/".insteadOf "https://github.com/"
+        env:
+          GOPRIVATE: ${{ inputs.goprivate }}
+
+      - name: Build Lambda function
+        run: |
+          GOOS=linux GOARCH=amd64 go build -o ${{ inputs.output_binary_name }} ${{ inputs.main_file_path }}
+          zip ${{ inputs.zip_file_name }} ${{ inputs.output_binary_name }}
+          echo "Built and zipped Lambda function: ${{ inputs.zip_file_name }}"
+        env:
+          CGO_ENABLED: 0
+          GOPRIVATE: ${{ inputs.goprivate }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ inputs.aws_role_arn }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Upload to S3
+        run: |
+          aws s3 cp ${{ inputs.zip_file_name }} s3://${{ inputs.s3_bucket }}/${{ inputs.s3_key }}
+          echo "Uploaded to S3: s3://${{ inputs.s3_bucket }}/${{ inputs.s3_key }}"
+
+      - name: Update Lambda function
+        run: |
+          aws lambda update-function-code \
+            --function-name ${{ inputs.lambda_function_name }} \
+            --s3-bucket ${{ inputs.s3_bucket }} \
+            --s3-key ${{ inputs.s3_key }} \
+            --region ${{ inputs.aws_region }}
+          echo "Lambda function updated successfully"
+
+      - name: Wait for Lambda update to complete
+        run: |
+          echo "Waiting for Lambda function update to complete..."
+          aws lambda wait function-updated \
+            --function-name ${{ inputs.lambda_function_name }} \
+            --region ${{ inputs.aws_region }}
+          echo "Lambda function is now active and updated"
+
+      - name: Get Lambda function info
+        run: |
+          aws lambda get-function \
+            --function-name ${{ inputs.lambda_function_name }} \
+            --region ${{ inputs.aws_region }} \
+            --query 'Configuration.[FunctionName,LastModified,CodeSize,Version]' \
+            --output table
