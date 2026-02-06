@@ -111,24 +111,6 @@ jobs:
       contents: read
 ```
 
-**Usage Example (ECS)**:
-```yaml
-jobs:
-  deploy:
-    uses: signapse/reusable-workflows/.github/workflows/deploy-docker-image.yml@main
-    with:
-      service_type: ecs
-      image_uri: 827204657141.dkr.ecr.eu-west-2.amazonaws.com/my-app:v1.0.0
-      aws_region: eu-west-2
-      iam_role_arn: arn:aws:iam::887333319954:role/github-access
-      cluster_name: fargate-dev
-      service_name: my-app-dev
-      wait_for_completion: true
-    permissions:
-      id-token: write
-      contents: read
-```
-
 ### 3. Deploy to EKS with Helm (`deploy-eks-helm.yml`)
 
 Advanced EKS deployment workflow using Helm charts for Kubernetes application management.
