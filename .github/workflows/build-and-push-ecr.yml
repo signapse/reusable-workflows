@@ -47,6 +47,11 @@ on:
         type: boolean
         default: true
 
+    secrets:
+      github_token:
+        description: 'GitHub token passed as --build-arg GITHUB_TOKEN during Docker build'
+        required: false
+
 permissions:
   id-token: write
   contents: read
@@ -72,6 +77,8 @@ jobs:
 
       - name: Build Docker Image
         id: build
+        env:
+          GITHUB_TOKEN_SECRET: ${{ secrets.github_token }}
         run: |
           # Parse build args if provided
           BUILD_ARGS=""
@@ -81,6 +88,11 @@ jobs:
                 BUILD_ARGS="$BUILD_ARGS --build-arg $line"
               fi
             done <<< "${{ inputs.docker_build_args }}"
+          fi
+
+          # Append GITHUB_TOKEN build arg if the secret was provided
+          if [ -n "$GITHUB_TOKEN_SECRET" ]; then
+            BUILD_ARGS="$BUILD_ARGS --build-arg GITHUB_TOKEN=$GITHUB_TOKEN_SECRET"
           fi
 
           echo "Building Docker image with tag: ${{ inputs.image_tag }}"
