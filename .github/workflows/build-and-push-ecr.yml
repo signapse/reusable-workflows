@@ -78,6 +78,7 @@ jobs:
       - name: Build Docker Image
         id: build
         env:
+          DOCKER_BUILDKIT: 0
           GITHUB_TOKEN_SECRET: ${{ secrets.private_modules_token }}
         run: |
           # Parse build args if provided
