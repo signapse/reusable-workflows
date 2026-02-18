@@ -48,8 +48,8 @@ on:
         default: true
 
     secrets:
-      private_modules_token:
-        description: 'Token passed as --build-arg GITHUB_TOKEN during Docker build (used for private Go/npm modules)'
+      github_token:
+        description: 'GitHub token passed as --build-arg GITHUB_TOKEN during Docker build'
         required: false
 
 permissions:
@@ -78,7 +78,7 @@ jobs:
       - name: Build Docker Image
         id: build
         env:
-          GITHUB_TOKEN_SECRET: ${{ secrets.private_modules_token }}
+          GITHUB_TOKEN_SECRET: ${{ secrets.github_token }}
         run: |
           # Parse build args if provided
           BUILD_ARGS=""
