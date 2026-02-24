@@ -1,0 +1,214 @@
+name: Go CI (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      go_version:
+        description: 'Go version to use (leave empty to auto-detect from go.mod)'
+        required: false
+        type: string
+        default: ''
+
+      golangci_lint_version:
+        description: 'golangci-lint version'
+        required: false
+        type: string
+        default: 'latest'
+
+      run_lint:
+        description: 'Run lint and format check'
+        required: false
+        type: boolean
+        default: true
+
+      run_tests:
+        description: 'Run tests with coverage'
+        required: false
+        type: boolean
+        default: true
+
+      run_security_scan:
+        description: 'Run Trivy filesystem scan'
+        required: false
+        type: boolean
+        default: true
+
+      run_docker_build:
+        description: 'Test Docker build (no push)'
+        required: false
+        type: boolean
+        default: false
+
+      run_docker_lint:
+        description: 'Lint Dockerfile'
+        required: false
+        type: boolean
+        default: false
+
+      dockerfile_path:
+        description: 'Path to Dockerfile'
+        required: false
+        type: string
+        default: './Dockerfile'
+
+      docker_context:
+        description: 'Docker build context path'
+        required: false
+        type: string
+        default: '.'
+
+      enable_private_repos:
+        description: 'Enable access to private repos using PAT'
+        required: false
+        type: boolean
+        default: false
+
+      goprivate:
+        description: 'GOPRIVATE environment variable value'
+        required: false
+        type: string
+        default: 'github.com/signapse/*'
+
+    secrets:
+      github_pat:
+        description: 'GitHub PAT for accessing private repositories'
+        required: false
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  lint:
+    if: ${{ inputs.run_lint }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ inputs.go_version || null }}
+          go-version-file: ${{ inputs.go_version == '' && 'go.mod' || '' }}
+          cache: true
+
+      - name: Configure access to private repos
+        if: ${{ inputs.enable_private_repos }}
+        run: |
+          git config --global url."https://${{ secrets.github_pat }}@github.com/".insteadOf "https://github.com/"
+        env:
+          GOPRIVATE: ${{ inputs.goprivate }}
+
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: ${{ inputs.golangci_lint_version }}
+
+      - name: Check formatting
+        run: |
+          unformatted=$(gofmt -s -l .)
+          if [ -n "$unformatted" ]; then
+            echo "The following files are not formatted:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+  test:
+    if: ${{ inputs.run_tests }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ inputs.go_version || null }}
+          go-version-file: ${{ inputs.go_version == '' && 'go.mod' || '' }}
+          cache: true
+
+      - name: Configure access to private repos
+        if: ${{ inputs.enable_private_repos }}
+        run: |
+          git config --global url."https://${{ secrets.github_pat }}@github.com/".insteadOf "https://github.com/"
+        env:
+          GOPRIVATE: ${{ inputs.goprivate }}
+
+      - name: Download dependencies
+        run: |
+          go mod download
+          go mod verify
+        env:
+          GOPRIVATE: ${{ inputs.goprivate }}
+
+      - name: Run tests
+        run: go test ./... -v -race -coverprofile=coverage.out
+        env:
+          GOPRIVATE: ${{ inputs.goprivate }}
+
+      - name: Generate coverage report
+        run: go tool cover -html=coverage.out -o coverage.html
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.html
+          retention-days: 14
+
+  security-scan:
+    if: ${{ inputs.run_security_scan }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Trivy filesystem scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+
+      - name: Upload Trivy scan results
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+  docker-build:
+    if: ${{ inputs.run_docker_build }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure access to private repos
+        if: ${{ inputs.enable_private_repos }}
+        run: |
+          git config --global url."https://${{ secrets.github_pat }}@github.com/".insteadOf "https://github.com/"
+
+      - name: Build Docker image
+        env:
+          DOCKER_BUILDKIT: 0
+          GITHUB_TOKEN_SECRET: ${{ secrets.github_pat }}
+        run: |
+          BUILD_ARGS=""
+          if [ -n "$GITHUB_TOKEN_SECRET" ]; then
+            BUILD_ARGS="--build-arg GITHUB_TOKEN=$GITHUB_TOKEN_SECRET"
+          fi
+
+          docker build $BUILD_ARGS \
+            -f ${{ inputs.dockerfile_path }} \
+            -t ci-build-test:${{ github.sha }} \
+            ${{ inputs.docker_context }}
+
+  docker-lint:
+    if: ${{ inputs.run_docker_lint }}
+    uses: signapse/reusable-workflows/.github/workflows/docker-lint.yml@main
+    with:
+      dockerfile-path: ${{ inputs.dockerfile_path }}
