@@ -105,6 +105,7 @@ jobs:
         uses: golangci/golangci-lint-action@v6
         with:
           version: ${{ inputs.golangci_lint_version }}
+          install-mode: goinstall
 
       - name: Check formatting
         run: |
