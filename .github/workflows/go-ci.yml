@@ -105,6 +105,7 @@ jobs:
         with:
           version: ${{ inputs.golangci_lint_version }}
           install-mode: goinstall
+          args: --timeout=5m
 
       - name: Check formatting
         run: |
