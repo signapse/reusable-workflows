@@ -76,7 +76,6 @@ on:
 
 permissions:
   contents: read
-  security-events: write
 
 jobs:
   lint:
@@ -172,13 +171,9 @@ jobs:
         uses: aquasecurity/trivy-action@master
         with:
           scan-type: 'fs'
-          format: 'sarif'
-          output: 'trivy-results.sarif'
-
-      - name: Upload Trivy scan results
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: 'trivy-results.sarif'
+          format: 'table'
+          severity: 'HIGH,CRITICAL'
+          exit-code: '1'
 
   docker-build:
     if: ${{ inputs.run_docker_build }}
