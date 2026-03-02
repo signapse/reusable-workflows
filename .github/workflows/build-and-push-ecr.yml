@@ -47,6 +47,32 @@ on:
         type: boolean
         default: true
 
+      # Build Engine
+      use_buildx:
+        description: 'Use Docker Buildx with GHA cache (recommended for faster builds)'
+        required: false
+        type: boolean
+        default: false
+
+      # Security Scanning
+      enable_trivy_scan:
+        description: 'Run Trivy vulnerability scan on the built image'
+        required: false
+        type: boolean
+        default: false
+
+      trivy_severity:
+        description: 'Trivy severity levels to report'
+        required: false
+        type: string
+        default: 'HIGH,CRITICAL'
+
+      trivy_exit_code:
+        description: 'Trivy exit code on findings (1 = fail the build, 0 = warn only)'
+        required: false
+        type: string
+        default: '0'
+
     secrets:
       private_modules_token:
         description: 'Token passed as --build-arg GITHUB_TOKEN during Docker build (used for private Go/npm modules)'
@@ -75,7 +101,41 @@ jobs:
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
+      # --- Buildx path (when use_buildx is true) ---
+
+      - name: Set up Docker Buildx
+        if: ${{ inputs.use_buildx }}
+        uses: docker/setup-buildx-action@v3
+
+      - name: Docker metadata
+        if: ${{ inputs.use_buildx }}
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ inputs.ecr_repository_uri }}
+          tags: |
+            type=raw,value=${{ inputs.image_tag }}
+            type=raw,value=latest,enable=${{ inputs.push_latest }}
+
+      - name: Build and push with Buildx
+        if: ${{ inputs.use_buildx }}
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ inputs.docker_context }}
+          file: ${{ inputs.dockerfile_path }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            ${{ inputs.docker_build_args }}
+            ${{ secrets.private_modules_token && format('GITHUB_TOKEN={0}', secrets.private_modules_token) || '' }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # --- Legacy path (when use_buildx is false — preserves existing behavior) ---
+
       - name: Build Docker Image
+        if: ${{ !inputs.use_buildx }}
         id: build
         env:
           DOCKER_BUILDKIT: 0
@@ -106,6 +166,7 @@ jobs:
             ${{ inputs.docker_context }}
 
       - name: Tag Docker Image
+        if: ${{ !inputs.use_buildx }}
         run: |
           # Tag with specified version
           docker tag ${{ inputs.ecr_repository_uri }}:latest \
@@ -114,6 +175,7 @@ jobs:
           echo "Tagged image with: ${{ inputs.image_tag }}"
 
       - name: Push Docker Images to ECR
+        if: ${{ !inputs.use_buildx }}
         run: |
           # Push versioned tag
           echo "Pushing ${{ inputs.ecr_repository_uri }}:${{ inputs.image_tag }}"
@@ -124,6 +186,17 @@ jobs:
             echo "Pushing ${{ inputs.ecr_repository_uri }}:latest"
             docker push ${{ inputs.ecr_repository_uri }}:latest
           fi
+
+      # --- Security scanning (optional) ---
+
+      - name: Run Trivy vulnerability scan
+        if: ${{ inputs.enable_trivy_scan }}
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: '${{ inputs.ecr_repository_uri }}:${{ inputs.image_tag }}'
+          format: 'table'
+          severity: ${{ inputs.trivy_severity }}
+          exit-code: ${{ inputs.trivy_exit_code }}
 
       - name: Create deploy_info.json
         run: |

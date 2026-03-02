@@ -26,9 +26,10 @@ on:
         type: string
 
       lambda_function_name:
-        description: 'Name of the Lambda function to update'
-        required: true
+        description: 'Name of the Lambda function to update (use this OR lambda_function_name_secret)'
+        required: false
         type: string
+        default: ''
 
       s3_bucket:
         description: 'S3 bucket name for Lambda deployment'
@@ -63,9 +64,44 @@ on:
         type: boolean
         default: false
 
+      go_build_flags:
+        description: 'Additional Go build flags (e.g., -ldflags="-s -w")'
+        required: false
+        type: string
+        default: ''
+
+      # Deployment Options
+      publish_version:
+        description: 'Publish a new Lambda version after deployment'
+        required: false
+        type: boolean
+        default: false
+
+      update_alias:
+        description: 'Lambda alias to update (e.g., "live", "production"). Leave empty to skip.'
+        required: false
+        type: string
+        default: ''
+
+      verify_deployment:
+        description: 'Verify function reaches Active state after update'
+        required: false
+        type: boolean
+        default: false
+
+      smoke_test_payload:
+        description: 'JSON payload for smoke test invocation (leave empty to skip smoke test)'
+        required: false
+        type: string
+        default: ''
+
     secrets:
       github_pat:
         description: 'GitHub PAT for accessing private repositories'
+        required: false
+
+      lambda_function_name_secret:
+        description: 'Lambda function name from secrets (alternative to lambda_function_name input, for per-environment secrets)'
         required: false
 
 permissions:
@@ -94,11 +130,13 @@ jobs:
 
       - name: Build Lambda function
         run: |
-          GOOS=linux GOARCH=amd64 go build -o ${{ inputs.output_binary_name }} ${{ inputs.main_file_path }}
+          go build ${{ inputs.go_build_flags }} -o ${{ inputs.output_binary_name }} ${{ inputs.main_file_path }}
           zip ${{ inputs.zip_file_name }} ${{ inputs.output_binary_name }}
           echo "Built and zipped Lambda function: ${{ inputs.zip_file_name }}"
         env:
-          CGO_ENABLED: 0
+          CGO_ENABLED: '0'
+          GOOS: linux
+          GOARCH: amd64
           GOPRIVATE: ${{ inputs.goprivate }}
 
       - name: Configure AWS credentials
@@ -106,6 +144,18 @@ jobs:
         with:
           role-to-assume: ${{ inputs.aws_role_arn }}
           aws-region: ${{ inputs.aws_region }}
+
+      - name: Resolve function name
+        id: resolve-name
+        run: |
+          if [ -n "${{ inputs.lambda_function_name }}" ]; then
+            echo "function_name=${{ inputs.lambda_function_name }}" >> $GITHUB_OUTPUT
+          elif [ -n "${{ secrets.lambda_function_name_secret }}" ]; then
+            echo "function_name=${{ secrets.lambda_function_name_secret }}" >> $GITHUB_OUTPUT
+          else
+            echo "Error: Either lambda_function_name input or lambda_function_name_secret must be provided"
+            exit 1
+          fi
 
       - name: Upload to S3
         run: |
@@ -115,7 +165,7 @@ jobs:
       - name: Update Lambda function
         run: |
           aws lambda update-function-code \
-            --function-name ${{ inputs.lambda_function_name }} \
+            --function-name "${{ steps.resolve-name.outputs.function_name }}" \
             --s3-bucket ${{ inputs.s3_bucket }} \
             --s3-key ${{ inputs.s3_key }} \
             --region ${{ inputs.aws_region }}
@@ -125,14 +175,90 @@ jobs:
         run: |
           echo "Waiting for Lambda function update to complete..."
           aws lambda wait function-updated \
-            --function-name ${{ inputs.lambda_function_name }} \
+            --function-name "${{ steps.resolve-name.outputs.function_name }}" \
             --region ${{ inputs.aws_region }}
           echo "Lambda function is now active and updated"
+
+      - name: Publish version
+        if: ${{ inputs.publish_version }}
+        id: publish-version
+        run: |
+          RESULT=$(aws lambda publish-version \
+            --function-name "${{ steps.resolve-name.outputs.function_name }}" \
+            --output json)
+
+          VERSION=$(echo "$RESULT" | jq -r '.Version')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Published version: $VERSION"
+
+      - name: Update alias
+        if: ${{ inputs.update_alias != '' && inputs.publish_version }}
+        run: |
+          FUNC_NAME="${{ steps.resolve-name.outputs.function_name }}"
+          VERSION="${{ steps.publish-version.outputs.version }}"
+
+          if aws lambda get-alias \
+            --function-name "$FUNC_NAME" \
+            --name "${{ inputs.update_alias }}" \
+            >/dev/null 2>&1; then
+            aws lambda update-alias \
+              --function-name "$FUNC_NAME" \
+              --name "${{ inputs.update_alias }}" \
+              --function-version "$VERSION"
+          else
+            aws lambda create-alias \
+              --function-name "$FUNC_NAME" \
+              --name "${{ inputs.update_alias }}" \
+              --function-version "$VERSION"
+          fi
+
+          echo "Alias '${{ inputs.update_alias }}' now points to version $VERSION"
+
+      - name: Verify deployment
+        if: ${{ inputs.verify_deployment }}
+        run: |
+          FUNC_INFO=$(aws lambda get-function \
+            --function-name "${{ steps.resolve-name.outputs.function_name }}" \
+            --output json)
+
+          STATE=$(echo "$FUNC_INFO" | jq -r '.Configuration.State')
+          LAST_UPDATE=$(echo "$FUNC_INFO" | jq -r '.Configuration.LastUpdateStatus')
+
+          echo "State: $STATE"
+          echo "Last Update Status: $LAST_UPDATE"
+
+          if [ "$STATE" != "Active" ] || [ "$LAST_UPDATE" != "Successful" ]; then
+            echo "Deployment verification failed!"
+            exit 1
+          fi
+
+          echo "Deployment verified successfully"
+
+      - name: Smoke test
+        if: ${{ inputs.smoke_test_payload != '' }}
+        run: |
+          FUNC_NAME="${{ steps.resolve-name.outputs.function_name }}"
+
+          QUALIFIER=""
+          if [ -n "${{ inputs.update_alias }}" ] && [ "${{ inputs.publish_version }}" == "true" ]; then
+            QUALIFIER="--qualifier ${{ inputs.update_alias }}"
+          fi
+
+          aws lambda invoke \
+            --function-name "$FUNC_NAME" \
+            $QUALIFIER \
+            --payload '${{ inputs.smoke_test_payload }}' \
+            --cli-binary-format raw-in-base64-out \
+            /tmp/smoke-test-response.json
+
+          echo "Response:"
+          cat /tmp/smoke-test-response.json
+          echo ""
 
       - name: Get Lambda function info
         run: |
           aws lambda get-function \
-            --function-name ${{ inputs.lambda_function_name }} \
+            --function-name "${{ steps.resolve-name.outputs.function_name }}" \
             --region ${{ inputs.aws_region }} \
             --query 'Configuration.[FunctionName,LastModified,CodeSize,Version]' \
             --output table
