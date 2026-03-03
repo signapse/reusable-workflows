@@ -47,6 +47,18 @@ jobs:
             echo "$line" >> "$GITHUB_ENV"
           done <<< "${{ inputs.extra-super-linter-env }}"
 
+      - name: Set linter overrides
+        run: |
+          if [ "${{ inputs.disable-checkov }}" = "true" ]; then
+            echo "VALIDATE_CHECKOV=false" >> "$GITHUB_ENV"
+          fi
+          if [ "${{ inputs.disable-jscpd }}" = "true" ]; then
+            echo "VALIDATE_JSCPD=false" >> "$GITHUB_ENV"
+          fi
+          if [ "${{ inputs.disable-gitleaks }}" = "true" ]; then
+            echo "VALIDATE_GITLEAKS=false" >> "$GITHUB_ENV"
+          fi
+
       - name: Run Super-Linter
         uses: github/super-linter@v6
         env:
@@ -56,6 +68,3 @@ jobs:
           LOG_LEVEL: NOTICE
           VALIDATE_JAVASCRIPT_STANDARD: false
           VALIDATE_TYPESCRIPT_STANDARD: false
-          VALIDATE_CHECKOV: ${{ inputs.disable-checkov == false }}
-          VALIDATE_JSCPD: ${{ inputs.disable-jscpd == false }}
-          VALIDATE_GITLEAKS: ${{ inputs.disable-gitleaks == false }}
