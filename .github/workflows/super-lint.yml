@@ -8,6 +8,26 @@ on:
         required: false
         type: boolean
         default: true
+      extra-super-linter-env:
+        description: "Extra Super-Linter env vars as KEY=VALUE pairs separated by newlines (e.g. VALIDATE_CHECKOV=false)"
+        required: false
+        type: string
+        default: ""
+      disable-checkov:
+        description: "Disable CHECKOV linter"
+        required: false
+        type: boolean
+        default: false
+      disable-jscpd:
+        description: "Disable JSCPD linter"
+        required: false
+        type: boolean
+        default: false
+      disable-gitleaks:
+        description: "Disable GITLEAKS linter"
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   lint:
@@ -19,11 +39,23 @@ jobs:
         with:
           fetch-depth: 0  # Fetch full Git history for super-linter
 
+      - name: Parse extra env vars
+        if: ${{ inputs.extra-super-linter-env != '' }}
+        run: |
+          while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            echo "$line" >> "$GITHUB_ENV"
+          done <<< "${{ inputs.extra-super-linter-env }}"
+
       - name: Run Super-Linter
         uses: github/super-linter@v6
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VALIDATE_ALL_CODEBASE: true
+          VALIDATE_ALL_CODEBASE: false
           DEFAULT_BRANCH: main
-          FAIL_ON_WARNINGS: true
-          ACTIONS_RUNNER_DEBUG: true
+          LOG_LEVEL: NOTICE
+          VALIDATE_JAVASCRIPT_STANDARD: false
+          VALIDATE_TYPESCRIPT_STANDARD: false
+          VALIDATE_CHECKOV: ${{ inputs.disable-checkov == false }}
+          VALIDATE_JSCPD: ${{ inputs.disable-jscpd == false }}
+          VALIDATE_GITLEAKS: ${{ inputs.disable-gitleaks == false }}

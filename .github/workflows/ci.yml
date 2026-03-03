@@ -51,12 +51,40 @@ on:
         type: string
         default: 'npm test'
 
+      disable-checkov:
+        description: 'Disable CHECKOV linter'
+        required: false
+        type: boolean
+        default: false
+
+      disable-jscpd:
+        description: 'Disable JSCPD linter'
+        required: false
+        type: boolean
+        default: false
+
+      disable-gitleaks:
+        description: 'Disable GITLEAKS linter'
+        required: false
+        type: boolean
+        default: false
+
+      extra-super-linter-env:
+        description: 'Extra Super-Linter env vars as KEY=VALUE pairs separated by newlines'
+        required: false
+        type: string
+        default: ''
+
 jobs:
   lint:
     if: ${{ inputs.run-lint }}
     uses: signapse/reusable-workflows/.github/workflows/super-lint.yml@main
     with:
       run-lint: true
+      disable-checkov: ${{ inputs.disable-checkov }}
+      disable-jscpd: ${{ inputs.disable-jscpd }}
+      disable-gitleaks: ${{ inputs.disable-gitleaks }}
+      extra-super-linter-env: ${{ inputs.extra-super-linter-env }}
 
   frontend-ci:
     if: ${{ inputs.run-tests || inputs.run-build }}
