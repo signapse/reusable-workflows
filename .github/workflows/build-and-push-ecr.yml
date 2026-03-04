@@ -47,6 +47,12 @@ on:
         type: boolean
         default: true
 
+      environment:
+        description: 'GitHub Environment name to pull variables from (e.g., development, staging, production)'
+        required: false
+        type: string
+        default: ''
+
       # Build Engine
       use_buildx:
         description: 'Use Docker Buildx with GHA cache (recommended for faster builds)'
@@ -85,6 +91,7 @@ permissions:
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
 
     steps:
       - name: Checkout code
@@ -100,6 +107,50 @@ jobs:
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Collect environment build args
+        id: collect-args
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DOCKER_BUILD_ARGS: ${{ inputs.docker_build_args }}
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          ENVIRONMENT: ${{ inputs.environment }}
+        run: |
+          # Start with explicit docker_build_args
+          COMBINED_ARGS="${DOCKER_BUILD_ARGS}"
+
+          # Fetch environment variables via GitHub API when environment is set
+          if [ -n "${ENVIRONMENT}" ]; then
+            echo "Fetching variables from environment: ${ENVIRONMENT}"
+            ENV_VARS=$(gh api "repos/${{ github.repository }}/environments/${ENVIRONMENT}/variables" \
+              --jq '.variables[] | "\(.name)=\(.value)"')
+
+            if [ -n "${ENV_VARS}" ]; then
+              if [ -n "${COMBINED_ARGS}" ]; then
+                COMBINED_ARGS=$(printf '%s\n%s' "${COMBINED_ARGS}" "${ENV_VARS}")
+              else
+                COMBINED_ARGS="${ENV_VARS}"
+              fi
+              echo "Added environment variables from ${ENVIRONMENT}"
+            fi
+
+            # Append environment secrets if available
+            if [ -n "${SENTRY_AUTH_TOKEN}" ]; then
+              if [ -n "${COMBINED_ARGS}" ]; then
+                COMBINED_ARGS=$(printf '%s\nSENTRY_AUTH_TOKEN=%s' "${COMBINED_ARGS}" "${SENTRY_AUTH_TOKEN}")
+              else
+                COMBINED_ARGS="SENTRY_AUTH_TOKEN=${SENTRY_AUTH_TOKEN}"
+              fi
+              echo "Added SENTRY_AUTH_TOKEN from environment secrets"
+            fi
+          fi
+
+          # Output combined args (multiline)
+          {
+            echo "build_args<<ARGS_EOF"
+            echo "${COMBINED_ARGS}"
+            echo "ARGS_EOF"
+          } >> "${GITHUB_OUTPUT}"
 
       # --- Buildx path (when use_buildx is true) ---
 
@@ -127,7 +178,7 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            ${{ inputs.docker_build_args }}
+            ${{ steps.collect-args.outputs.build_args }}
             ${{ secrets.private_modules_token && format('GITHUB_TOKEN={0}', secrets.private_modules_token) || '' }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -140,15 +191,16 @@ jobs:
         env:
           DOCKER_BUILDKIT: 0
           GITHUB_TOKEN_SECRET: ${{ secrets.private_modules_token }}
+          COLLECTED_BUILD_ARGS: ${{ steps.collect-args.outputs.build_args }}
         run: |
           # Parse build args if provided
           BUILD_ARGS=""
-          if [ -n "${{ inputs.docker_build_args }}" ]; then
+          if [ -n "${COLLECTED_BUILD_ARGS}" ]; then
             while IFS= read -r line; do
-              if [ -n "$line" ]; then
-                BUILD_ARGS="$BUILD_ARGS --build-arg $line"
+              if [ -n "${line}" ]; then
+                BUILD_ARGS="${BUILD_ARGS} --build-arg ${line}"
               fi
-            done <<< "${{ inputs.docker_build_args }}"
+            done <<< "${COLLECTED_BUILD_ARGS}"
           fi
 
           # Append GITHUB_TOKEN build arg if the secret was provided
