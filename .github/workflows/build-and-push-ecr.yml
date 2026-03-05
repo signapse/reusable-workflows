@@ -208,7 +208,8 @@ jobs:
           fi
 
           echo "Building Docker image with tag: ${{ inputs.image_tag }}"
-          echo "Build args: ${BUILD_ARGS[*]}"
+          echo "Build args ($(( ${#BUILD_ARGS[@]} / 2 ))):"
+          for ((i=1; i<${#BUILD_ARGS[@]}; i+=2)); do echo "  - ${BUILD_ARGS[$i]%%=*}"; done
 
           # Build image with latest tag
           docker build "${BUILD_ARGS[@]}" \
