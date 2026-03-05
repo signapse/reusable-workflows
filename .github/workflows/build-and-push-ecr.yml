@@ -193,25 +193,26 @@ jobs:
           COLLECTED_BUILD_ARGS: ${{ steps.collect-args.outputs.build_args }}
         run: |
           # Parse build args if provided
-          BUILD_ARGS=""
+          BUILD_ARGS=()
           if [ -n "${COLLECTED_BUILD_ARGS}" ]; then
             while IFS= read -r line; do
               if [ -n "${line}" ]; then
-                BUILD_ARGS="${BUILD_ARGS} --build-arg ${line}"
+                BUILD_ARGS+=(--build-arg "${line}")
               fi
             done <<< "${COLLECTED_BUILD_ARGS}"
           fi
 
           # Append GITHUB_TOKEN build arg if the secret was provided
-          if [ -n "$GITHUB_TOKEN_SECRET" ]; then
-            BUILD_ARGS="$BUILD_ARGS --build-arg GITHUB_TOKEN=$GITHUB_TOKEN_SECRET"
+          if [ -n "${GITHUB_TOKEN_SECRET}" ]; then
+            BUILD_ARGS+=(--build-arg "GITHUB_TOKEN=${GITHUB_TOKEN_SECRET}")
           fi
 
           echo "Building Docker image with tag: ${{ inputs.image_tag }}"
-          echo "Build args: $BUILD_ARGS"
+          echo "Build args ($(( ${#BUILD_ARGS[@]} / 2 ))):"
+          for ((i=1; i<${#BUILD_ARGS[@]}; i+=2)); do echo "  - ${BUILD_ARGS[$i]%%=*}"; done
 
           # Build image with latest tag
-          docker build $BUILD_ARGS \
+          docker build "${BUILD_ARGS[@]}" \
             -f ${{ inputs.dockerfile_path }} \
             -t ${{ inputs.ecr_repository_uri }}:latest \
             ${{ inputs.docker_context }}
