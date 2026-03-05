@@ -111,7 +111,7 @@ jobs:
       - name: Collect environment build args
         id: collect-args
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ALL_VARS: ${{ toJSON(vars) }}
           DOCKER_BUILD_ARGS: ${{ inputs.docker_build_args }}
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
           ENVIRONMENT: ${{ inputs.environment }}
@@ -122,8 +122,7 @@ jobs:
           # Fetch environment variables via GitHub API when environment is set
           if [ -n "${ENVIRONMENT}" ]; then
             echo "Fetching variables from environment: ${ENVIRONMENT}"
-            ENV_VARS=$(gh api "repos/${{ github.repository }}/environments/${ENVIRONMENT}/variables" \
-              --jq '.variables[] | "\(.name)=\(.value)"')
+            ENV_VARS=$(echo "${ALL_VARS}" | jq -r 'to_entries[] | "\(.key)=\(.value)"')
 
             if [ -n "${ENV_VARS}" ]; then
               if [ -n "${COMBINED_ARGS}" ]; then
