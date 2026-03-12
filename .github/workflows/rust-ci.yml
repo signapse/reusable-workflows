@@ -1,0 +1,191 @@
+name: Rust CI (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      rust_toolchain:
+        description: 'Rust toolchain to use (stable, nightly, or specific version e.g. 1.78.0)'
+        required: false
+        type: string
+        default: 'stable'
+
+      run_lint:
+        description: 'Run Super-Linter'
+        required: false
+        type: boolean
+        default: true
+
+      run_tests:
+        description: 'Run tests'
+        required: false
+        type: boolean
+        default: true
+
+      run_security_scan:
+        description: 'Run Trivy filesystem scan'
+        required: false
+        type: boolean
+        default: true
+
+      run_cargo_audit:
+        description: 'Run cargo-audit for dependency vulnerability scanning'
+        required: false
+        type: boolean
+        default: true
+
+      run_docker_build:
+        description: 'Test Docker build (no push)'
+        required: false
+        type: boolean
+        default: false
+
+      run_docker_lint:
+        description: 'Lint Dockerfile'
+        required: false
+        type: boolean
+        default: false
+
+      dockerfile_path:
+        description: 'Path to Dockerfile'
+        required: false
+        type: string
+        default: './Dockerfile'
+
+      docker_context:
+        description: 'Docker build context path'
+        required: false
+        type: string
+        default: '.'
+
+      test_args:
+        description: 'Additional arguments for cargo test'
+        required: false
+        type: string
+        default: ''
+
+      cargo_features:
+        description: 'Cargo features to enable (comma-separated)'
+        required: false
+        type: string
+        default: ''
+
+      disable_checkov:
+        description: 'Disable CHECKOV linter in Super-Linter'
+        required: false
+        type: boolean
+        default: false
+
+      disable_jscpd:
+        description: 'Disable JSCPD linter in Super-Linter'
+        required: false
+        type: boolean
+        default: false
+
+      disable_gitleaks:
+        description: 'Disable GITLEAKS linter in Super-Linter'
+        required: false
+        type: boolean
+        default: false
+
+      extra_super_linter_env:
+        description: 'Extra Super-Linter env vars as KEY=VALUE pairs separated by newlines'
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    if: ${{ inputs.run_lint }}
+    uses: signapse/reusable-workflows/.github/workflows/super-lint.yml@main
+    with:
+      run-lint: true
+      disable-checkov: ${{ inputs.disable_checkov }}
+      disable-jscpd: ${{ inputs.disable_jscpd }}
+      disable-gitleaks: ${{ inputs.disable_gitleaks }}
+      extra-super-linter-env: ${{ inputs.extra_super_linter_env }}
+
+  test:
+    if: ${{ inputs.run_tests }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ inputs.rust_toolchain }}
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Run tests
+        run: |
+          FEATURES_FLAG=""
+          if [ -n "${{ inputs.cargo_features }}" ]; then
+            FEATURES_FLAG="--features ${{ inputs.cargo_features }}"
+          fi
+          cargo test $FEATURES_FLAG --verbose ${{ inputs.test_args }}
+
+  cargo-audit:
+    if: ${{ inputs.run_cargo_audit }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit
+
+      - name: Run cargo audit
+        run: cargo audit
+
+  security-scan:
+    if: ${{ inputs.run_security_scan }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Trivy filesystem scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          format: 'table'
+          severity: 'HIGH,CRITICAL'
+          exit-code: '1'
+
+  docker-build:
+    if: ${{ inputs.run_docker_build }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: |
+          docker build \
+            -f ${{ inputs.dockerfile_path }} \
+            -t ci-build-test:${{ github.sha }} \
+            ${{ inputs.docker_context }}
+
+  docker-lint:
+    if: ${{ inputs.run_docker_lint }}
+    uses: signapse/reusable-workflows/.github/workflows/docker-lint.yml@main
+    with:
+      dockerfile-path: ${{ inputs.dockerfile_path }}

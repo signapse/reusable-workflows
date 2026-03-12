@@ -1,24 +1,31 @@
-name: Deploy Go Lambda (Reusable)
+name: Deploy Python Lambda (Reusable)
 
 on:
   workflow_call:
     inputs:
-      go_version:
-        description: 'Go version to use'
+      python_version:
+        description: 'Python version to use'
         required: false
         type: string
-        default: '1.23'
+        default: '3.12'
 
-      main_file_path:
-        description: 'Path to the main.go file (e.g., cmd/api/lambda/main.go)'
-        required: true
-        type: string
-
-      output_binary_name:
-        description: 'Name of the output binary'
+      source_dir:
+        description: 'Directory containing Lambda function code'
         required: false
         type: string
-        default: 'bootstrap'
+        default: '.'
+
+      requirements_file:
+        description: 'Path to requirements file'
+        required: false
+        type: string
+        default: 'requirements.txt'
+
+      handler:
+        description: 'Lambda handler (e.g., app.handler)'
+        required: false
+        type: string
+        default: ''
 
       zip_file_name:
         description: 'Name of the zip file to create'
@@ -37,7 +44,7 @@ on:
         type: string
 
       s3_key:
-        description: 'S3 key/path for the Lambda zip file (e.g., hub-platform-api/function.zip)'
+        description: 'S3 key/path for the Lambda zip file'
         required: true
         type: string
 
@@ -52,31 +59,18 @@ on:
         required: true
         type: string
 
-      goprivate:
-        description: 'GOPRIVATE environment variable value'
+      exclude_patterns:
+        description: 'Patterns to exclude from zip (space-separated)'
         required: false
         type: string
-        default: 'github.com/signapse/*'
-
-      enable_private_repos:
-        description: 'Enable access to private repos using PAT'
-        required: false
-        type: boolean
-        default: false
-
-      go_build_flags:
-        description: 'Additional Go build flags (e.g., -ldflags="-s -w")'
-        required: false
-        type: string
-        default: ''
+        default: '__pycache__/* *.pyc *.pyo .pytest_cache/* .coverage tests/* .env* .git* .github/*'
 
       app_version:
-        description: 'Application version to display in the Lambda description (e.g., v1.2.3, github.event.release.tag_name)'
+        description: 'Application version to display in the Lambda description'
         required: false
         type: string
         default: ''
 
-      # Deployment Options
       publish_version:
         description: 'Publish a new Lambda version after deployment'
         required: false
@@ -102,17 +96,13 @@ on:
         default: ''
 
     secrets:
-      github_pat:
-        description: 'GitHub PAT for accessing private repositories'
-        required: false
-
       lambda_function_name_secret:
-        description: 'Lambda function name from secrets (alternative to lambda_function_name input, for per-environment secrets)'
+        description: 'Lambda function name from secrets (alternative to lambda_function_name input)'
         required: false
 
 permissions:
-  id-token: write   # Required for OIDC authentication
-  contents: read    # Required to checkout code
+  id-token: write
+  contents: read
 
 jobs:
   deploy:
@@ -122,28 +112,35 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Go
-        uses: actions/setup-go@v5
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          go-version: ${{ inputs.go_version }}
+          python-version: ${{ inputs.python_version }}
 
-      - name: Configure access to private repos
-        if: ${{ inputs.enable_private_repos }}
+      - name: Install dependencies and package
         run: |
-          git config --global url."https://${{ secrets.github_pat }}@github.com/".insteadOf "https://github.com/"
-        env:
-          GOPRIVATE: ${{ inputs.goprivate }}
+          mkdir -p /tmp/lambda-package
 
-      - name: Build Lambda function
-        run: |
-          go build ${{ inputs.go_build_flags }} -o ${{ inputs.output_binary_name }} ${{ inputs.main_file_path }}
-          zip ${{ inputs.zip_file_name }} ${{ inputs.output_binary_name }}
-          echo "Built and zipped Lambda function: ${{ inputs.zip_file_name }}"
-        env:
-          CGO_ENABLED: '0'
-          GOOS: linux
-          GOARCH: amd64
-          GOPRIVATE: ${{ inputs.goprivate }}
+          # Install dependencies into package directory
+          if [ -f "${{ inputs.source_dir }}/${{ inputs.requirements_file }}" ]; then
+            pip install -r ${{ inputs.source_dir }}/${{ inputs.requirements_file }} -t /tmp/lambda-package
+          fi
+
+          # Copy source code into package directory
+          cp -r ${{ inputs.source_dir }}/* /tmp/lambda-package/ 2>/dev/null || true
+          cp -r ${{ inputs.source_dir }}/*.py /tmp/lambda-package/ 2>/dev/null || true
+
+          # Build exclude args
+          EXCLUDE_ARGS=""
+          for pattern in ${{ inputs.exclude_patterns }}; do
+            EXCLUDE_ARGS="$EXCLUDE_ARGS -x '$pattern'"
+          done
+
+          # Create zip
+          cd /tmp/lambda-package
+          eval zip -r /tmp/${{ inputs.zip_file_name }} . $EXCLUDE_ARGS
+          echo "Built Lambda package: ${{ inputs.zip_file_name }}"
+          ls -lh /tmp/${{ inputs.zip_file_name }}
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -165,7 +162,7 @@ jobs:
 
       - name: Upload to S3
         run: |
-          aws s3 cp ${{ inputs.zip_file_name }} s3://${{ inputs.s3_bucket }}/${{ inputs.s3_key }}
+          aws s3 cp /tmp/${{ inputs.zip_file_name }} s3://${{ inputs.s3_bucket }}/${{ inputs.s3_key }}
           echo "Uploaded to S3: s3://${{ inputs.s3_bucket }}/${{ inputs.s3_key }}"
 
       - name: Update Lambda function

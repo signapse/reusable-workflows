@@ -1,24 +1,24 @@
-name: Deploy Go Lambda (Reusable)
+name: Deploy Rust Lambda (Reusable)
 
 on:
   workflow_call:
     inputs:
-      go_version:
-        description: 'Go version to use'
+      rust_toolchain:
+        description: 'Rust toolchain to use'
         required: false
         type: string
-        default: '1.23'
+        default: 'stable'
 
-      main_file_path:
-        description: 'Path to the main.go file (e.g., cmd/api/lambda/main.go)'
+      binary_name:
+        description: 'Name of the binary to build (from Cargo.toml [[bin]] name, or package name)'
         required: true
         type: string
 
-      output_binary_name:
-        description: 'Name of the output binary'
+      build_target:
+        description: 'Rust build target for Lambda'
         required: false
         type: string
-        default: 'bootstrap'
+        default: 'x86_64-unknown-linux-musl'
 
       zip_file_name:
         description: 'Name of the zip file to create'
@@ -37,7 +37,7 @@ on:
         type: string
 
       s3_key:
-        description: 'S3 key/path for the Lambda zip file (e.g., hub-platform-api/function.zip)'
+        description: 'S3 key/path for the Lambda zip file'
         required: true
         type: string
 
@@ -52,31 +52,18 @@ on:
         required: true
         type: string
 
-      goprivate:
-        description: 'GOPRIVATE environment variable value'
-        required: false
-        type: string
-        default: 'github.com/signapse/*'
-
-      enable_private_repos:
-        description: 'Enable access to private repos using PAT'
-        required: false
-        type: boolean
-        default: false
-
-      go_build_flags:
-        description: 'Additional Go build flags (e.g., -ldflags="-s -w")'
+      cargo_build_flags:
+        description: 'Additional cargo build flags (e.g., --features "feature1,feature2")'
         required: false
         type: string
         default: ''
 
       app_version:
-        description: 'Application version to display in the Lambda description (e.g., v1.2.3, github.event.release.tag_name)'
+        description: 'Application version to display in the Lambda description'
         required: false
         type: string
         default: ''
 
-      # Deployment Options
       publish_version:
         description: 'Publish a new Lambda version after deployment'
         required: false
@@ -102,17 +89,13 @@ on:
         default: ''
 
     secrets:
-      github_pat:
-        description: 'GitHub PAT for accessing private repositories'
-        required: false
-
       lambda_function_name_secret:
-        description: 'Lambda function name from secrets (alternative to lambda_function_name input, for per-environment secrets)'
+        description: 'Lambda function name from secrets (alternative to lambda_function_name input)'
         required: false
 
 permissions:
-  id-token: write   # Required for OIDC authentication
-  contents: read    # Required to checkout code
+  id-token: write
+  contents: read
 
 jobs:
   deploy:
@@ -122,28 +105,37 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Go
-        uses: actions/setup-go@v5
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
         with:
-          go-version: ${{ inputs.go_version }}
+          toolchain: ${{ inputs.rust_toolchain }}
+          targets: ${{ inputs.build_target }}
 
-      - name: Configure access to private repos
-        if: ${{ inputs.enable_private_repos }}
-        run: |
-          git config --global url."https://${{ secrets.github_pat }}@github.com/".insteadOf "https://github.com/"
-        env:
-          GOPRIVATE: ${{ inputs.goprivate }}
+      - name: Install musl tools
+        if: contains(inputs.build_target, 'musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-lambda-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-lambda-
 
       - name: Build Lambda function
         run: |
-          go build ${{ inputs.go_build_flags }} -o ${{ inputs.output_binary_name }} ${{ inputs.main_file_path }}
-          zip ${{ inputs.zip_file_name }} ${{ inputs.output_binary_name }}
+          cargo build --release --target ${{ inputs.build_target }} ${{ inputs.cargo_build_flags }}
+
+          # Lambda expects the binary to be named 'bootstrap' for provided.al2023 runtime
+          cp target/${{ inputs.build_target }}/release/${{ inputs.binary_name }} bootstrap
+          zip ${{ inputs.zip_file_name }} bootstrap
+
           echo "Built and zipped Lambda function: ${{ inputs.zip_file_name }}"
-        env:
-          CGO_ENABLED: '0'
-          GOOS: linux
-          GOARCH: amd64
-          GOPRIVATE: ${{ inputs.goprivate }}
+          ls -lh ${{ inputs.zip_file_name }}
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4

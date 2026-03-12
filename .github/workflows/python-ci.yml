@@ -1,0 +1,205 @@
+name: Python CI (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      python_version:
+        description: 'Python version to use'
+        required: false
+        type: string
+        default: '3.12'
+
+      dependency_manager:
+        description: 'Dependency manager: pip, poetry, or pipenv'
+        required: false
+        type: string
+        default: 'pip'
+
+      requirements_file:
+        description: 'Path to requirements file (for pip)'
+        required: false
+        type: string
+        default: 'requirements.txt'
+
+      run_lint:
+        description: 'Run Super-Linter'
+        required: false
+        type: boolean
+        default: true
+
+      run_tests:
+        description: 'Run tests with coverage'
+        required: false
+        type: boolean
+        default: true
+
+      run_security_scan:
+        description: 'Run Trivy filesystem scan'
+        required: false
+        type: boolean
+        default: true
+
+      run_docker_build:
+        description: 'Test Docker build (no push)'
+        required: false
+        type: boolean
+        default: false
+
+      run_docker_lint:
+        description: 'Lint Dockerfile'
+        required: false
+        type: boolean
+        default: false
+
+      dockerfile_path:
+        description: 'Path to Dockerfile'
+        required: false
+        type: string
+        default: './Dockerfile'
+
+      docker_context:
+        description: 'Docker build context path'
+        required: false
+        type: string
+        default: '.'
+
+      test_framework:
+        description: 'Test framework: pytest or unittest'
+        required: false
+        type: string
+        default: 'pytest'
+
+      test_args:
+        description: 'Additional arguments for test command'
+        required: false
+        type: string
+        default: ''
+
+      disable_checkov:
+        description: 'Disable CHECKOV linter in Super-Linter'
+        required: false
+        type: boolean
+        default: false
+
+      disable_jscpd:
+        description: 'Disable JSCPD linter in Super-Linter'
+        required: false
+        type: boolean
+        default: false
+
+      disable_gitleaks:
+        description: 'Disable GITLEAKS linter in Super-Linter'
+        required: false
+        type: boolean
+        default: false
+
+      extra_super_linter_env:
+        description: 'Extra Super-Linter env vars as KEY=VALUE pairs separated by newlines'
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    if: ${{ inputs.run_lint }}
+    uses: signapse/reusable-workflows/.github/workflows/super-lint.yml@main
+    with:
+      run-lint: true
+      disable-checkov: ${{ inputs.disable_checkov }}
+      disable-jscpd: ${{ inputs.disable_jscpd }}
+      disable-gitleaks: ${{ inputs.disable_gitleaks }}
+      extra-super-linter-env: ${{ inputs.extra_super_linter_env }}
+
+  test:
+    if: ${{ inputs.run_tests }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python_version }}
+
+      - name: Install dependencies (pip)
+        if: ${{ inputs.dependency_manager == 'pip' }}
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f "${{ inputs.requirements_file }}" ]; then
+            pip install -r ${{ inputs.requirements_file }}
+          fi
+          if [ -f "requirements-dev.txt" ]; then
+            pip install -r requirements-dev.txt
+          fi
+
+      - name: Install dependencies (poetry)
+        if: ${{ inputs.dependency_manager == 'poetry' }}
+        run: |
+          pip install poetry
+          poetry install
+
+      - name: Install dependencies (pipenv)
+        if: ${{ inputs.dependency_manager == 'pipenv' }}
+        run: |
+          pip install pipenv
+          pipenv install --dev
+
+      - name: Run tests (pytest)
+        if: ${{ inputs.test_framework == 'pytest' }}
+        run: |
+          pip install pytest pytest-cov
+          pytest --cov --cov-report=html:coverage-report --cov-report=term -v ${{ inputs.test_args }}
+
+      - name: Run tests (unittest)
+        if: ${{ inputs.test_framework == 'unittest' }}
+        run: python -m unittest discover -s tests -p "*.py" -v ${{ inputs.test_args }}
+
+      - name: Upload coverage report
+        if: ${{ inputs.test_framework == 'pytest' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage-report/
+          retention-days: 14
+
+  security-scan:
+    if: ${{ inputs.run_security_scan }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Trivy filesystem scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          format: 'table'
+          severity: 'HIGH,CRITICAL'
+          exit-code: '1'
+
+  docker-build:
+    if: ${{ inputs.run_docker_build }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: |
+          docker build \
+            -f ${{ inputs.dockerfile_path }} \
+            -t ci-build-test:${{ github.sha }} \
+            ${{ inputs.docker_context }}
+
+  docker-lint:
+    if: ${{ inputs.run_docker_lint }}
+    uses: signapse/reusable-workflows/.github/workflows/docker-lint.yml@main
+    with:
+      dockerfile-path: ${{ inputs.dockerfile_path }}
