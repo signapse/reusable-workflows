@@ -161,6 +161,16 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Create shared Trivy ignore file
+        run: |
+          # Append centrally-managed CVE exceptions so every caller inherits them.
+          # Review periodically and remove entries once upstream fixes land.
+          cat >> .trivyignore <<'EOF'
+          # github.com/docker/docker (indirect, test-only)
+          # CVE-2026-34040 - Moby authorization bypass. No upstream fix yet.
+          CVE-2026-34040
+          EOF
+
       - name: Run Trivy filesystem scan
         uses: aquasecurity/trivy-action@master
         with:
@@ -168,6 +178,7 @@ jobs:
           format: 'table'
           severity: 'HIGH,CRITICAL'
           exit-code: '1'
+          trivyignores: '.trivyignore'
 
   docker-build:
     if: ${{ inputs.run_docker_build }}

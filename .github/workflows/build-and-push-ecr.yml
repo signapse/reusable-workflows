@@ -241,6 +241,17 @@ jobs:
 
       # --- Security scanning (optional) ---
 
+      - name: Create shared Trivy ignore file
+        if: ${{ inputs.enable_trivy_scan }}
+        run: |
+          # Append centrally-managed CVE exceptions so every caller inherits them.
+          # Review periodically and remove entries once upstream fixes land.
+          cat >> .trivyignore <<'EOF'
+          # github.com/docker/docker (indirect, test-only)
+          # CVE-2026-34040 - Moby authorization bypass. No upstream fix yet.
+          CVE-2026-34040
+          EOF
+
       - name: Run Trivy vulnerability scan
         if: ${{ inputs.enable_trivy_scan }}
         uses: aquasecurity/trivy-action@master
@@ -249,6 +260,7 @@ jobs:
           format: 'table'
           severity: ${{ inputs.trivy_severity }}
           exit-code: ${{ inputs.trivy_exit_code }}
+          trivyignores: '.trivyignore'
 
       - name: Create deploy_info.json
         run: |
