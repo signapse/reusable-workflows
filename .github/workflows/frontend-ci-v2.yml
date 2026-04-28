@@ -1,0 +1,236 @@
+name: Frontend CI v2
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        description: 'Node.js version to use'
+        required: false
+        type: string
+        default: '18'
+
+      package-manager:
+        description: 'Package manager (npm, yarn, pnpm)'
+        required: false
+        type: string
+        default: 'npm'
+
+      run-lint:
+        description: 'Run ESLint + Prettier via lint command'
+        required: false
+        type: boolean
+        default: true
+
+      run-typecheck:
+        description: 'Run TypeScript type checking (tsc --noEmit)'
+        required: false
+        type: boolean
+        default: true
+
+      run-tests:
+        description: 'Run unit tests'
+        required: false
+        type: boolean
+        default: true
+
+      run-build:
+        description: 'Run build step'
+        required: false
+        type: boolean
+        default: true
+
+      run-security:
+        description: 'Run npm/yarn/pnpm audit for dependency vulnerabilities'
+        required: false
+        type: boolean
+        default: true
+
+      run-docker-lint:
+        description: 'Run Hadolint on Dockerfile'
+        required: false
+        type: boolean
+        default: true
+
+      run-super-linter:
+        description: 'Run GitHub Super-Linter'
+        required: false
+        type: boolean
+        default: true
+
+      coverage-enabled:
+        description: 'Enforce test coverage threshold'
+        required: false
+        type: boolean
+        default: true
+
+      coverage-threshold:
+        description: 'Minimum line coverage percentage (global)'
+        required: false
+        type: string
+        default: '80'
+
+      build-command:
+        description: 'Build command to run'
+        required: false
+        type: string
+        default: 'npm run build'
+
+      test-command:
+        description: 'Test command to run'
+        required: false
+        type: string
+        default: 'npm test'
+
+      lint-command:
+        description: 'Lint command to run'
+        required: false
+        type: string
+        default: 'npm run lint'
+
+      dockerfile-path:
+        description: 'Path to Dockerfile for Hadolint'
+        required: false
+        type: string
+        default: './Dockerfile'
+
+      disable-checkov:
+        description: 'Disable CHECKOV in Super-Linter'
+        required: false
+        type: boolean
+        default: false
+
+      disable-jscpd:
+        description: 'Disable JSCPD in Super-Linter'
+        required: false
+        type: boolean
+        default: false
+
+      disable-gitleaks:
+        description: 'Disable GITLEAKS in Super-Linter'
+        required: false
+        type: boolean
+        default: false
+
+      extra-super-linter-env:
+        description: 'Extra Super-Linter env vars as KEY=VALUE pairs separated by newlines'
+        required: false
+        type: string
+        default: ''
+
+jobs:
+  # ─── Track 1a: Super-Linter (parallel) ───
+  super-lint:
+    if: ${{ inputs.run-super-linter }}
+    uses: signapse/reusable-workflows/.github/workflows/super-lint.yml@main
+    with:
+      run-lint: true
+      disable-checkov: ${{ inputs.disable-checkov }}
+      disable-jscpd: ${{ inputs.disable-jscpd }}
+      disable-gitleaks: ${{ inputs.disable-gitleaks }}
+      extra-super-linter-env: ${{ inputs.extra-super-linter-env }}
+
+  # ─── Track 1b: Docker Lint (parallel) ───
+  docker-lint:
+    if: ${{ inputs.run-docker-lint }}
+    uses: signapse/reusable-workflows/.github/workflows/docker-lint.yml@main
+    with:
+      dockerfile-path: ${{ inputs.dockerfile-path }}
+
+  # ─── Track 2: Frontend Pipeline (sequential) ───
+  frontend-pipeline:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: ${{ inputs.package-manager }}
+
+      # ── Install dependencies ──
+      - name: Install dependencies (npm)
+        if: inputs.package-manager == 'npm'
+        run: npm ci
+
+      - name: Install dependencies (yarn)
+        if: inputs.package-manager == 'yarn'
+        run: yarn install --frozen-lockfile
+
+      - name: Install dependencies (pnpm)
+        if: inputs.package-manager == 'pnpm'
+        run: |
+          corepack enable
+          pnpm install --frozen-lockfile
+
+      # ── Lint (ESLint + Prettier) ──
+      - name: Lint
+        if: ${{ inputs.run-lint }}
+        run: ${{ inputs.lint-command }}
+
+      # ── TypeScript type check ──
+      - name: Type check
+        if: ${{ inputs.run-typecheck }}
+        run: npx tsc --noEmit
+
+      # ── Unit tests + coverage ──
+      - name: Run tests
+        if: ${{ inputs.run-tests && !inputs.coverage-enabled }}
+        run: ${{ inputs.test-command }}
+
+      - name: Run tests with coverage
+        if: ${{ inputs.run-tests && inputs.coverage-enabled }}
+        run: |
+          ${{ inputs.test-command }} -- --coverage --coverageThreshold='{"global":{"lines":${{ inputs.coverage-threshold }},"branches":${{ inputs.coverage-threshold }},"functions":${{ inputs.coverage-threshold }},"statements":${{ inputs.coverage-threshold }}}}'
+
+      # ── Build ──
+      - name: Build
+        if: ${{ inputs.run-build }}
+        run: ${{ inputs.build-command }}
+
+      # ── Security audit ──
+      - name: Security audit (npm)
+        if: ${{ inputs.run-security && inputs.package-manager == 'npm' }}
+        run: npm audit --audit-level=high
+        continue-on-error: false
+
+      - name: Security audit (yarn)
+        if: ${{ inputs.run-security && inputs.package-manager == 'yarn' }}
+        run: yarn audit --level high
+        continue-on-error: false
+
+      - name: Security audit (pnpm)
+        if: ${{ inputs.run-security && inputs.package-manager == 'pnpm' }}
+        run: pnpm audit --audit-level high
+        continue-on-error: false
+
+      # ── Upload coverage artifact ──
+      - name: Upload coverage report
+        if: ${{ always() && inputs.run-tests }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report-${{ github.run_id }}
+          path: coverage/
+          retention-days: 14
+          if-no-files-found: ignore
+
+      # ── Summary ──
+      - name: CI Summary
+        if: always()
+        run: |
+          echo "## Frontend CI v2 Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Check | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Node Version** | ${{ inputs.node-version }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Package Manager** | ${{ inputs.package-manager }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Lint** | ${{ inputs.run-lint && '✅ Ran' || '⏭️ Skipped' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Type Check** | ${{ inputs.run-typecheck && '✅ Ran' || '⏭️ Skipped' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Tests** | ${{ inputs.run-tests && '✅ Ran' || '⏭️ Skipped' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Coverage Threshold** | ${{ inputs.coverage-enabled && inputs.coverage-threshold || 'Disabled' }}% |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Build** | ${{ inputs.run-build && '✅ Ran' || '⏭️ Skipped' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Security Audit** | ${{ inputs.run-security && '✅ Ran' || '⏭️ Skipped' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Docker Lint** | ${{ inputs.run-docker-lint && '✅ Ran' || '⏭️ Skipped' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Super-Linter** | ${{ inputs.run-super-linter && '✅ Ran' || '⏭️ Skipped' }} |" >> $GITHUB_STEP_SUMMARY
