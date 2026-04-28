@@ -437,7 +437,7 @@ jobs:
 
 ### 6. Frontend CI v2 (`frontend-ci-v2.yml`)
 
-Opinionated CI pipeline for Next.js/React frontend repos. Replaces `ci.yml` for frontend projects.
+Opinionated CI pipeline for Next.js/React frontend repos. Recommended, opt-in replacement for `ci.yml` in frontend projects.
 
 **Two parallel tracks:**
 - **Track 1:** Super-Linter + Docker lint (independent, parallel)
@@ -467,7 +467,7 @@ jobs:
 | `run-docker-lint` | boolean | `true` | Run Hadolint |
 | `run-super-linter` | boolean | `true` | Run Super-Linter |
 | `coverage-enabled` | boolean | `true` | Enforce coverage threshold |
-| `coverage-threshold` | string | `'80'` | Minimum coverage % |
+| `coverage-threshold` | number | `80` | Minimum coverage % |
 | `build-command` | string | `'npm run build'` | Custom build command |
 | `test-command` | string | `'npm test'` | Custom test command |
 | `lint-command` | string | `'npm run lint'` | Custom lint command |

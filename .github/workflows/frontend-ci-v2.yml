@@ -66,8 +66,8 @@ on:
       coverage-threshold:
         description: 'Minimum line coverage percentage (global)'
         required: false
-        type: string
-        default: '80'
+        type: number
+        default: 80
 
       build-command:
         description: 'Build command to run'
@@ -139,6 +139,8 @@ jobs:
   # ─── Track 2: Frontend Pipeline (sequential) ───
   frontend-pipeline:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
 
     steps:
       - name: Checkout code
@@ -167,41 +169,55 @@ jobs:
 
       # ── Lint (ESLint + Prettier) ──
       - name: Lint
+        id: lint
         if: ${{ inputs.run-lint }}
         run: ${{ inputs.lint-command }}
 
       # ── TypeScript type check ──
       - name: Type check
+        id: typecheck
         if: ${{ inputs.run-typecheck }}
         run: npx tsc --noEmit
 
       # ── Unit tests + coverage ──
       - name: Run tests
+        id: tests
         if: ${{ inputs.run-tests && !inputs.coverage-enabled }}
         run: ${{ inputs.test-command }}
 
       - name: Run tests with coverage
+        id: tests-coverage
         if: ${{ inputs.run-tests && inputs.coverage-enabled }}
         run: |
           ${{ inputs.test-command }} -- --coverage --coverageThreshold='{"global":{"lines":${{ inputs.coverage-threshold }},"branches":${{ inputs.coverage-threshold }},"functions":${{ inputs.coverage-threshold }},"statements":${{ inputs.coverage-threshold }}}}'
 
       # ── Build ──
       - name: Build
+        id: build
         if: ${{ inputs.run-build }}
         run: ${{ inputs.build-command }}
 
       # ── Security audit ──
       - name: Security audit (npm)
+        id: security-npm
         if: ${{ inputs.run-security && inputs.package-manager == 'npm' }}
         run: npm audit --audit-level=high
         continue-on-error: false
 
       - name: Security audit (yarn)
+        id: security-yarn
         if: ${{ inputs.run-security && inputs.package-manager == 'yarn' }}
-        run: yarn audit --level high
+        run: |
+          YARN_MAJOR=$(yarn --version | cut -d. -f1)
+          if [ "$YARN_MAJOR" -ge 2 ]; then
+            yarn npm audit --severity high
+          else
+            yarn audit --level high
+          fi
         continue-on-error: false
 
       - name: Security audit (pnpm)
+        id: security-pnpm
         if: ${{ inputs.run-security && inputs.package-manager == 'pnpm' }}
         run: pnpm audit --audit-level high
         continue-on-error: false
@@ -220,17 +236,50 @@ jobs:
       - name: CI Summary
         if: always()
         run: |
+          status() {
+            local outcome="$1"
+            case "$outcome" in
+              success) echo "✅ Passed" ;;
+              failure) echo "❌ Failed" ;;
+              skipped|"") echo "⏭️ Skipped" ;;
+              *) echo "⏭️ Skipped" ;;
+            esac
+          }
+
+          LINT_STATUS=$(status "${{ steps.lint.outcome }}")
+          TYPECHECK_STATUS=$(status "${{ steps.typecheck.outcome }}")
+          BUILD_STATUS=$(status "${{ steps.build.outcome }}")
+
+          # Tests: either with or without coverage
+          TEST_OUTCOME="${{ steps.tests.outcome }}${{ steps.tests-coverage.outcome }}"
+          TESTS_STATUS=$(status "$(echo "$TEST_OUTCOME" | grep -o 'success\|failure' | head -1)")
+          if [ -z "${{ steps.tests.outcome }}${{ steps.tests-coverage.outcome }}" ]; then
+            TESTS_STATUS="⏭️ Skipped"
+          fi
+
+          # Security: whichever package manager step ran
+          SEC_OUTCOME="${{ steps.security-npm.outcome }}${{ steps.security-yarn.outcome }}${{ steps.security-pnpm.outcome }}"
+          SECURITY_STATUS=$(status "$(echo "$SEC_OUTCOME" | grep -o 'success\|failure' | head -1)")
+          if [ -z "${{ steps.security-npm.outcome }}${{ steps.security-yarn.outcome }}${{ steps.security-pnpm.outcome }}" ]; then
+            SECURITY_STATUS="⏭️ Skipped"
+          fi
+
+          # Coverage row
+          if [ "${{ inputs.coverage-enabled }}" = "true" ] && [ -n "${{ steps.tests-coverage.outcome }}" ]; then
+            COVERAGE_ROW="| **Coverage Threshold** | ${{ inputs.coverage-threshold }}% |"
+          else
+            COVERAGE_ROW="| **Coverage Threshold** | Disabled |"
+          fi
+
           echo "## Frontend CI v2 Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Check | Status |" >> $GITHUB_STEP_SUMMARY
           echo "|-------|--------|" >> $GITHUB_STEP_SUMMARY
           echo "| **Node Version** | ${{ inputs.node-version }} |" >> $GITHUB_STEP_SUMMARY
           echo "| **Package Manager** | ${{ inputs.package-manager }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| **Lint** | ${{ inputs.run-lint && '✅ Ran' || '⏭️ Skipped' }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| **Type Check** | ${{ inputs.run-typecheck && '✅ Ran' || '⏭️ Skipped' }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| **Tests** | ${{ inputs.run-tests && '✅ Ran' || '⏭️ Skipped' }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| **Coverage Threshold** | ${{ inputs.coverage-enabled && inputs.coverage-threshold || 'Disabled' }}% |" >> $GITHUB_STEP_SUMMARY
-          echo "| **Build** | ${{ inputs.run-build && '✅ Ran' || '⏭️ Skipped' }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| **Security Audit** | ${{ inputs.run-security && '✅ Ran' || '⏭️ Skipped' }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| **Docker Lint** | ${{ inputs.run-docker-lint && '✅ Ran' || '⏭️ Skipped' }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| **Super-Linter** | ${{ inputs.run-super-linter && '✅ Ran' || '⏭️ Skipped' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Lint** | ${LINT_STATUS} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Type Check** | ${TYPECHECK_STATUS} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Tests** | ${TESTS_STATUS} |" >> $GITHUB_STEP_SUMMARY
+          echo "${COVERAGE_ROW}" >> $GITHUB_STEP_SUMMARY
+          echo "| **Build** | ${BUILD_STATUS} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Security Audit** | ${SECURITY_STATUS} |" >> $GITHUB_STEP_SUMMARY
