@@ -14,7 +14,8 @@ This repository provides a shared foundation of reusable workflows that individu
 ├── deploy-docker-image.yml         # Deploy Docker images to AWS (Lambda/ECS/EKS)
 ├── deploy-eks-helm.yml             # Deploy to EKS using Helm charts
 ├── build-and-deploy-lambda.yml     # Build and deploy Lambda functions
-└── super-lint.yml                  # Code linting with Super-Linter
+├── super-lint.yml                  # Code linting with Super-Linter
+└── frontend-ci-v2.yml              # Frontend CI pipeline for Next.js/React
 
 examples/
 ├── hub-platform-deployment.yml                    # Hub Platform release workflow
@@ -433,6 +434,48 @@ jobs:
     with:
       run-lint: true
 ```
+
+### 6. Frontend CI v2 (`frontend-ci-v2.yml`)
+
+Opinionated CI pipeline for Next.js/React frontend repos. Replaces `ci.yml` for frontend projects.
+
+**Two parallel tracks:**
+- **Track 1:** Super-Linter + Docker lint (independent, parallel)
+- **Track 2:** Install → Lint → Type check → Test + Coverage → Build → Security audit (sequential, fail-fast)
+
+**Usage:**
+```yaml
+jobs:
+  ci:
+    uses: signapse/reusable-workflows/.github/workflows/frontend-ci-v2.yml@main
+    with:
+      node-version: '18'
+      coverage-threshold: '80'
+```
+
+**Inputs:**
+
+| Input | Type | Default | Description |
+|-------|------|---------|-------------|
+| `node-version` | string | `'18'` | Node.js version |
+| `package-manager` | string | `'npm'` | `npm`, `yarn`, or `pnpm` |
+| `run-lint` | boolean | `true` | Run ESLint + Prettier |
+| `run-typecheck` | boolean | `true` | Run `tsc --noEmit` |
+| `run-tests` | boolean | `true` | Run unit tests |
+| `run-build` | boolean | `true` | Run build command |
+| `run-security` | boolean | `true` | Run dependency audit |
+| `run-docker-lint` | boolean | `true` | Run Hadolint |
+| `run-super-linter` | boolean | `true` | Run Super-Linter |
+| `coverage-enabled` | boolean | `true` | Enforce coverage threshold |
+| `coverage-threshold` | string | `'80'` | Minimum coverage % |
+| `build-command` | string | `'npm run build'` | Custom build command |
+| `test-command` | string | `'npm test'` | Custom test command |
+| `lint-command` | string | `'npm run lint'` | Custom lint command |
+| `dockerfile-path` | string | `'./Dockerfile'` | Dockerfile path |
+| `disable-checkov` | boolean | `false` | Disable Checkov |
+| `disable-jscpd` | boolean | `false` | Disable JSCPD |
+| `disable-gitleaks` | boolean | `false` | Disable Gitleaks |
+| `extra-super-linter-env` | string | `''` | Extra Super-Linter env vars |
 
 ## Conventions
 
