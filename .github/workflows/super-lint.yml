@@ -28,6 +28,16 @@ on:
         required: false
         type: boolean
         default: false
+      disable-eslint:
+        description: "Disable ESLint-based linters (JS, JSX, TS, TSX, JSON, JSONC). Use for repos with ESLint flat config (eslint.config.js)"
+        required: false
+        type: boolean
+        default: false
+      jscpd-threshold:
+        description: "JSCPD duplication threshold percentage (0-100). Set to 0 to use repo .jscpd.json or jscpd default"
+        required: false
+        type: number
+        default: 0
 
 jobs:
   lint:
@@ -58,9 +68,28 @@ jobs:
           if [ "${{ inputs.disable-gitleaks }}" = "true" ]; then
             echo "VALIDATE_GITLEAKS=false" >> "$GITHUB_ENV"
           fi
+          if [ "${{ inputs.disable-eslint }}" = "true" ]; then
+            echo "VALIDATE_JAVASCRIPT_ES=false" >> "$GITHUB_ENV"
+            echo "VALIDATE_JSX=false" >> "$GITHUB_ENV"
+            echo "VALIDATE_TYPESCRIPT_ES=false" >> "$GITHUB_ENV"
+            echo "VALIDATE_TSX=false" >> "$GITHUB_ENV"
+            echo "VALIDATE_JSON=false" >> "$GITHUB_ENV"
+            echo "VALIDATE_JSONC=false" >> "$GITHUB_ENV"
+          fi
+
+      - name: Set JSCPD threshold
+        if: ${{ inputs.jscpd-threshold > 0 && !inputs.disable-jscpd }}
+        run: |
+          if [ ! -f .jscpd.json ]; then
+            echo '{"threshold": ${{ inputs.jscpd-threshold }}}' > .jscpd.json
+          else
+            # Update threshold in existing config
+            tmp=$(mktemp)
+            jq '.threshold = ${{ inputs.jscpd-threshold }}' .jscpd.json > "$tmp" && mv "$tmp" .jscpd.json
+          fi
 
       - name: Run Super-Linter
-        uses: github/super-linter@v6
+        uses: super-linter/super-linter@v7
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VALIDATE_ALL_CODEBASE: false
