@@ -69,6 +69,18 @@ on:
         type: boolean
         default: false
 
+      disable-eslint:
+        description: 'Disable ESLint-based linters (JS, JSX, TS, TSX, JSON, JSONC). Use for repos with ESLint flat config'
+        required: false
+        type: boolean
+        default: false
+
+      jscpd-threshold:
+        description: 'JSCPD duplication threshold percentage (0-100). Set to 0 to use repo .jscpd.json or jscpd default'
+        required: false
+        type: number
+        default: 0
+
       extra-super-linter-env:
         description: 'Extra Super-Linter env vars as KEY=VALUE pairs separated by newlines'
         required: false
@@ -84,6 +96,8 @@ jobs:
       disable-checkov: ${{ inputs.disable-checkov }}
       disable-jscpd: ${{ inputs.disable-jscpd }}
       disable-gitleaks: ${{ inputs.disable-gitleaks }}
+      disable-eslint: ${{ inputs.disable-eslint }}
+      jscpd-threshold: ${{ inputs.jscpd-threshold }}
       extra-super-linter-env: ${{ inputs.extra-super-linter-env }}
 
   frontend-ci:
