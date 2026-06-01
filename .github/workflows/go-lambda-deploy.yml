@@ -74,7 +74,7 @@ on:
         description: 'Target architecture for the Go binary (e.g., amd64, arm64)'
         required: false
         type: string
-        default: 'amd64'
+        default: 'arm64'
 
       app_version:
         description: 'Application version to display in the Lambda description (e.g., v1.2.3, github.event.release.tag_name)'
