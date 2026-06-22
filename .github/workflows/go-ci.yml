@@ -176,6 +176,10 @@ jobs:
           # github.com/docker/docker (indirect, test-only)
           # CVE-2026-34040 - Moby authorization bypass. No upstream fix yet.
           CVE-2026-34040
+          # CVE-2026-41567 - Moby. No upstream fix yet.
+          CVE-2026-41567
+          # CVE-2026-42306 - Moby / Docker Engine. No upstream fix yet.
+          CVE-2026-42306
           EOF
 
       - name: Run Trivy filesystem scan
