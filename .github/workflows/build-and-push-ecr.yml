@@ -81,7 +81,7 @@ on:
 
     secrets:
       private_modules_token:
-        description: 'Token passed as --build-arg GITHUB_TOKEN during Docker build (used for private Go/npm modules)'
+        description: 'Token for private Go/npm modules. On the buildx path it is exposed both as build-arg GITHUB_TOKEN and as BuildKit secret id=github_token (use --mount=type=secret,id=github_token to keep it out of image layers). On the legacy path it is only passed as --build-arg GITHUB_TOKEN.'
         required: false
 
 permissions:
@@ -179,6 +179,8 @@ jobs:
           build-args: |
             ${{ steps.collect-args.outputs.build_args }}
             ${{ secrets.private_modules_token && format('GITHUB_TOKEN={0}', secrets.private_modules_token) || '' }}
+          secrets: |
+            ${{ secrets.private_modules_token && format('github_token={0}', secrets.private_modules_token) || '' }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
