@@ -93,6 +93,59 @@ jobs:
           go-version-file: ${{ inputs.go_version == '' && 'go.mod' || '' }}
           cache: true
 
+      - name: Verify private-repo credentials are available
+        if: ${{ inputs.enable_private_repos }}
+        env:
+          GITHUB_PAT: ${{ secrets.github_pat }}
+        run: |
+          # A whitespace-only secret is as unusable as an empty one and would
+          # produce the same credential-less rewrite, so trim before testing.
+          if [ -n "$(printf '%s' "$GITHUB_PAT" | tr -d '[:space:]')" ]; then
+            echo "github_pat is present; private module access will be configured."
+            exit 0
+          fi
+
+          echo "::error title=github_pat is empty::enable_private_repos is true but no github_pat was passed to go-ci.yml. See this step's log for the likely cause and the fix."
+
+          {
+            echo "=================================================================="
+            echo "  go-ci.yml: required secret 'github_pat' is empty"
+            echo "=================================================================="
+            echo
+            echo "This workflow was called with input:"
+            echo "    enable_private_repos: true"
+            echo "but secret 'github_pat' resolved to an EMPTY string."
+            echo
+            echo "Failing here deliberately. If we continued, the next step would run:"
+            echo "    git config --global url.\"https://@github.com/\".insteadOf \"https://github.com/\""
+            echo "which is a URL rewrite containing no credential. The job would then"
+            echo "fail much later, at the first private module fetch, with this"
+            echo "misleading error:"
+            echo "    fatal: could not read Password for 'https://github.com': terminal prompts disabled"
+            echo
+            echo "MOST LIKELY CAUSE"
+            echo "  The calling workflow references a REPOSITORY-level secret owned by a"
+            echo "  different repository. Repository secrets are not shared across"
+            echo "  repositories, so such a reference is not an error - it silently"
+            echo "  expands to an empty string."
+            echo "  A known example is HUB_PLATFORM_API_PAT, which is not resolvable"
+            echo "  from every repo that references it."
+            echo
+            echo "FIX - pass the organisation-level MACHINE_TOKEN in the caller:"
+            echo
+            printf '    secrets:\n'
+            printf '      github_pat: %s{ secrets.MACHINE_TOKEN }}\n' '${'
+            echo
+            echo "ALTERNATIVE - if this repository has no private Go dependencies,"
+            echo "switch the feature off instead of passing a token:"
+            echo
+            printf '    with:\n'
+            printf '      enable_private_repos: false\n'
+            echo
+            echo "=================================================================="
+          } >&2
+          exit 1
+
       - name: Configure access to private repos
         if: ${{ inputs.enable_private_repos }}
         run: |
@@ -130,6 +183,59 @@ jobs:
           go-version: ${{ inputs.go_version || null }}
           go-version-file: ${{ inputs.go_version == '' && 'go.mod' || '' }}
           cache: true
+
+      - name: Verify private-repo credentials are available
+        if: ${{ inputs.enable_private_repos }}
+        env:
+          GITHUB_PAT: ${{ secrets.github_pat }}
+        run: |
+          # A whitespace-only secret is as unusable as an empty one and would
+          # produce the same credential-less rewrite, so trim before testing.
+          if [ -n "$(printf '%s' "$GITHUB_PAT" | tr -d '[:space:]')" ]; then
+            echo "github_pat is present; private module access will be configured."
+            exit 0
+          fi
+
+          echo "::error title=github_pat is empty::enable_private_repos is true but no github_pat was passed to go-ci.yml. See this step's log for the likely cause and the fix."
+
+          {
+            echo "=================================================================="
+            echo "  go-ci.yml: required secret 'github_pat' is empty"
+            echo "=================================================================="
+            echo
+            echo "This workflow was called with input:"
+            echo "    enable_private_repos: true"
+            echo "but secret 'github_pat' resolved to an EMPTY string."
+            echo
+            echo "Failing here deliberately. If we continued, the next step would run:"
+            echo "    git config --global url.\"https://@github.com/\".insteadOf \"https://github.com/\""
+            echo "which is a URL rewrite containing no credential. The job would then"
+            echo "fail much later, at the first private module fetch, with this"
+            echo "misleading error:"
+            echo "    fatal: could not read Password for 'https://github.com': terminal prompts disabled"
+            echo
+            echo "MOST LIKELY CAUSE"
+            echo "  The calling workflow references a REPOSITORY-level secret owned by a"
+            echo "  different repository. Repository secrets are not shared across"
+            echo "  repositories, so such a reference is not an error - it silently"
+            echo "  expands to an empty string."
+            echo "  A known example is HUB_PLATFORM_API_PAT, which is not resolvable"
+            echo "  from every repo that references it."
+            echo
+            echo "FIX - pass the organisation-level MACHINE_TOKEN in the caller:"
+            echo
+            printf '    secrets:\n'
+            printf '      github_pat: %s{ secrets.MACHINE_TOKEN }}\n' '${'
+            echo
+            echo "ALTERNATIVE - if this repository has no private Go dependencies,"
+            echo "switch the feature off instead of passing a token:"
+            echo
+            printf '    with:\n'
+            printf '      enable_private_repos: false\n'
+            echo
+            echo "=================================================================="
+          } >&2
+          exit 1
 
       - name: Configure access to private repos
         if: ${{ inputs.enable_private_repos }}
@@ -194,6 +300,59 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Verify private-repo credentials are available
+        if: ${{ inputs.enable_private_repos }}
+        env:
+          GITHUB_PAT: ${{ secrets.github_pat }}
+        run: |
+          # A whitespace-only secret is as unusable as an empty one and would
+          # produce the same credential-less rewrite, so trim before testing.
+          if [ -n "$(printf '%s' "$GITHUB_PAT" | tr -d '[:space:]')" ]; then
+            echo "github_pat is present; private module access will be configured."
+            exit 0
+          fi
+
+          echo "::error title=github_pat is empty::enable_private_repos is true but no github_pat was passed to go-ci.yml. See this step's log for the likely cause and the fix."
+
+          {
+            echo "=================================================================="
+            echo "  go-ci.yml: required secret 'github_pat' is empty"
+            echo "=================================================================="
+            echo
+            echo "This workflow was called with input:"
+            echo "    enable_private_repos: true"
+            echo "but secret 'github_pat' resolved to an EMPTY string."
+            echo
+            echo "Failing here deliberately. If we continued, the next step would run:"
+            echo "    git config --global url.\"https://@github.com/\".insteadOf \"https://github.com/\""
+            echo "which is a URL rewrite containing no credential, and the Docker build"
+            echo "would fail later at the first private module fetch with this"
+            echo "misleading error:"
+            echo "    fatal: could not read Password for 'https://github.com': terminal prompts disabled"
+            echo
+            echo "MOST LIKELY CAUSE"
+            echo "  The calling workflow references a REPOSITORY-level secret owned by a"
+            echo "  different repository. Repository secrets are not shared across"
+            echo "  repositories, so such a reference is not an error - it silently"
+            echo "  expands to an empty string."
+            echo "  A known example is HUB_PLATFORM_API_PAT, which is not resolvable"
+            echo "  from every repo that references it."
+            echo
+            echo "FIX - pass the organisation-level MACHINE_TOKEN in the caller:"
+            echo
+            printf '    secrets:\n'
+            printf '      github_pat: %s{ secrets.MACHINE_TOKEN }}\n' '${'
+            echo
+            echo "ALTERNATIVE - if this repository has no private Go dependencies,"
+            echo "switch the feature off instead of passing a token:"
+            echo
+            printf '    with:\n'
+            printf '      enable_private_repos: false\n'
+            echo
+            echo "=================================================================="
+          } >&2
+          exit 1
 
       - name: Configure access to private repos
         if: ${{ inputs.enable_private_repos }}
