@@ -43,6 +43,12 @@ inputs:
     default: '[]'
 
 outputs:
+  action_path:
+    description: >-
+      Absolute path to this action on the runner, so later steps in the same job
+      can invoke scripts/ and lib/ directly instead of re-cloning the repo
+      (a re-clone would take main regardless of the ref the caller pinned).
+    value: ${{ steps.compose.outputs.action_path }}
   state:
     description: 'TrainState JSON (compact, single line)'
     value: ${{ steps.compose.outputs.state }}
@@ -74,6 +80,7 @@ runs:
         STAGING_CHECK_PATTERN: ${{ inputs.staging_check_pattern }}
       run: |
         set -euo pipefail
+        echo "action_path=${{ github.action_path }}" >> "$GITHUB_OUTPUT"
         HERE="${{ github.action_path }}/scripts"
         last_tag="${LAST_TAG:-$(git describe --tags --abbrev=0)}"
         state=$("$HERE/train-composer.sh" "$last_tag" HEAD)

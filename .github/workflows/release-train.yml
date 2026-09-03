@@ -1,0 +1,268 @@
+name: Release Train (reusable)
+
+# Composes TrainState from the tag..HEAD range, opens a draft release when the
+# train is ready, and posts the Slack alert carrying the "Cut release tag"
+# button. On `release: published` it instead posts the prod-promotion prompt as
+# a thread reply under that same alert.
+#
+# The caller owns `on:` (cron, workflow_dispatch, release) and MUST declare
+# permissions: contents: write, pull-requests: read, checks: read — a reusable
+# workflow can only downgrade the permissions it is handed, never elevate them.
+
+on:
+  workflow_call:
+    inputs:
+      linear_team_key:
+        description: 'Linear team key, alphanumeric (e.g. SIG)'
+        required: false
+        type: string
+        default: 'SIG'
+      sentry_org:
+        required: false
+        type: string
+        default: 'signapse'
+      sentry_project:
+        description: 'Sentry project slug. Empty skips the Sentry health check.'
+        required: false
+        type: string
+        default: ''
+      staging_check_pattern:
+        description: >-
+          jq test() regex over check-run names for the staging health gate.
+          Empty disables the gate.
+        required: false
+        type: string
+        default: 'staging|smoke'
+      serialization_detector_paths:
+        description: 'RESERVED — not consumed yet. See actions/release-train.'
+        required: false
+        type: string
+        default: '[]'
+      slack_releases_channel:
+        description: 'Overrides the SLACK_RELEASES_CHANNEL org var.'
+        required: false
+        type: string
+        default: ''
+      slack_release_clickers_group_id:
+        description: 'Overrides the SLACK_RELEASE_CLICKERS_GROUP_ID org var.'
+        required: false
+        type: string
+        default: ''
+      deploy_to_prod_url:
+        description: 'Deploy-to-Prod workflow link used in the post-publish prompt.'
+        required: false
+        type: string
+        default: 'https://github.com/signapse/signapse-core-k8s/actions/workflows/deploy-to-prod.yml'
+    secrets:
+      LINEAR_API_KEY:
+        required: true
+      SENTRY_AUTH_TOKEN:
+        required: false
+      SLACK_BOT_TOKEN:
+        required: true
+    outputs:
+      state:
+        description: 'TrainState JSON'
+        value: ${{ jobs.compose.outputs.state }}
+      next_version:
+        description: 'Proposed semver'
+        value: ${{ jobs.compose.outputs.next_version }}
+      variant:
+        description: 'ready | held'
+        value: ${{ jobs.compose.outputs.variant }}
+      draft_url:
+        description: 'Draft release URL (ready variant only)'
+        value: ${{ jobs.compose.outputs.draft_url }}
+      alert_ts:
+        description: 'Slack ts of the posted alert'
+        value: ${{ jobs.compose.outputs.alert_ts }}
+
+permissions:
+  contents: write        # gh release edit (release-metadata coord persistence)
+  pull-requests: read    # train-composer's PR lookups
+  checks: read           # staging gate
+
+jobs:
+  compose:
+    if: github.event_name != 'release'
+    runs-on: ubuntu-latest
+    outputs:
+      state: ${{ steps.compose.outputs.state }}
+      next_version: ${{ steps.compose.outputs.next_version }}
+      draft_url: ${{ steps.draft.outputs.draft_url }}
+      variant: ${{ steps.compose.outputs.variant }}
+      alert_ts: ${{ steps.post.outputs.alert_ts }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # train-composer walks the tag..HEAD range
+          persist-credentials: false
+
+      - name: Install jq
+        run: |
+          set -euo pipefail
+          sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Diff against last tag
+        id: diff
+        run: |
+          set -euo pipefail
+          last_tag=$(git describe --tags --abbrev=0)
+          echo "last_tag=$last_tag" >> "$GITHUB_OUTPUT"
+          if git diff --quiet "$last_tag"..HEAD; then
+            echo "empty=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "empty=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Silent exit if no commits
+        if: steps.diff.outputs.empty == 'true'
+        env:
+          LAST_TAG: ${{ steps.diff.outputs.last_tag }}
+        run: |
+          set -euo pipefail
+          echo "No commits since $LAST_TAG. Silent exit."
+
+      - name: Compose TrainState
+        id: compose
+        if: steps.diff.outputs.empty == 'false'
+        uses: signapse/reusable-workflows/actions/release-train@main
+        with:
+          last_tag: ${{ steps.diff.outputs.last_tag }}
+          linear_team_key: ${{ inputs.linear_team_key }}
+          sentry_org: ${{ inputs.sentry_org }}
+          sentry_project: ${{ inputs.sentry_project }}
+          staging_check_pattern: ${{ inputs.staging_check_pattern }}
+          serialization_detector_paths: ${{ inputs.serialization_detector_paths }}
+        env:
+          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Create draft release (ready variant only)
+        id: draft
+        if: steps.compose.outputs.variant == 'ready'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NEXT_VERSION: ${{ steps.compose.outputs.next_version }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          nv="$NEXT_VERSION"
+          url=$(gh release create "$nv" --draft --generate-notes --title "$nv" --target "$SHA")
+          echo "draft_url=$url" >> "$GITHUB_OUTPUT"
+
+      - name: Compose Slack payload
+        id: payload
+        if: steps.diff.outputs.empty == 'false'
+        env:
+          ACTION_PATH: ${{ steps.compose.outputs.action_path }}
+          SLACK_RELEASE_CLICKERS_GROUP_ID: ${{ inputs.slack_release_clickers_group_id || vars.SLACK_RELEASE_CLICKERS_GROUP_ID }}
+          SLACK_RELEASES_CHANNEL: ${{ inputs.slack_releases_channel || vars.SLACK_RELEASES_CHANNEL || '#releases' }}
+          VARIANT: ${{ steps.compose.outputs.variant }}
+          STATE: ${{ steps.compose.outputs.state }}
+          DRAFT_URL: ${{ steps.draft.outputs.draft_url }}
+        run: |
+          set -euo pipefail
+          variant="$VARIANT"
+          state="$STATE"
+          if [ "$variant" = "ready" ]; then
+            payload=$(echo "$state" | "$ACTION_PATH/scripts/slack-composer.sh" --variant ready --draft-url "$DRAFT_URL")
+          else
+            payload=$(echo "$state" | "$ACTION_PATH/scripts/slack-composer.sh" --variant held)
+          fi
+          echo "$payload" > /tmp/slack.json
+
+      - name: Post to Slack
+        id: post
+        if: steps.diff.outputs.empty == 'false'
+        env:
+          ACTION_PATH: ${{ steps.compose.outputs.action_path }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          VARIANT: ${{ steps.compose.outputs.variant }}
+          NEXT_VERSION: ${{ steps.compose.outputs.next_version }}
+        run: |
+          set -euo pipefail
+          # shellcheck source=/dev/null
+          source "$ACTION_PATH/lib/slack.sh"
+          resp=$(slack_post < /tmp/slack.json)
+          ok=$(echo "$resp" | jq -r .ok)
+          if [ "$ok" != "true" ]; then
+            echo "::error::slack post failed: $resp"
+            exit 1
+          fi
+          ts=$(echo "$resp" | jq -r .ts)
+          ch=$(echo "$resp" | jq -r .channel)
+          echo "alert_ts=$ts" >> "$GITHUB_OUTPUT"
+
+          if [ "$VARIANT" = "ready" ]; then
+            # shellcheck source=/dev/null
+            source "$ACTION_PATH/scripts/release-metadata.sh"
+            release_meta_set "$NEXT_VERSION" \
+              "slack_channel=$ch" \
+              "slack_ts=$ts"
+          fi
+
+  post-publish:
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    env:
+      DEPLOY_TO_PROD_URL: ${{ inputs.deploy_to_prod_url }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # This job never invokes the composite action, so its scripts are not on
+      # disk. Check them out explicitly rather than `git clone`-ing: same effect,
+      # but the ref is visible and Phase 1 flips it to v1 alongside the callers.
+      - name: Fetch release-train scripts
+        uses: actions/checkout@v4
+        with:
+          repository: signapse/reusable-workflows
+          ref: main
+          path: _rw
+          persist-credentials: false
+
+      - name: Install jq
+        run: |
+          set -euo pipefail
+          sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Post prod-promotion prompt
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+          SLACK_RELEASES_CHANNEL: ${{ inputs.slack_releases_channel || vars.SLACK_RELEASES_CHANNEL || '#releases' }}
+          SLACK_RELEASE_CLICKERS_GROUP_ID: ${{ inputs.slack_release_clickers_group_id || vars.SLACK_RELEASE_CLICKERS_GROUP_ID }}
+        run: |
+          set -euo pipefail
+          RT="$GITHUB_WORKSPACE/_rw/actions/release-train"
+
+          # shellcheck source=/dev/null
+          source "$RT/scripts/release-metadata.sh"
+          CH=$(release_meta_get "$TAG" slack_channel)
+          TS=$(release_meta_get "$TAG" slack_ts)
+
+          mention=""
+          if [ -n "${SLACK_RELEASE_CLICKERS_GROUP_ID:-}" ]; then
+            mention=" <!subteam^${SLACK_RELEASE_CLICKERS_GROUP_ID}>"
+          fi
+          msg="🚀 \`${TAG}\` retagged and ready for prod. <${DEPLOY_TO_PROD_URL}|Deploy to Prod ↗>${mention}"
+
+          # shellcheck source=/dev/null
+          source "$RT/lib/slack.sh"
+          if [ -n "$CH" ] && [ -n "$TS" ]; then
+            resp=$(slack_thread_reply "$CH" "$TS" "$msg")
+          else
+            echo "::warning::no slack coord for ${TAG}; posting fresh message to ${SLACK_RELEASES_CHANNEL}"
+            resp=$(jq -nc --arg c "$SLACK_RELEASES_CHANNEL" --arg t "$msg" \
+              '{channel: $c, text: $t}' | slack_post)
+          fi
+          if [ "$(echo "$resp" | jq -r .ok)" != "true" ]; then
+            echo "::error::post-publish slack post failed: $resp"
+            exit 1
+          fi
