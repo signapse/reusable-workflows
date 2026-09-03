@@ -20,10 +20,18 @@ gh_prs_since_tag() {
 
 gh_staging_ok() {
   # $1=owner/repo, $2=head-sha
+  # STAGING_CHECK_PATTERN is a jq test() regex over check-run names
+  # (default 'staging|smoke'). Empty disables the gate entirely.
   local repo="$1" sha="$2"
-  # shellcheck disable=SC2016 # jq $s binding, not shell expansion.
-  gh api "repos/$repo/commits/$sha/check-runs" --jq \
-    '[.check_runs[] | select(.name | test("staging|smoke"; "i"))] as $s
-     | if ($s|length) == 0 then true
-       else all($s[]; .conclusion == "success") end'
+  local pattern="${STAGING_CHECK_PATTERN-staging|smoke}"
+  if [ -z "$pattern" ]; then
+    echo true
+    return 0
+  fi
+  # shellcheck disable=SC2016 # jq $s / $pattern bindings, not shell expansion.
+  gh api "repos/$repo/commits/$sha/check-runs" \
+    | jq -c --arg pattern "$pattern" \
+      '[.check_runs[] | select(.name | test($pattern; "i"))] as $s
+       | if ($s|length) == 0 then true
+         else all($s[]; .conclusion == "success") end'
 }

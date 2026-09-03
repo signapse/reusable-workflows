@@ -54,3 +54,31 @@ teardown() { rm -rf "$TMP"; }
   [ "$status" -eq 0 ]
   [ "$output" = '[]' ]
 }
+
+@test "custom LINEAR_TEAM_KEY extracts that prefix only" {
+  git commit -q --allow-empty -m "feat: LIV-99 now matches, SIG-42 does not"
+  LINEAR_TEAM_KEY=LIV run "$SCRIPT" HEAD~1 HEAD
+  [ "$status" -eq 0 ]
+  [ "$output" = '["LIV-99"]' ]
+}
+
+@test "custom LINEAR_TEAM_KEY is case-insensitive on input, uppercase on output" {
+  git commit -q --allow-empty -m "chore: liv-7 lowercase"
+  LINEAR_TEAM_KEY=liv run "$SCRIPT" HEAD~1 HEAD
+  [ "$status" -eq 0 ]
+  [ "$output" = '["LIV-7"]' ]
+}
+
+@test "empty LINEAR_TEAM_KEY defaults to SIG" {
+  git commit -q --allow-empty -m "feat(SIG-5): a"
+  LINEAR_TEAM_KEY= run "$SCRIPT" HEAD~1 HEAD
+  [ "$status" -eq 0 ]
+  [ "$output" = '["SIG-5"]' ]
+}
+
+@test "non-alphanumeric LINEAR_TEAM_KEY is rejected" {
+  git commit -q --allow-empty -m "feat(SIG-5): a"
+  LINEAR_TEAM_KEY='SIG-X' run "$SCRIPT" HEAD~1 HEAD
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"alphanumeric"* ]]
+}
