@@ -1,0 +1,56 @@
+{
+  "blocks": [
+    {
+      "text": {
+        "text": "🚂 Ready to cut 1.2.25 for prod",
+        "type": "plain_text"
+      },
+      "type": "header"
+    },
+    {
+      "text": {
+        "text": "*Tickets (2):*\n• SIG-1 First (@alex)\n• SIG-2 Second (@bob)",
+        "type": "mrkdwn"
+      },
+      "type": "section"
+    },
+    {
+      "text": {
+        "text": "*Other PRs (1):*\n• #294 chore: dep bump (@dependabot) [deps]",
+        "type": "mrkdwn"
+      },
+      "type": "section"
+    },
+    {
+      "text": {
+        "text": "*Health:*\n• Staging ✅\n• Sentry 24h: 12 errors on 1.2.24",
+        "type": "mrkdwn"
+      },
+      "type": "section"
+    },
+    {
+      "elements": [
+        {
+          "style": "primary",
+          "text": {
+            "text": "Cut release tag",
+            "type": "plain_text"
+          },
+          "type": "button",
+          "url": "https://github.com/signapse/text-to-video-api/releases/tag/1.2.25"
+        }
+      ],
+      "type": "actions"
+    },
+    {
+      "elements": [
+        {
+          "text": "<!subteam^S000RELEASE|@release-clickers> — publishing the draft retags the image for prod promotion.",
+          "type": "mrkdwn"
+        }
+      ],
+      "type": "context"
+    }
+  ],
+  "channel": "#releases"
+}
