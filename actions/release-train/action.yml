@@ -1,0 +1,8 @@
+name: 'Release Train'
+description: 'Bash-heavy actions used by the SignStream release-train workflows.'
+inputs: {}
+runs:
+  using: 'composite'
+  steps:
+    - shell: bash
+      run: 'echo "release-train composite action — see workflows for entrypoints"'
