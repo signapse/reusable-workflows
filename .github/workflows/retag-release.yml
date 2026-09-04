@@ -1,0 +1,155 @@
+name: Retag Release (reusable)
+
+# Semver tags are RETAGS of the existing main-<run_number>-<sha> manifest built
+# by main-push.yml — no rebuild, so the same bytes move dev -> staging -> prod.
+#
+# The caller owns `on:`. Support both paths:
+#   release: published   -> tag comes from github.event.release.tag_name
+#   workflow_dispatch    -> caller maps its own tag/sha inputs onto `tag`/`sha`
+# The dispatch path is not optional: GitHub does not fire `release: published`
+# for a release created by GITHUB_TOKEN, so the spec's auto-cut path reaches
+# this workflow by explicit dispatch only.
+
+on:
+  workflow_call:
+    inputs:
+      services:
+        description: 'JSON array of service names (matches ECR repo names)'
+        required: true
+        type: string
+      ecr_repo_prefix:
+        description: 'ECR repo prefix, no slashes (e.g. "signstream"). Empty for none.'
+        required: false
+        type: string
+        default: ''
+      aws_region:
+        required: true
+        type: string
+      iam_role_arn:
+        required: true
+        type: string
+      tag:
+        description: 'Semver tag to create. Empty falls back to the release event.'
+        required: false
+        type: string
+        default: ''
+      sha:
+        description: 'Commit sha the tag points at. Empty resolves it from the tag.'
+        required: false
+        type: string
+        default: ''
+      sentry_org:
+        description: 'Sentry org slug. Empty (with sentry_project) skips the Sentry release.'
+        required: false
+        type: string
+        default: ''
+      sentry_project:
+        description: 'Sentry project slug. Empty skips the Sentry release job entirely.'
+        required: false
+        type: string
+        default: ''
+    secrets:
+      SENTRY_AUTH_TOKEN:
+        required: false
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  retag:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service: ${{ fromJSON(inputs.services) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ecr-retag.sh lives in this repo's composite action, and this job never
+      # invokes the action itself. Checkout rather than `git clone` so the ref is
+      # explicit; Phase 1 flips it to v1 alongside the callers.
+      - name: Fetch release-train scripts
+        uses: actions/checkout@v4
+        with:
+          repository: signapse/reusable-workflows
+          ref: main
+          path: _rw
+          persist-credentials: false
+
+      - name: Resolve tag + sha
+        id: resolve
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_SHA: ${{ inputs.sha }}
+        run: |
+          set -euo pipefail
+          tag="${RELEASE_TAG:-$INPUT_TAG}"
+          [ -n "$tag" ] || { echo "no tag"; exit 1; }
+          if [ -n "${INPUT_SHA:-}" ]; then
+            sha="$INPUT_SHA"
+          else
+            # Resolve the commit the tag points at. github.event.release.target_commitish
+            # is the branch name ("main"), not the sha — do not use it here.
+            git fetch --depth=1 origin "+refs/tags/$tag:refs/tags/$tag" 2>/dev/null || true
+            sha=$(git rev-parse "${tag}^{commit}")
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ inputs.iam_role_arn }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Find source main-<n>-<sha> tag in ECR
+        id: source
+        env:
+          REPO: ${{ format('{0}{1}', inputs.ecr_repo_prefix != '' && format('{0}/', inputs.ecr_repo_prefix) || '', matrix.service) }}
+          SHA: ${{ steps.resolve.outputs.sha }}
+        run: |
+          set -euo pipefail
+          src=$(aws ecr describe-images --repository-name "$REPO" \
+            --output json --query 'imageDetails[].imageTags[]' \
+            | jq -r '.[]' \
+            | grep -E "^main-[0-9]+-${SHA}$" \
+            | head -1)
+          if [ -z "$src" ]; then
+            echo "::error::no main-<n>-${SHA} tag in ${REPO}; main-push.yml must run for this commit first"
+            exit 1
+          fi
+          echo "src=$src" >> "$GITHUB_OUTPUT"
+
+      - name: Retag source as semver
+        env:
+          REPO: ${{ format('{0}{1}', inputs.ecr_repo_prefix != '' && format('{0}/', inputs.ecr_repo_prefix) || '', matrix.service) }}
+          SRC: ${{ steps.source.outputs.src }}
+          TAG: ${{ steps.resolve.outputs.tag }}
+        run: |
+          ./_rw/actions/release-train/scripts/ecr-retag.sh "$REPO" "$SRC" "$TAG"
+
+  sentry-release:
+    needs: retag
+    # Source workflow ran this unconditionally; gated here so services with no
+    # Sentry project can call the same workflow.
+    if: inputs.sentry_project != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Create Sentry release
+        # SHA-pinned, carried over from the source workflow: third-party action.
+        uses: getsentry/action-release@ff07929a6537bac57790c3451cf4d364aca38528 # v3
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG: ${{ inputs.sentry_org }}
+          SENTRY_PROJECT: ${{ inputs.sentry_project }}
+        with:
+          version: ${{ github.event.release.tag_name || inputs.tag }}
+          environment: production
+          set_commits: auto
