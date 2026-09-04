@@ -1,0 +1,9 @@
+{
+  "channel": "#releases",
+  "blocks": [
+    { "type": "header", "text": { "type": "plain_text", "text": "⏸ Release train held for 1.2.25" } },
+    { "type": "section", "text": { "type": "mrkdwn", "text": "*Blocking (1):*\n• SIG-2 Second — In QA (assignee: @bob)" } },
+    { "type": "section", "text": { "type": "mrkdwn", "text": "*Waiting (1):*\n• SIG-1 First (@alex)" } },
+    { "type": "context", "elements": [ { "type": "mrkdwn", "text": "Nagged assignees will unblock once tickets reach *Ready for Prod*." } ] }
+  ]
+}

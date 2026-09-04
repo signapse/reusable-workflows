@@ -1,0 +1,97 @@
+name: 'Release Train Compose'
+description: 'Compose TrainState JSON for the SignStream release train from the current git range.'
+
+# Requires from the calling job:
+#   * a checkout with `fetch-depth: 0` — train-composer walks the tag..HEAD range
+#   * env LINEAR_API_KEY, SENTRY_AUTH_TOKEN, GH_TOKEN — composite actions cannot
+#     read `secrets.*` themselves, so the caller sets them at job or step level
+#   * the caller owns the "no commits since last tag" silent-exit guard; this
+#     action assumes a non-empty range
+
+inputs:
+  last_tag:
+    description: 'Tag to diff from. Empty falls back to `git describe --tags --abbrev=0`.'
+    required: false
+    default: ''
+  linear_team_key:
+    description: 'Linear team key, alphanumeric (e.g. SIG)'
+    required: false
+    default: 'SIG'
+  sentry_org:
+    description: 'Sentry org slug'
+    required: false
+    default: 'signapse'
+  sentry_project:
+    description: >-
+      Sentry project slug. Empty skips the Sentry health check and reports 0.
+      NOTE: defaults to empty, so a caller that wants the check must opt in
+      (text-to-video-api passes "signstream" to keep its current behaviour).
+    required: false
+    default: ''
+  staging_check_pattern:
+    description: >-
+      jq test() regex over check-run names for the staging health gate.
+      Empty disables the gate. Default matches current behaviour.
+    required: false
+    default: 'staging|smoke'
+  serialization_detector_paths:
+    description: >-
+      RESERVED — not consumed in Phase 0. serialization-detector.sh runs in the
+      rollback path only; the compose path emits no schema-drift banner today.
+      Declared so callers written against the design spec stay valid.
+    required: false
+    default: '[]'
+
+outputs:
+  action_path:
+    description: >-
+      Absolute path to this action on the runner, so later steps in the same job
+      can invoke scripts/ and lib/ directly instead of re-cloning the repo
+      (a re-clone would take main regardless of the ref the caller pinned).
+    value: ${{ steps.compose.outputs.action_path }}
+  state:
+    description: 'TrainState JSON (compact, single line)'
+    value: ${{ steps.compose.outputs.state }}
+  next_version:
+    description: 'Next semver version'
+    value: ${{ steps.compose.outputs.next_version }}
+  variant:
+    description: 'ready | held'
+    value: ${{ steps.compose.outputs.variant }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Install deps
+      shell: bash
+      run: |
+        set -euo pipefail
+        which jq >/dev/null 2>&1 || { sudo apt-get update && sudo apt-get install -y jq; }
+
+    - name: Compose
+      id: compose
+      shell: bash
+      env:
+        GITHUB_REPOSITORY: ${{ github.repository }}
+        LAST_TAG: ${{ inputs.last_tag }}
+        LINEAR_TEAM_KEY: ${{ inputs.linear_team_key }}
+        SENTRY_ORG: ${{ inputs.sentry_org }}
+        SENTRY_PROJECT: ${{ inputs.sentry_project }}
+        STAGING_CHECK_PATTERN: ${{ inputs.staging_check_pattern }}
+      run: |
+        set -euo pipefail
+        echo "action_path=${{ github.action_path }}" >> "$GITHUB_OUTPUT"
+        HERE="${{ github.action_path }}/scripts"
+        last_tag="${LAST_TAG:-$(git describe --tags --abbrev=0)}"
+        state=$("$HERE/train-composer.sh" "$last_tag" HEAD)
+        {
+          echo "state<<EOF"
+          echo "$state"
+          echo "EOF"
+        } >> "$GITHUB_OUTPUT"
+        echo "next_version=$(echo "$state" | jq -r .next_version)" >> "$GITHUB_OUTPUT"
+        if [ "$(echo "$state" | jq '.blocking_tickets | length')" -gt 0 ]; then
+          echo "variant=held" >> "$GITHUB_OUTPUT"
+        else
+          echo "variant=ready" >> "$GITHUB_OUTPUT"
+        fi

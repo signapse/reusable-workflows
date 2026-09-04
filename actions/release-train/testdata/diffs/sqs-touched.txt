@@ -1,0 +1,2 @@
+internal/adaptors/queue/sqs/publisher.go
+internal/handlers/rest/v2/generate.go

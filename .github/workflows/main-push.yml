@@ -1,0 +1,78 @@
+name: Main Push (reusable)
+
+# Builds one image per service in `services`, tagged main-<run_number>-<sha>.
+# Those tags are consumed by Flux in dev + staging (ImagePolicy extracts
+# run_number and sorts numerically). Semver tags for prod are cut separately by
+# retag-release.yml, which retags these same manifests — never a rebuild.
+#
+# `run_number` is the CALLER's run number: the counter belongs to the caller
+# repo's workflow, so each service repo keeps its own monotonic sequence.
+
+on:
+  workflow_call:
+    inputs:
+      services:
+        description: >-
+          JSON array of service objects: [{name, dockerfile?, build_args?}].
+          `name` is the ECR repo name (appended to registry + prefix).
+          `dockerfile` defaults to ./Dockerfile.
+        required: true
+        type: string
+      ecr_registry:
+        description: 'ECR registry hostname'
+        required: true
+        type: string
+      ecr_repo_prefix:
+        description: 'ECR repo prefix, no slashes (e.g. "signstream"). Empty for none.'
+        required: false
+        type: string
+        default: ''
+      aws_region:
+        required: true
+        type: string
+      iam_role_arn:
+        required: true
+        type: string
+      use_buildx:
+        required: false
+        type: boolean
+        default: true
+      enable_trivy_scan:
+        required: false
+        type: boolean
+        default: true
+    secrets:
+      private_modules_token:
+        required: false
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        service: ${{ fromJSON(inputs.services) }}
+    # Absolute @main reference, not `./.github/workflows/...`: this repo's own
+    # convention for nesting a same-repo reusable workflow (go-ci, python-ci,
+    # rust-ci, ci all do it this way) and it avoids any ambiguity about how a
+    # relative path resolves when this workflow is called from another repo.
+    # Trade-off: build-and-push-ecr is taken from main even when this workflow
+    # runs from a branch. Phase 1 flips @main -> @v1 with the tag cut.
+    uses: signapse/reusable-workflows/.github/workflows/build-and-push-ecr.yml@main
+    with:
+      ecr_repository_uri: ${{ format('{0}/{1}{2}', inputs.ecr_registry, inputs.ecr_repo_prefix != '' && format('{0}/', inputs.ecr_repo_prefix) || '', matrix.service.name) }}
+      # Do not pass '' — dockerfile_path goes straight to `docker build -f`, so
+      # an empty value breaks the build rather than falling back to the default.
+      dockerfile_path: ${{ matrix.service.dockerfile || './Dockerfile' }}
+      docker_build_args: ${{ matrix.service.build_args || '' }}
+      aws_region: ${{ inputs.aws_region }}
+      iam_role_arn: ${{ inputs.iam_role_arn }}
+      image_tag: main-${{ github.run_number }}-${{ github.sha }}
+      push_latest: false
+      use_buildx: ${{ inputs.use_buildx }}
+      enable_trivy_scan: ${{ inputs.enable_trivy_scan }}
+    secrets:
+      private_modules_token: ${{ secrets.private_modules_token }}
