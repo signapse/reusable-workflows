@@ -69,6 +69,42 @@ on:
         type: number
         default: 80
 
+      coverage-args:
+        description: >-
+          Extra args appended to test-command when coverage is enabled.
+          The default is Jest's flag syntax, which is what this workflow has
+          always emitted. Vitest rejects --coverageThreshold, so vitest repos
+          must override this (e.g. '--coverage --coverage.thresholds.lines=80').
+          coverage-threshold is interpolated into the default only.
+        required: false
+        type: string
+        default: ''
+
+      audit-args:
+        description: >-
+          Extra args appended verbatim to the package manager's audit command.
+          The value is NOT translated between managers, so it must match the one
+          this repo uses.
+
+          To gate on production dependencies only — the set that actually ships
+          in a container image — pass the flag for your manager:
+          npm '--omit=dev'; pnpm '--prod'; Yarn Modern '--environment production';
+          Yarn Classic '--groups dependencies'. Passing npm's '--omit=dev' to
+          either Yarn fails the audit step on an unknown option rather than
+          silently auditing everything.
+        required: false
+        type: string
+        default: ''
+
+      disable-eslint:
+        description: >-
+          Disable Super-Linter's bundled ESLint linters. Required for repos on
+          ESLint flat config (eslint.config.js/.mjs), whose own `lint-command`
+          already covers those files.
+        required: false
+        type: boolean
+        default: false
+
       build-command:
         description: 'Build command to run'
         required: false
@@ -117,6 +153,18 @@ on:
         type: string
         default: ''
 
+    secrets:
+      private_modules_token:
+        description: >-
+          Token for private package registries. Exposed to the install steps as
+          NPM_TOKEN, which a committed .npmrc can reference, and additionally as
+          YARN_NPM_AUTH_TOKEN for Yarn, which Berry reads instead of .npmrc.
+          Required for repos
+          with private scoped deps as soon as a job resolves versions rather
+          than replaying the lockfile — an added or bumped dependency 401s
+          without it.
+        required: false
+
 jobs:
   # ─── Track 1a: Super-Linter (parallel) ───
   super-lint:
@@ -127,6 +175,7 @@ jobs:
       disable-checkov: ${{ inputs.disable-checkov }}
       disable-jscpd: ${{ inputs.disable-jscpd }}
       disable-gitleaks: ${{ inputs.disable-gitleaks }}
+      disable-eslint: ${{ inputs.disable-eslint }}
       extra-super-linter-env: ${{ inputs.extra-super-linter-env }}
 
   # ─── Track 1b: Docker Lint (parallel) ───
@@ -155,14 +204,26 @@ jobs:
       # ── Install dependencies ──
       - name: Install dependencies (npm)
         if: inputs.package-manager == 'npm'
+        env:
+          NPM_TOKEN: ${{ secrets.private_modules_token }}
         run: npm ci
 
+      # Both tokens, because the two Yarn generations authenticate differently:
+      # Classic reads the committed .npmrc (NPM_TOKEN), while Berry ignores
+      # .npmrc entirely and takes YARN_NPM_AUTH_TOKEN from the environment. With
+      # only NPM_TOKEN a Yarn 2+ repo still 401s on private scoped deps, which
+      # is the exact failure this secret exists to prevent.
       - name: Install dependencies (yarn)
         if: inputs.package-manager == 'yarn'
+        env:
+          NPM_TOKEN: ${{ secrets.private_modules_token }}
+          YARN_NPM_AUTH_TOKEN: ${{ secrets.private_modules_token }}
         run: yarn install --frozen-lockfile
 
       - name: Install dependencies (pnpm)
         if: inputs.package-manager == 'pnpm'
+        env:
+          NPM_TOKEN: ${{ secrets.private_modules_token }}
         run: |
           corepack enable
           pnpm install --frozen-lockfile
@@ -188,8 +249,21 @@ jobs:
       - name: Run tests with coverage
         id: tests-coverage
         if: ${{ inputs.run-tests && inputs.coverage-enabled }}
+        env:
+          COVERAGE_ARGS: ${{ inputs.coverage-args }}
+          THRESHOLD: ${{ inputs.coverage-threshold }}
         run: |
-          ${{ inputs.test-command }} -- --coverage --coverageThreshold='{"global":{"lines":${{ inputs.coverage-threshold }},"branches":${{ inputs.coverage-threshold }},"functions":${{ inputs.coverage-threshold }},"statements":${{ inputs.coverage-threshold }}}}'
+          set -euo pipefail
+          # An array, not a string: the Jest default embeds double quotes that
+          # have to survive as literal characters inside a single argv entry,
+          # which word-splitting an unquoted string cannot guarantee.
+          if [ -n "$COVERAGE_ARGS" ]; then
+            read -r -a args <<< "$COVERAGE_ARGS"
+          else
+            # Jest's flag syntax — this workflow's long-standing default.
+            args=(--coverage "--coverageThreshold={\"global\":{\"lines\":${THRESHOLD},\"branches\":${THRESHOLD},\"functions\":${THRESHOLD},\"statements\":${THRESHOLD}}}")
+          fi
+          ${{ inputs.test-command }} -- "${args[@]}"
 
       # ── Build ──
       - name: Build
@@ -201,25 +275,38 @@ jobs:
       - name: Security audit (npm)
         id: security-npm
         if: ${{ inputs.run-security && inputs.package-manager == 'npm' }}
-        run: npm audit --audit-level=high
+        env:
+          AUDIT_ARGS: ${{ inputs.audit-args }}
+        run: |
+          set -euo pipefail
+          read -r -a audit_args <<< "${AUDIT_ARGS:-}"
+          npm audit --audit-level=high "${audit_args[@]}"
         continue-on-error: false
 
       - name: Security audit (yarn)
         id: security-yarn
         if: ${{ inputs.run-security && inputs.package-manager == 'yarn' }}
+        env:
+          AUDIT_ARGS: ${{ inputs.audit-args }}
         run: |
           YARN_MAJOR=$(yarn --version | cut -d. -f1)
+          read -r -a audit_args <<< "${AUDIT_ARGS:-}"
           if [ "$YARN_MAJOR" -ge 2 ]; then
-            yarn npm audit --severity high
+            yarn npm audit --severity high "${audit_args[@]}"
           else
-            yarn audit --level high
+            yarn audit --level high "${audit_args[@]}"
           fi
         continue-on-error: false
 
       - name: Security audit (pnpm)
         id: security-pnpm
         if: ${{ inputs.run-security && inputs.package-manager == 'pnpm' }}
-        run: pnpm audit --audit-level high
+        env:
+          AUDIT_ARGS: ${{ inputs.audit-args }}
+        run: |
+          set -euo pipefail
+          read -r -a audit_args <<< "${AUDIT_ARGS:-}"
+          pnpm audit --audit-level high "${audit_args[@]}"
         continue-on-error: false
 
       # ── Upload coverage artifact ──
