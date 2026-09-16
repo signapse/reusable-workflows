@@ -10,10 +10,14 @@ on:
         default: ''
 
       golangci_lint_version:
-        description: 'golangci-lint version'
+        description: 'golangci-lint version (must be a v2 release, or "latest")'
         required: false
         type: string
-        default: 'latest'
+        # Pinned deliberately, not 'latest'. A linter release can turn CI red
+        # across every open PR in every calling repo with no code change on
+        # anyone's part, which has already happened twice. Bump this
+        # consciously.
+        default: 'v2.13.2'
 
       run_lint:
         description: 'Run lint and format check'
@@ -153,11 +157,28 @@ jobs:
         env:
           GOPRIVATE: ${{ inputs.goprivate }}
 
+      # golangci-lint v2 lives on a /v2 module path, which `install-mode:
+      # goinstall` cannot reach: it runs
+      #     go install github.com/golangci/golangci-lint/cmd/golangci-lint@<version>
+      # against the v1 path, so 'latest' resolved to v1.64.8. That breaks two
+      # ways, both verified rather than assumed:
+      #
+      #   * Go >= 1.27 emits export data format version 4, and v1's bundled
+      #     type-checker reads version 2 at most. It then cannot import even
+      #     `unicode`, every package fails to typecheck, and the cascade
+      #     surfaces as hundreds of bogus "undefined: X" errors with nothing
+      #     wrong in the code. Go 1.25 and 1.26 are unaffected.
+      #   * A repo with a `version: "2"` .golangci.yml is refused outright:
+      #     "you are using a configuration file for golangci-lint v2 with
+      #     golangci-lint v1".
+      #
+      # Action v8 downloads the released binary and resolves v2 correctly, so
+      # install-mode is left at its default. Do not reintroduce goinstall here
+      # without switching the module path to /v2 as well.
       - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v8.0.0
         with:
           version: ${{ inputs.golangci_lint_version }}
-          install-mode: goinstall
           args: --timeout=5m
 
       - name: Check formatting
