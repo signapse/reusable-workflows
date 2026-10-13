@@ -1,0 +1,4 @@
+{
+  "SIG-1": { "identifier": "SIG-1", "title": "First", "assignee": {"displayName":"alex"}, "creator": {"displayName":"alex"}, "state": {"name":"Ready for Prod"} },
+  "SIG-2": { "identifier": "SIG-2", "title": "Second", "assignee": {"displayName":"bob"}, "creator": {"displayName":"bob"}, "state": {"name":"Ready for Prod"} }
+}
