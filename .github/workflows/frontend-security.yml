@@ -38,11 +38,4 @@ jobs:
       - name: Audit production dependencies
         env:
           AUDIT_LEVEL: ${{ inputs.audit-level }}
-        run: |
-          if [ -f pnpm-lock.yaml ] && [ ! -f package-lock.json ]; then
-            npx --yes pnpm@9 audit --prod --audit-level "$AUDIT_LEVEL"
-          else
-            # Repos without a committed lockfile get one resolved for the audit.
-            [ -f package-lock.json ] || npm install --package-lock-only --ignore-scripts --no-audit --no-fund
-            npm audit --omit=dev --audit-level "$AUDIT_LEVEL"
-          fi
+        run: npm audit --omit=dev --audit-level "$AUDIT_LEVEL"
