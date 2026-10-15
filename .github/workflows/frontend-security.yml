@@ -1,0 +1,41 @@
+name: Frontend security
+
+# Fails when production dependencies (the code shipped to browsers) have
+# known vulnerabilities at or above audit-level. Call it on pull_request and
+# push to main, and make "Dependency audit" a required check.
+
+on:
+  workflow_call:
+    inputs:
+      audit-level:
+        description: 'Lowest severity that fails the check (low, moderate, high, critical)'
+        required: false
+        type: string
+        default: 'high'
+      working-directory:
+        description: 'Directory containing package.json'
+        required: false
+        type: string
+        default: '.'
+
+permissions:
+  contents: read
+
+jobs:
+  dependency-audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+
+      - name: Audit production dependencies
+        env:
+          AUDIT_LEVEL: ${{ inputs.audit-level }}
+        run: npm audit --omit=dev --audit-level "$AUDIT_LEVEL"
