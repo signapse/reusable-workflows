@@ -55,7 +55,9 @@ Consequence: the Rollout percentage counts users, not customer accounts. During 
         "variant": null
       },
       {
-        "properties": [],
+        "properties": [
+          { "key": "environment", "type": "person", "operator": "exact", "value": ["prod", "production"] }
+        ],
         "rollout_percentage": 0,
         "variant": null
       }
@@ -70,11 +72,11 @@ Consequence: the Rollout percentage counts users, not customer accounts. During 
 |---|---|---|---|
 | `groups[0]` | `environment` is `dev`, `development` or `staging` | 100 | Nobody |
 | `groups[1]` | person in the QA Cohort | 100 | Nobody |
-| `groups[2]` | everyone (no properties) | **the Rollout percentage**: 0, 10, 50, 100 | Prodzilla only |
+| `groups[2]` | `environment` is `prod` or `production` | **the Rollout percentage**: 0, 10, 50, 100 | Prodzilla only |
 
 Conditions are OR'd, so a person matching any condition gets the flag.
 
-- **Prod is the catch-all, not an explicit `environment = prod` match.** Anything not dev or staging, including a missing or misspelt `environment`, falls through to `groups[2]`. A misconfigured app therefore sees the flag dark (off) rather than on. It also means `production` and `prod` both work without being listed.
+- **Every condition names its environment; there is no catch-all.** A client whose `environment` is missing or misspelt matches only `groups[1]`, so it sees the flag dark (off) at every Rollout percentage, including 100. The cost: an app that does not pass `environment` never gets the feature, only its QA Cohort users do. That is deliberate. The flag is removed from code after Done, so the feature does not stay hidden behind it.
 - `ensure_experience_continuity` is off: it is not needed for boolean flags with stable distinct_ids and it disables local evaluation.
 - PostHog hashes flag key + distinct_id, so the people on at 10% stay on at 50% and 100%.
 
@@ -93,7 +95,7 @@ Titles change, so to find a ticket's flag match on the prefix `sig-<n>-`, never 
 Only `groups[2].rollout_percentage` ever changes.
 
 1. `GET /api/projects/256388/feature_flags/<id>/`. Keep `version`.
-2. Check the flag still has the template shape: three groups; `groups[0]` is the `environment` condition at 100; `groups[1]` is the cohort condition for `QA_COHORT_ID` at 100; `groups[2].properties` is `[]`. If not, someone edited it by hand: stop and alert Slack rather than writing.
+2. Check the flag still has the template shape: three groups; `groups[0]` is the `environment` condition at 100; `groups[1]` is the cohort condition for `QA_COHORT_ID` at 100; `groups[2]` is the `environment` in `prod`/`production` condition. If not, someone edited it by hand: stop and alert Slack rather than writing.
 3. `PATCH` the flag with `filters` equal to what you read with only `groups[2].rollout_percentage` changed, and the `version` from step 1. PostHog answers 409 if anyone changed the flag since your read; re-read and re-check, never blind-retry.
 
 | Action | `groups[2].rollout_percentage` |
@@ -109,7 +111,7 @@ Because abort only touches `groups[2]`, it can never switch the flag off for the
 
 A **static** PostHog cohort named `QA Cohort`, description "Internal Signapse test accounts that see Feature flags in prod before a Rollout. Owned by the QA team. See reusable-workflows docs/POSTHOG-FLAGS.md."
 
-Members are persons, identified by distinct_id, which is the account-service user id (a 24-character hex id, or a Google subject id for Google sign-in) with any `auth0|` prefix stripped. A person exists in PostHog only once that account has signed in to a PostHog-instrumented app in prod.
+Members are persons, identified by distinct_id, which is the account-service user id (a 24-character hex id, or a Google subject id for Google sign-in) with any `auth0` prefix (and its pipe separator) stripped. A person exists in PostHog only once that account has signed in to a PostHog-instrumented app in prod.
 
 Why static rather than a filter (for example `email` contains `@signapse.ai`): no app sends email or name as person properties (sign-stream-platform deliberately does not, for consent reasons), so a property-based cohort has nothing to match.
 
@@ -128,7 +130,7 @@ For every product that checks a Feature flag:
 
 | Field | Value | Where |
 |---|---|---|
-| distinct_id | account-service user id, `auth0|` prefix stripped (sign-stream-platform's `posthog.identify(stripAuth0Prefix(user.user_id))` is the reference) | `identify` on the client; the same id on server checks |
+| distinct_id | account-service user id with the `auth0` prefix (and its pipe separator) stripped (sign-stream-platform's `posthog.identify(stripAuth0Prefix(user.user_id))` is the reference) | `identify` on the client; the same id on server checks |
 | `environment` person property **for flags** | `dev`, `staging` or `prod` (canonical); `development` and `production` are accepted while existing apps still send them | client: `posthog.setPersonPropertiesForFlags({ environment })` straight after `posthog.init`; server: `personProperties` on every flag call |
 | `environment` event super property | the same value | `posthog.register({ environment })` (already done in sign-stream-platform and auth-service) |
 | project token | `256388`'s token in every environment | env file / config |
@@ -176,9 +178,10 @@ if err != nil {
 2. `PROD_PERCENT=0 posthog-flag-check.sh sig-2749-posthog-qa-cohort-and-environment`
    - AC2: on in `dev`, `development`, `staging` for both accounts; off in `prod` for the other account; 0 of 100 synthetic ids on.
    - AC3: on in `prod` (and `production`) for the QA account.
+   - Fail dark: off for the other account with an empty or unknown `environment`.
 3. Set `groups[2].rollout_percentage` to 10 (UI: the third condition set; or the PATCH above).
 4. `PROD_PERCENT=10 posthog-flag-check.sh sig-2749-posthog-qa-cohort-and-environment`
-   - AC4: about 10 of 100 synthetic non-cohort ids on (accepted 1 to 19, three standard deviations); QA account still on.
+   - AC4: about 10 of 100 synthetic non-cohort ids on (accepted 1 to 19, three standard deviations); QA account still on. The script refuses a `SAMPLE` too small for the band to exclude 0 and all.
 5. Set it back to 0 and re-run step 2 (the abort path).
 6. AC5: compare the flag's JSON in PostHog with the template above.
 
@@ -191,7 +194,7 @@ If a product needs a Rollout to bucket customer organisations instead of users: 
 ## Gaps (as of 2026-11-03)
 
 - **Only two apps use PostHog**: sign-stream-platform (SignStream portal) and signapse-auth-monorepo `auth-service`. sign-stream-api, hub-next, video-translation-platform and signapse-accounts have no PostHog SDK. Flags for their Feature tickets have nothing to read them until each repo adds the SDK as described above.
-- **No app passes `environment` for flag evaluation yet.** Both apps register it as an event super property only, with values `production` / `development`. Until they call `setPersonPropertiesForFlags`, dev traffic falls into the prod catch-all and sees the flag dark.
+- **No app passes `environment` for flag evaluation yet.** Both apps register it as an event super property only, with values `production` / `development`. Until they call `setPersonPropertiesForFlags`, their users (dev and prod) see every Feature flag dark except QA Cohort members.
 - **Dev builds use the separate `SignStream Dev` project (275880).** sign-stream-platform's `.env.development` (and auth-service) were moved there so dev and prod flags could differ; this template does that inside one project. Pointing dev at `256388` is a decision that reverses that change, so it belongs with the app-change tickets; until then, Prodzilla's flags are invisible on SignStream dev.
 - **Rollout buckets users, not accounts** (see the decision above).
 - **The project is named `SignStream Production`** although it is the all-environments, all-products project. Renaming it is optional and cosmetic.

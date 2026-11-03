@@ -10,6 +10,7 @@
 #   prod                       -> on for the QA account
 #   prod, SAMPLE synthetic ids -> on for about PROD_PERCENT% of them
 #                                 (exactly none at 0, exactly all at 100)
+#   missing/unknown environment -> off for the other account at any percentage
 #
 # Env:
 #   POSTHOG_PROJECT_TOKEN  required, the public project token (phc_...)
@@ -49,7 +50,7 @@ evaluate() {
   local body resp
   body=$(jq -nc --arg t "$POSTHOG_PROJECT_TOKEN" --arg d "$1" --arg e "$2" \
     '{api_key: $t, distinct_id: $d, person_properties: {environment: $e}}')
-  resp=$(curl -sS --fail -X POST "${HOST%/}/flags?v=2" \
+  resp=$(curl -sS --fail --connect-timeout 5 --max-time 20 -X POST "${HOST%/}/flags?v=2" \
     -H 'Content-Type: application/json' --data-binary "$body") \
     || die "/flags request failed for distinct_id=$1 environment=$2"
   jq -er --arg k "$KEY" '.flags[$k].enabled | if type == "boolean" then tostring else error("missing") end' <<< "$resp" 2> /dev/null \
@@ -73,6 +74,20 @@ if [ "$PERCENT" -eq 0 ]; then
 elif [ "$PERCENT" -eq 100 ]; then
   expect true "$OTHER_DISTINCT_ID" prod "prod at 100%, non-cohort account"
 fi
+expect false "$OTHER_DISTINCT_ID" "" "fail dark, empty environment, non-cohort account"
+expect false "$OTHER_DISTINCT_ID" unknown "fail dark, unknown environment, non-cohort account"
+
+# Accept within 3 standard deviations of the binomial mean.
+read -r lo hi < <(awk -v n="$N" -v p="$PERCENT" 'BEGIN {
+  p /= 100; m = n * p; s = 3 * sqrt(n * p * (1 - p))
+  lo = int(m - s); if (lo < 0) lo = 0
+  hi = int(m + s + 0.999999); if (hi > n) hi = n
+  printf "%d\t%d\n", lo, hi }')
+# Between 0 and 100 the band must exclude "none on" and "all on", or a flag
+# stuck at 0% (or 100%) would pass.
+if [ "$PERCENT" -gt 0 ] && [ "$PERCENT" -lt 100 ] && { [ "$lo" -eq 0 ] || [ "$hi" -ge "$N" ]; }; then
+  die "SAMPLE=$N is too small to tell ${PERCENT}% from 0% or 100%; raise SAMPLE"
+fi
 
 # AC4: share of synthetic non-cohort ids that get the flag in prod.
 on=0
@@ -80,12 +95,6 @@ for i in $(seq 1 "$N"); do
   r=$(evaluate "sig-flag-check-${KEY}-${i}" prod)
   if [ "$r" = true ]; then on=$((on + 1)); fi
 done
-# Accept within 3 standard deviations of the binomial mean.
-read -r lo hi < <(awk -v n="$N" -v p="$PERCENT" 'BEGIN {
-  p /= 100; m = n * p; s = 3 * sqrt(n * p * (1 - p))
-  lo = int(m - s); if (lo < 0) lo = 0
-  hi = int(m + s + 0.999999); if (hi > n) hi = n
-  printf "%d\t%d\n", lo, hi }')
 label="AC4 prod at ${PERCENT}%, ${on}/${N} synthetic non-cohort ids on (accept ${lo}-${hi})"
 if [ "$on" -ge "$lo" ] && [ "$on" -le "$hi" ]; then pass "$label"; else fail "$label"; fi
 

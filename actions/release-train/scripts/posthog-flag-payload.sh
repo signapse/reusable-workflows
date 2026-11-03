@@ -6,7 +6,7 @@
 #
 #   groups[0]  environment in dev/staging   100%  (never changes)
 #   groups[1]  QA Cohort                    100%  (never changes)
-#   groups[2]  everyone else (prod)         0%    (the Rollout percentage)
+#   groups[2]  environment in prod          0%    (the Rollout percentage)
 #
 # QA_COHORT_ID (required) is the numeric id of the "QA Cohort" static cohort.
 # Prints JSON only; it never calls PostHog.
@@ -78,7 +78,10 @@ jq -n \
           variant: null
         },
         {
-          properties: [],
+          properties: [
+            {key: "environment", type: "person", operator: "exact",
+             value: ["prod", "production"]}
+          ],
           rollout_percentage: 0,
           variant: null
         }

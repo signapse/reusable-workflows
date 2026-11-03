@@ -40,7 +40,10 @@ teardown() { rm -rf "$TMP"; }
     = '["environment","person","exact",["dev","development","staging"]]' ]
   [ "$(jq -c '.filters.groups[1].properties[0] | [.key,.type,.operator,.value]' <<< "$output")" \
     = '["id","cohort","in",4242]' ]
-  [ "$(jq -c '.filters.groups[2].properties' <<< "$output")" = "[]" ]
+  [ "$(jq -c '.filters.groups[2].properties[0] | [.key,.type,.operator,.value]' <<< "$output")" \
+    = '["environment","person","exact",["prod","production"]]' ]
+  # No catch-all: every condition names an environment or the cohort.
+  [ "$(jq '[.filters.groups[] | select(.properties == [])] | length' <<< "$output")" -eq 0 ]
 }
 
 @test "payload: person-aggregated, active, no experience continuity" {
@@ -75,8 +78,9 @@ teardown() { rm -rf "$TMP"; }
 
 # --- posthog-flag-check.sh --------------------------------------------------
 # A fake curl answers /flags the way the standard setup would: on in
-# dev/development/staging, on for the QA id, and on for synthetic ids whose
-# trailing number mod 100 is below STUB_PERCENT.
+# dev/development/staging, on for the QA id, and in prod/production on for
+# synthetic ids whose trailing number mod 100 is below STUB_PERCENT.
+# STUB_CATCH_ALL=1 imitates the rejected catch-all prod condition.
 
 stub_curl() {
   mkdir -p "$TMP/bin"
@@ -94,8 +98,12 @@ env=$(jq -r .person_properties.environment <<< "$body")
 on=false
 case "$env" in dev|development|staging) on=true ;; esac
 [ "$id" = "qa-user" ] && on=true
-if [[ "$id" =~ -([0-9]+)$ ]] && [ $(( BASH_REMATCH[1] % 100 )) -lt "${STUB_PERCENT:-0}" ]; then on=true; fi
-[ "$id" = "other-user" ] && [ "${STUB_PERCENT:-0}" -ge 100 ] && [ "$on" = false ] && on=true
+prod=false
+case "$env" in prod|production) prod=true ;; dev|development|staging) ;; *) [ -n "${STUB_CATCH_ALL:-}" ] && prod=true ;; esac
+if [ "$prod" = true ]; then
+  if [[ "$id" =~ -([0-9]+)$ ]] && [ $(( BASH_REMATCH[1] % 100 )) -lt "${STUB_PERCENT:-0}" ]; then on=true; fi
+  if [ "$id" = "other-user" ] && [ "${STUB_PERCENT:-0}" -ge 100 ]; then on=true; fi
+fi
 jq -nc --arg k "$STUB_KEY" --argjson on "$on" '{flags: {($k): {key: $k, enabled: $on}}}'
 EOF
   chmod +x "$TMP/bin/curl"
@@ -131,6 +139,20 @@ EOF
   STUB_PERCENT=100 PROD_PERCENT=100 SAMPLE=10 run "$CHECK" sig-1-thing
   [ "$status" -eq 0 ]
   [[ "$output" == *"10/10 synthetic"* ]]
+}
+
+@test "check: a catch-all prod condition fails the fail-dark check at 100%" {
+  stub_curl
+  STUB_CATCH_ALL=1 STUB_PERCENT=100 PROD_PERCENT=100 SAMPLE=10 run "$CHECK" sig-1-thing
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"FAIL fail dark, unknown environment"* ]]
+}
+
+@test "check: refuses a sample too small to tell 10% from 0%" {
+  stub_curl
+  STUB_PERCENT=0 PROD_PERCENT=10 SAMPLE=20 run "$CHECK" sig-1-thing
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"SAMPLE=20 is too small"* ]]
 }
 
 @test "check: missing flag is an error, not a silent false" {
