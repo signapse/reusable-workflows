@@ -127,22 +127,28 @@ fi
 release_id=$(jq -r '.id' <<<"$release")
 
 # --- 4. attach tickets (addedReleaseIds is additive, so re-runs are no-ops) --
+# A ref Linear does not know (typo, other workspace) is reported, not fatal.
+# Any other failure (auth, rate limit, 5xx) fails the run rather than leave a
+# Release with silently missing tickets.
 unresolved='[]'
 for t in $(jq -r '.[]' <<<"$tickets"); do
   resp=$(linear_query 'mutation($id:String!,$rid:String!){ issueUpdate(id:$id, input:{addedReleaseIds:[$rid]}){ success } }' \
-    "$(jq -nc --arg id "$t" --arg rid "$release_id" '{id:$id, rid:$rid}')") || resp='{}'
-  if [ "$(jq -r '.data.issueUpdate.success // false' <<<"$resp")" != "true" ]; then
-    log "WARN: could not attach $t: $(jq -r '[.errors[]?.message] | join("; ")' <<<"$resp" 2> /dev/null)"
+    "$(jq -nc --arg id "$t" --arg rid "$release_id" '{id:$id, rid:$rid}')") || die "attaching $t failed"
+  [ "$(jq -r '.data.issueUpdate.success // false' <<<"$resp")" = "true" ] && continue
+  errs=$(jq -r '[.errors[]?.message] | join("; ")' <<<"$resp")
+  if grep -qi 'not found' <<<"$errs"; then
+    log "WARN: $t not found in Linear: $errs"
     unresolved=$(jq -c --arg t "$t" '. + [$t]' <<<"$unresolved")
+  else
+    die "attaching $t failed: ${errs:-issueUpdate returned success=false}"
   fi
 done
 
 # Keep the description true to what is attached (also refreshes it on re-run).
-if [ "$created" = true ] && [ "$unresolved" = '[]' ]; then
-  :
-else
-  gql 'mutation($id:String!,$d:String!){ releaseUpdate(id:$id, input:{description:$d}){ success } }' \
-    "$(jq -nc --arg id "$release_id" --arg d "$(describe "$unresolved")" '{id:$id, d:$d}')" > /dev/null
+if [ "$created" != true ] || [ "$unresolved" != '[]' ]; then
+  out=$(gql 'mutation($id:String!,$d:String!){ releaseUpdate(id:$id, input:{description:$d}){ success } }' \
+    "$(jq -nc --arg id "$release_id" --arg d "$(describe "$unresolved")" '{id:$id, d:$d}')")
+  [ "$(jq -r '.releaseUpdate.success // false' <<<"$out")" = "true" ] || die "releaseUpdate (description) failed"
 fi
 
 jq -nc --argjson r "$release" --argjson created "$created" \

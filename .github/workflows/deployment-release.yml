@@ -3,8 +3,10 @@ name: Deployment Release (reusable)
 # Records one production Deployment: a Release in the product's Linear release
 # pipeline (stage `Deployed`) listing the tickets in the deployed commits, and a
 # Sentry release with the identical version. Call it after the Release
-# Candidate's image reaches production. Idempotent on `version`: a re-run
-# reuses the Linear Release and adds no second Sentry deploy.
+# Candidate's image reaches production, from the product repo (it reads the
+# product's tags and commits). Idempotent on `version`: a re-run reuses the
+# Linear Release; Sentry keys releases by version, so it stays one release
+# (a re-run adds a second deploy record to it).
 #
 # Docs: docs/DEPLOYMENT-RELEASE.md
 
@@ -164,31 +166,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Fetch release-train scripts
-        uses: actions/checkout@v4
-        with:
-          repository: signapse/reusable-workflows
-          ref: main
-          path: _rw
-          persist-credentials: false
-
-      # action-release records a deploy on every run; skip it when this
-      # version already has a deploy to the environment (re-run, or
-      # retag-release.yml already recorded one).
-      - name: Check for existing Sentry deploy
-        id: existing
-        env:
-          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
-          SENTRY_ORG: ${{ inputs.sentry_org }}
-          VERSION: ${{ inputs.version }}
-          SENTRY_ENVIRONMENT: ${{ inputs.sentry_environment }}
-        run: |
-          set -euo pipefail
-          source ./_rw/actions/release-train/lib/sentry.sh
-          echo "deployed=$(sentry_has_deploy "$VERSION" "$SENTRY_ENVIRONMENT")" >> "$GITHUB_OUTPUT"
-
       - name: Create Sentry release
-        if: steps.existing.outputs.deployed != 'true'
         # Same pinned action and settings as retag-release.yml.
         uses: getsentry/action-release@ff07929a6537bac57790c3451cf4d364aca38528 # v3
         env:

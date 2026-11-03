@@ -45,6 +45,8 @@ case "$q" in
     echo "issueUpdate $id" >> "$STATE/calls"
     if grep -qx "$id" "$STATE/missing" 2>/dev/null; then
       printf '{"errors":[{"message":"Entity not found: Issue"}],"data":null}'
+    elif [ -f "$STATE/deny" ]; then
+      printf '{"errors":[{"message":"Authentication required"}],"data":null}'
     else
       printf '{"data":{"issueUpdate":{"success":true}}}'
     fi ;;
@@ -168,4 +170,11 @@ EOF
   [ "$(jq -c '.tickets' <<<"$output")" = '["SIG-101"]' ]
   [ "$(jq -c '.unresolved' <<<"$output")" = '["SIG-102"]' ]
   [[ "$(jq -r '.d' "$STATE/update-vars.json")" == *"not found in Linear: SIG-102"* ]]
+}
+
+@test "attach failure other than not-found (auth): run fails, not reported as unresolved" {
+  touch "$STATE/deny"
+  run "$SCRIPT" v0.0.1 v0.0.0 v0.0.1
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"attaching SIG-101 failed: Authentication required"* ]]
 }

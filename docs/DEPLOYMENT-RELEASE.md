@@ -3,9 +3,11 @@
 Records each production Deployment in two places, under one version number (the Release Candidate's semver tag):
 
 - a **Linear Release** in the product's Production release pipeline, created in stage `Deployed`, with the tickets found in the deployed commits attached. Commits with no ticket ref are listed in the Release description under "Untracked commits".
-- a **Sentry release** with the identical version and a deploy to `production`, via the same pinned `getsentry/action-release` as `retag-release.yml`.
+- a **Sentry release** with the identical version and a deploy to `production`, via the same pinned `getsentry/action-release` and settings as `retag-release.yml`.
 
-Calling it twice with the same `version` gives one Linear Release (found by version in the pipeline, never re-created, and its stage left unchanged) and one Sentry deploy.
+Calling it twice with the same `version` gives one Linear Release (found by version in the pipeline, never re-created, and its stage left unchanged) and one Sentry release (Sentry keys releases by version). Each run adds a deploy record to that Sentry release, so a re-run shows two production deploys.
+
+Call it from the **product repo** (the one that owns the version tag), not from signapse-core-k8s: it checks out the calling repo to read the tag and commits.
 
 ## Usage
 
@@ -55,7 +57,7 @@ linear_pipeline: SignStream   # exact name of the Linear release pipeline
 | `tickets` | JSON array of ticket ids attached, e.g. `["SIG-1","SIG-2"]`. |
 | `sentry_version` | The Sentry release version (equals `version`); empty when `sentry_project` is empty. |
 
-The job summary also lists untracked commits and ticket refs that do not exist in Linear (those are reported, not fatal).
+The job summary shows the number of untracked commits (the list is in the Release description) and the ticket refs that do not exist in Linear. Unknown ticket refs are reported, not fatal; any other Linear error when attaching a ticket fails the run.
 
 ## Failure modes
 
