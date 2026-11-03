@@ -32,7 +32,6 @@ jobs:
   # deployment branches are restricted to main, so a PR's own copy of this file
   # cannot read it. Without the secret this falls back to the allow-list.
   workflow-links-api:
-    needs: bats
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     environment: workflow-links
