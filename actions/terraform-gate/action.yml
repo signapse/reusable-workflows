@@ -1,0 +1,219 @@
+name: Terraform gate
+description: >-
+  Terraform must pass before every Promotion (SIG-2765, ADR 0002). Dispatches
+  signapse-core-terraform's terraform-deploy.yml for the repo's product
+  (.signapse/pipeline.yml) and one environment with apply=true, waits for its
+  verdict, and fails the job (after a Slack alert) when the plan is blocked,
+  the run failed, or a ticket being promoted has a merged Terraform PR that is
+  not applied in that environment. no_changes and applied safe plans pass.
+  Run it after checking out the product repo and before tagging or deploying.
+  See docs/RELEASE-TRAIN.md "Terraform gate".
+
+inputs:
+  environment:
+    description: 'Terraform environment: dev | stg | prod'
+    required: true
+  prodzilla_app_id:
+    description: 'GitHub App id of Prodzilla (ADR 0005). The token is narrowed to terraform_repo.'
+    required: true
+  prodzilla_app_private_key:
+    description: 'Private key of the Prodzilla app (org secret PRODZILLA_APP_PRIVATE_KEY).'
+    required: true
+  tickets:
+    description: >-
+      Comma-separated tickets being promoted (SIG-1,SIG-2). Each one's merged
+      Terraform PRs must be applied in `environment` (AC4). Empty skips that check.
+    required: false
+    default: ''
+  linear_api_key:
+    description: 'Needed when `tickets` is set: reads the tickets'' linked PRs.'
+    required: false
+    default: ''
+  product:
+    description: 'Overrides `product:` from pipeline_file. Leave empty in product repos.'
+    required: false
+    default: ''
+  pipeline_file:
+    required: false
+    default: '.signapse/pipeline.yml'
+  terraform_repo:
+    required: false
+    default: 'signapse/signapse-core-terraform'
+  terraform_workflow:
+    required: false
+    default: 'terraform-deploy.yml'
+  terraform_ref:
+    required: false
+    default: 'main'
+  region:
+    description: 'eu | us (terraform-deploy.yml region input)'
+    required: false
+    default: 'eu'
+  timeout_minutes:
+    description: 'Limit on dispatching and waiting for the Terraform run, re-dispatches included.'
+    required: false
+    default: '45'
+  slack_bot_token:
+    description: 'Posts the alert when the gate stops the job. Without it the job still fails.'
+    required: false
+    default: ''
+  slack_channel:
+    required: false
+    default: '#releases'
+  context:
+    description: 'What the gate guards, for the alert (e.g. "Promotion of org/repo main-12-abc to staging").'
+    required: false
+    default: 'Promotion'
+
+outputs:
+  gate:
+    description: 'pass | blocked | failed | unapplied (the job has failed unless pass)'
+    value: ${{ steps.gate.outputs.gate }}
+  verdict:
+    description: 'no_changes | safe | blocked | failed, from terraform-verdict (empty if none)'
+    value: ${{ steps.gate.outputs.verdict }}
+  run_url:
+    description: 'The terraform-deploy run that gave the verdict'
+    value: ${{ steps.gate.outputs.run_url }}
+  result:
+    description: 'Full result JSON (scripts terraform-gate.sh and terraform-pending.sh)'
+    value: ${{ steps.gate.outputs.result }}
+
+runs:
+  using: composite
+  steps:
+    - name: Check Terraform gate inputs
+      id: cfg
+      shell: bash
+      env:
+        APP_ID: ${{ inputs.prodzilla_app_id }}
+        APP_KEY: ${{ inputs.prodzilla_app_private_key }}
+        ENVIRONMENT: ${{ inputs.environment }}
+        PRODUCT_IN: ${{ inputs.product }}
+        PIPELINE_FILE: ${{ inputs.pipeline_file }}
+        TF_REPO: ${{ inputs.terraform_repo }}
+        TICKETS: ${{ inputs.tickets }}
+        LINEAR_API_KEY: ${{ inputs.linear_api_key }}
+      run: |
+        set -euo pipefail
+        missing=()
+        [ -n "$APP_ID" ] || missing+=(prodzilla_app_id)
+        [ -n "$APP_KEY" ] || missing+=("prodzilla_app_private_key (secret PRODZILLA_APP_PRIVATE_KEY)")
+        [ -z "$TICKETS" ] || [ -n "$LINEAR_API_KEY" ] || missing+=(linear_api_key)
+        if [ "${#missing[@]}" -gt 0 ]; then
+          echo "::error::Terraform gate needs: ${missing[*]}. Terraform must pass before every Promotion (ADR 0002); the Prodzilla app dispatches it (ADR 0005)."
+          exit 1
+        fi
+        case "$ENVIRONMENT" in dev|stg|prod) ;; *) echo "::error::Terraform gate environment must be dev, stg or prod (got '$ENVIRONMENT')"; exit 1 ;; esac
+        [[ "$TF_REPO" == */* ]] || { echo "::error::terraform_repo must be owner/name (got '$TF_REPO')"; exit 1; }
+        product="$PRODUCT_IN"
+        if [ -z "$product" ]; then
+          product=$("$GITHUB_ACTION_PATH/../release-train/scripts/pipeline-config.sh" product "$PIPELINE_FILE") \
+            || { echo "::error::Terraform gate: cannot read product from $PIPELINE_FILE (see the log above)"; exit 1; }
+        fi
+        {
+          echo "product=$product"
+          echo "owner=${TF_REPO%%/*}"
+          echo "name=${TF_REPO#*/}"
+        } >> "$GITHUB_OUTPUT"
+
+    # ADR 0005: Prodzilla, narrowed to the Terraform repo. actions: write
+    # dispatches terraform-deploy.yml and reads its runs, logs and artifact;
+    # pull-requests: read lets the AC4 check read the tickets' Terraform PRs.
+    - name: Mint Prodzilla token for ${{ inputs.terraform_repo }}
+      id: app
+      uses: actions/create-github-app-token@v2
+      with:
+        app-id: ${{ inputs.prodzilla_app_id }}
+        private-key: ${{ inputs.prodzilla_app_private_key }}
+        owner: ${{ steps.cfg.outputs.owner }}
+        repositories: ${{ steps.cfg.outputs.name }}
+        permission-actions: write
+        permission-pull-requests: read
+
+    - name: Terraform ${{ steps.cfg.outputs.product }} (${{ inputs.environment }})
+      id: gate
+      shell: bash
+      env:
+        GH_TOKEN: ${{ steps.app.outputs.token }}
+        LINEAR_API_KEY: ${{ inputs.linear_api_key }}
+        PRODUCT: ${{ steps.cfg.outputs.product }}
+        ENVIRONMENT: ${{ inputs.environment }}
+        TICKETS: ${{ inputs.tickets }}
+        TF_REPO: ${{ inputs.terraform_repo }}
+        TF_WORKFLOW: ${{ inputs.terraform_workflow }}
+        TF_REF: ${{ inputs.terraform_ref }}
+        TF_REGION: ${{ inputs.region }}
+        TIMEOUT_MINUTES: ${{ inputs.timeout_minutes }}
+      run: |
+        set -euo pipefail
+        S="$GITHUB_ACTION_PATH/../release-train/scripts"
+        export TIMEOUT_SECONDS=$((TIMEOUT_MINUTES * 60))
+        # Unique per gate: re-runs of the job get a new run_attempt.
+        export RUN_KEY="${GITHUB_REPOSITORY#*/}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${ENVIRONMENT}"
+        crashed() {
+          jq -nc --arg r "$1" --arg p "$PRODUCT" --arg e "$ENVIRONMENT" \
+            '{gate: "failed", verdict: null, reason: $r, product: $p, environment: $e, run_url: ""}'
+        }
+        res=$("$S/terraform-gate.sh") || res=$(crashed "the gate script failed; see the job log")
+
+        if [ "$(jq -r .gate <<< "$res")" = pass ] && [ -n "$TICKETS" ]; then
+          if pend=$("$S/terraform-pending.sh" "$TICKETS"); then
+            if [ "$(jq '.pending | length' <<< "$pend")" -gt 0 ]; then
+              res=$(jq -c --argjson p "$pend" '. + {gate: "unapplied", pending: $p.pending}' <<< "$res")
+            fi
+          else
+            res=$(jq -c '. + {gate: "failed", reason: "could not check the tickets'"'"' Terraform PRs (AC4); see the job log"}' <<< "$res")
+          fi
+        fi
+
+        eof="EOF_$(openssl rand -hex 8)"
+        {
+          echo "gate=$(jq -r .gate <<< "$res")"
+          echo "verdict=$(jq -r '.verdict // ""' <<< "$res")"
+          echo "run_url=$(jq -r '.run_url // ""' <<< "$res")"
+          echo "result<<$eof"
+          echo "$res"
+          echo "$eof"
+        } >> "$GITHUB_OUTPUT"
+
+        {
+          echo
+          echo "### Terraform gate: \`$(jq -r .gate <<< "$res")\` ($PRODUCT, $ENVIRONMENT)"
+          echo
+          jq -r '"Verdict `\(.verdict // "none")`: \(.reason)."
+            + (if (.run_url // "") != "" then " [Terraform run](\(.run_url))" else "" end)
+            + (if (.dispatches // 1) > 1 then " (\(.dispatches) dispatches)" else "" end)' <<< "$res"
+          jq -r '(.destroys // [], .replaces // [], .unclassified // []) | .[:25][] | "- `\(.)`"' <<< "$res"
+          jq -r '.pending // [] | .[] | "- \(.ticket): [\(.url | split("/") | .[-3:] | join("/"))](\(.url)) merged, not applied for \(.products | join(", "))"' <<< "$res"
+        } >> "$GITHUB_STEP_SUMMARY"
+
+    - name: Alert Slack and stop
+      if: steps.gate.outputs.gate != 'pass'
+      shell: bash
+      env:
+        RESULT: ${{ steps.gate.outputs.result }}
+        SLACK_BOT_TOKEN: ${{ inputs.slack_bot_token }}
+        SLACK_CHANNEL: ${{ inputs.slack_channel }}
+        CONTEXT: ${{ inputs.context }}
+        TF_REPO: ${{ inputs.terraform_repo }}
+        WORKFLOW_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      run: |
+        set -euo pipefail
+        S="$GITHUB_ACTION_PATH/../release-train"
+        gate=$(jq -r .gate <<< "$RESULT")
+        reason=$(jq -r '.reason // ""' <<< "$RESULT")
+        if [ -z "$SLACK_BOT_TOKEN" ]; then
+          echo "::error::No slack_bot_token: the Terraform gate alert was not posted."
+        else
+          # shellcheck source=/dev/null
+          source "$S/lib/slack.sh"
+          resp=$("$S/scripts/terraform-gate-alert.sh" <<< "$RESULT" | slack_post) || resp='{"ok":false,"error":"curl failed"}'
+          [ "$(jq -r .ok <<< "$resp")" = true ] || echo "::error::Slack alert failed: $resp"
+        fi
+        case "$gate" in
+          blocked)   echo "::error::Terraform blocked the Promotion: the plan destroys or replaces resources (see the summary). Nothing was tagged or deployed." ;;
+          unapplied) echo "::error::A ticket in this Promotion has a merged Terraform PR that is not applied in this environment (see the summary)." ;;
+          *)         echo "::error::Terraform gate failed: ${reason}" ;;
+        esac
+        exit 1
