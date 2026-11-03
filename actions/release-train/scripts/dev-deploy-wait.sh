@@ -21,7 +21,7 @@
 #   WATCH_PATHS      newline- or comma-separated file paths in GITOPS_REPO (required)
 #   RUN_NUMBER, SHA  identify this build's tag (required)
 #   VERSION_URL      optional URL whose body names the running build
-#   SETTLE_SECONDS   wait after the Flux commit when VERSION_URL is unset (default 240)
+#   SETTLE_SECONDS   wait after the Flux commit when VERSION_URL is unset (default 420)
 #   TIMEOUT_SECONDS  total budget (default 1200)
 #   POLL_SECONDS     poll interval (default 20)
 # Needs GH_TOKEN with contents:read on GITOPS_REPO.
@@ -37,7 +37,7 @@ GITOPS_REPO="${GITOPS_REPO:-signapse/signapse-core-k8s}"
 GITOPS_REF="${GITOPS_REF:-main}"
 : "${RUN_NUMBER:?RUN_NUMBER not set}"
 : "${SHA:?SHA not set}"
-SETTLE_SECONDS="${SETTLE_SECONDS:-240}"
+SETTLE_SECONDS="${SETTLE_SECONDS:-420}"
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-1200}"
 POLL_SECONDS="${POLL_SECONDS:-20}"
 VERSION_URL="${VERSION_URL:-}"

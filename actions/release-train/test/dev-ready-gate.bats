@@ -205,14 +205,24 @@ run_gate() { run bash -c "echo '$1' | '$SCRIPT' 2>/dev/null"; }
   [ "$(decision SIG-1)" = true ]
 }
 
-@test "merged PR in a repo without a dev smoke job counts once its runs finished" {
+@test "merged PR in a repo without a dev smoke job counts once its runs succeeded" {
   issue SIG-1 "In Review" https://github.com/signapse/app/pull/10 https://github.com/signapse/infra/pull/3
   pr signapse/infra 3 closed true sha3
-  runs signapse/infra sha3 '[{"id":30,"status":"completed"}]'
+  runs signapse/infra sha3 '[{"id":30,"status":"completed","conclusion":"success"}]'
   jobs signapse/infra 30 '[{"name":"terraform plan","status":"completed","conclusion":"success"}]'
   run_gate '["SIG-1"]'
   [ "$(decision SIG-1)" = true ]
   [[ "$(reason SIG-1)" == *"no dev smoke job"* ]]
+}
+
+@test "merged PR in a repo without a dev smoke job whose build failed stays" {
+  issue SIG-1 "In Review" https://github.com/signapse/app/pull/10 https://github.com/signapse/portal/pull/4
+  pr signapse/portal 4 closed true sha4
+  runs signapse/portal sha4 '[{"id":40,"status":"completed","conclusion":"failure"}]'
+  jobs signapse/portal 40 '[{"name":"build / build (portal)","status":"completed","conclusion":"failure"}]'
+  run_gate '["SIG-1"]'
+  [ "$(decision SIG-1)" = false ]
+  [[ "$(reason SIG-1)" == *"did not pass"* ]]
 }
 
 @test "merged PR with no main-push run yet stays" {

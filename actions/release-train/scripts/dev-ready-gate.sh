@@ -17,9 +17,9 @@
 #      commit or branch mention alone.
 #   3. Every other attached PR, in any repo, is merged and the main-push run on
 #      its merge commit has a job matching SMOKE_JOB_PATTERN that succeeded.
-#      PRs closed without merging are ignored. A merged PR in a repo whose run
-#      has no such job (a repo not on the pipeline, e.g. Terraform) counts as
-#      passed once its runs have finished.
+#      PRs closed without merging are ignored. A merged PR in a repo whose runs
+#      have no such job (a repo not on the pipeline, e.g. Terraform) counts as
+#      passed only once every push run on its merge commit succeeded.
 # The caller only invokes this after this build's own smoke passed, so the
 # CURRENT_PRS are taken as passed.
 #
@@ -71,7 +71,7 @@ pr_verdict() {
   fi
   sha=$(printf '%s' "$pr" | jq -r '.merge_commit_sha')
   if ! runs=$(gh api "repos/${repo}/actions/runs?head_sha=${sha}&event=push&per_page=100" \
-    --jq '[.workflow_runs[] | {id, status}]' 2>/dev/null); then
+    --jq '[.workflow_runs[] | {id, status, conclusion}]' 2>/dev/null); then
     echo "block|cannot read workflow runs of ${repo}@${sha:0:7}"
     return
   fi
@@ -100,8 +100,10 @@ pr_verdict() {
     echo "block|${repo}#${num} build still running"
   elif printf '%s' "$runs" | jq -e 'length == 0' > /dev/null; then
     echo "block|${repo}#${num} has no main-push run on ${sha:0:7} yet"
+  elif printf '%s' "$runs" | jq -e 'all(.[]; .conclusion == "success" or .conclusion == "skipped" or .conclusion == "neutral")' > /dev/null; then
+    echo "pass|${repo}#${num} merged and its runs passed; ${repo} has no dev smoke job"
   else
-    echo "pass|${repo}#${num} merged; ${repo} has no dev smoke job, nothing to wait for"
+    echo "block|${repo}#${num} has no dev smoke job and a run on ${sha:0:7} did not pass"
   fi
 }
 

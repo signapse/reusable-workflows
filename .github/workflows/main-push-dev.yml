@@ -71,10 +71,13 @@ on:
         type: string
         default: ''
       dev_settle_seconds:
-        description: 'Wait after the Flux commit when dev_version_url is unset (source 1m + Kustomization 2m + HelmRelease 2m intervals in dev).'
+        description: >-
+          Best-effort wait after the Flux commit when dev_version_url is unset:
+          dev's source 1m + Kustomization 2m + HelmRelease 2m intervals plus
+          ~2m pod rollout. Set dev_version_url for a real confirmation.
         required: false
         type: number
-        default: 240
+        default: 420
       dev_deploy_timeout_minutes:
         description: 'Time limit for dev to run the new tag. Exceeding it fails the build as a dev deploy failure.'
         required: false
@@ -122,7 +125,7 @@ on:
         description: 'passed | failed'
         value: ${{ jobs.verdict.outputs.verdict }}
       failed_stage:
-        description: 'build | dev deploy | dev smoke (empty on pass)'
+        description: 'build | dev deploy | dev smoke | ticket lookup (empty on pass)'
         value: ${{ jobs.verdict.outputs.failed_stage }}
       report_url:
         description: 'signapse-e2e report for the dev smoke run'
@@ -244,7 +247,7 @@ jobs:
 
   verdict:
     name: Dev smoke verdict
-    needs: [wait-for-dev, dev-smoke]
+    needs: [context, wait-for-dev, dev-smoke]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     permissions: {}
@@ -257,6 +260,7 @@ jobs:
         id: v
         env:
           BUILD: ${{ inputs.build_result }}
+          CONTEXT: ${{ needs.context.result }}
           WAIT: ${{ needs.wait-for-dev.result }}
           SMOKE: ${{ needs.dev-smoke.result }}
           SMOKE_RESULT: ${{ needs.dev-smoke.outputs.result }}
@@ -267,6 +271,10 @@ jobs:
           if [ "$BUILD" != "success" ]; then stage="build"
           elif [ "$WAIT" != "success" ]; then stage="dev deploy"
           elif [ "$SMOKE" != "success" ] || [ "$SMOKE_RESULT" != "passed" ]; then stage="dev smoke"
+          elif [ "$CONTEXT" != "success" ]; then
+            # Smoke passed but the PR/ticket lookup failed: no hand-off and
+            # nobody to notify, so fail the run visibly instead of passing.
+            stage="ticket lookup"
           fi
           if [ -z "$stage" ]; then
             echo "verdict=passed" >> "$GITHUB_OUTPUT"
