@@ -125,6 +125,14 @@ serve() {
   ! grep -qx 30 "$TMP/count/sleeps"
 }
 
+@test "VERSION_URL may report a bare main-<n> tag" {
+  export VERSION_URL=https://dev.example/version
+  serve "$WATCH_PATHS" 1 "main-300-$SHA"
+  echo '{"version":"main-300"}' > "$TMP/version.1"
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+}
+
 @test "VERSION_URL that never reports the build times out" {
   export VERSION_URL=https://dev.example/version
   serve "$WATCH_PATHS" 1 "main-300-$SHA"

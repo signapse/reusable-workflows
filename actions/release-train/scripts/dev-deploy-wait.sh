@@ -90,7 +90,8 @@ done
 if [ -n "$VERSION_URL" ]; then
   while :; do
     body=$(curl -fsS --max-time 10 "$VERSION_URL" 2>/dev/null || true)
-    n=$(printf '%s' "$body" | max_run)
+    # A version body may name the tag with or without its sha suffix.
+    n=$(printf '%s' "$body" | (grep -oE 'main-[0-9]+' || true) | cut -d- -f2 | sort -n | tail -1)
     if printf '%s' "$body" | grep -qF "$SHA" \
       || { [ -n "$n" ] && [ "$n" -ge "$RUN_NUMBER" ]; }; then
       log "dev reports this build (or newer) at ${VERSION_URL}"

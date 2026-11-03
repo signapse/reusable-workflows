@@ -162,6 +162,7 @@ jobs:
           app-id: ${{ inputs.read_app_id }}
           private-key: ${{ secrets.READ_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
           permission-contents: read
           permission-pull-requests: read
 
@@ -212,13 +213,23 @@ jobs:
           path: _rw
           persist-credentials: false
 
+      - name: Split GitOps repo
+        id: gitops
+        env:
+          GITOPS_REPO: ${{ inputs.gitops_repo }}
+        run: |
+          set -euo pipefail
+          echo "owner=${GITOPS_REPO%%/*}" >> "$GITHUB_OUTPUT"
+          echo "name=${GITOPS_REPO#*/}" >> "$GITHUB_OUTPUT"
+
       - name: Mint read-only app token
         id: app
         uses: actions/create-github-app-token@v2
         with:
           app-id: ${{ inputs.read_app_id }}
           private-key: ${{ secrets.READ_APP_PRIVATE_KEY }}
-          owner: ${{ github.repository_owner }}
+          owner: ${{ steps.gitops.outputs.owner }}
+          repositories: ${{ steps.gitops.outputs.name }}
           permission-contents: read
 
       - name: Wait for dev to run main-${{ github.run_number }}

@@ -39,6 +39,7 @@ teardown() { rm -rf "$TMP"; }
   [[ "$body" == *"**dev smoke**"* ]]
   [[ "$body" == *"not moved to On Dev · Ready for QA"* ]]
   [[ "$body" == *"$RUN_URL"* ]]
+  [[ "$body" == *"re-run this run's failed jobs"* ]]
   [ "$(jq -r 'select(.n == "6") | .repo' "$TMP/comments")" = signapse/app ]
 }
 
@@ -76,4 +77,12 @@ teardown() { rm -rf "$TMP"; }
   [[ "$text" == *"*dev deploy*"* ]]
   [[ "$text" == *"<https://github.com/signapse/app/pull/5|signapse/app#5> Fix login (@ana)"* ]]
   [[ "$text" == *"signapse/app#6"* ]]
+}
+
+@test "Slack escapes PR titles so they cannot ping a channel" {
+  prs='[{"repo":"signapse/app","number":5,"author":"ana","title":"Vec<T> & <!channel>","url":"u"}]'
+  SLACK_CHANNEL='#eng' SLACK_BOT_TOKEN=x run bash -c "echo '$prs' | '$SCRIPT' build 2>/dev/null"
+  text=$(jq -r .text "$TMP/slack")
+  [[ "$text" == *"Vec&lt;T&gt; &amp; &lt;!channel&gt;"* ]]
+  [[ "$text" != *"<!channel>"* ]]
 }
