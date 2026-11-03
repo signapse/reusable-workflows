@@ -5,7 +5,7 @@ on:
   pull_request:
     paths:
       - 'actions/release-train/**'
-      - '.github/workflows/bats-ci.yml'
+      - '.github/workflows/**'
 
 jobs:
   bats:
@@ -19,3 +19,10 @@ jobs:
       - name: Run bats
         working-directory: actions/release-train/test
         run: bats .
+      - name: Check workflow links exist
+        # With WORKFLOW_LINKS_TOKEN set (read access to every linked repo) this
+        # asks the GitHub API; without it, it checks the checked-in allow-list
+        # actions/release-train/workflow-links.allowlist.
+        env:
+          GH_TOKEN: ${{ secrets.WORKFLOW_LINKS_TOKEN }}
+        run: actions/release-train/scripts/check-workflow-links.sh
