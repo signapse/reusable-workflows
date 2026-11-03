@@ -4,8 +4,11 @@ on:
     branches: [main]
   pull_request:
     paths:
-      - 'actions/release-train/**'
+      - 'actions/**'
       - '.github/workflows/**'
+
+permissions:
+  contents: read
 
 jobs:
   bats:
@@ -20,9 +23,12 @@ jobs:
         working-directory: actions/release-train/test
         run: bats .
       - name: Check workflow links exist
-        # With WORKFLOW_LINKS_TOKEN set (read access to every linked repo) this
-        # asks the GitHub API; without it, it checks the checked-in allow-list
-        # actions/release-train/workflow-links.allowlist.
+        # Pull requests check the checked-in allow-list
+        # (actions/release-train/workflow-links.allowlist) without credentials,
+        # because PR code must not receive the token. On push to main, where the
+        # code is trusted, WORKFLOW_LINKS_TOKEN (read access to every linked repo)
+        # makes it ask the GitHub API instead; without the secret it stays on the
+        # allow-list.
         env:
-          GH_TOKEN: ${{ secrets.WORKFLOW_LINKS_TOKEN }}
+          GH_TOKEN: ${{ github.event_name == 'push' && secrets.WORKFLOW_LINKS_TOKEN || '' }}
         run: actions/release-train/scripts/check-workflow-links.sh

@@ -17,7 +17,9 @@ setup() {
   cat > "$TMP/stub/gh" <<'EOS'
 #!/usr/bin/env bash
 echo "$2" >> "$TMP/gh-calls"
-[ "$2" = "repos/signapse/signapse-core-k8s/contents/.github/workflows/deploy-prod.yml" ]
+[ -z "${GH_FAIL:-}" ] || { echo "$GH_FAIL" >&2; exit 1; }
+[ "$2" = "repos/signapse/signapse-core-k8s/contents/.github/workflows/deploy-prod.yml" ] && exit 0
+echo "gh: Not Found (HTTP 404)" >&2; exit 1
 EOS
   chmod +x "$TMP/stub/gh"
 }
@@ -30,7 +32,7 @@ wf() { printf "      default: '%s'\n" "$1" > "$TMP/wf/release-train.yml"; }
   wf "$K8S/deploy-prod.yml"
   run "$SCRIPT" "$TMP/wf"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"ok      signapse/signapse-core-k8s .github/workflows/deploy-prod.yml"* ]]
+  [[ "$output" == *"listed  signapse/signapse-core-k8s .github/workflows/deploy-prod.yml"* ]]
 }
 
 @test "allow-list mode: fails on a wrong workflow file name" {
@@ -45,12 +47,32 @@ wf() { printf "      default: '%s'\n" "$1" > "$TMP/wf/release-train.yml"; }
   wf "$K8S/deploy-to-prod.yml"
   run "$SCRIPT" "$TMP/wf"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"MISSING"*"deploy-to-prod.yml (checked via GitHub API)"* ]]
+  [[ "$output" == *"MISSING"*"deploy-to-prod.yml (GitHub API 404"* ]]
 
   wf "$K8S/deploy-prod.yml"
   run "$SCRIPT" "$TMP/wf"
   [ "$status" -eq 0 ]
   grep -q 'repos/signapse/signapse-core-k8s/contents/.github/workflows/deploy-prod.yml' "$TMP/gh-calls"
+}
+
+@test "API mode: an API error is reported as unchecked, not missing, and fails" {
+  export GH_TOKEN=x PATH="$TMP/stub:$PATH" GH_FAIL="HTTP 401: Bad credentials"
+  wf "$K8S/deploy-prod.yml"
+  run "$SCRIPT" "$TMP/wf"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"UNCHECKED"*"HTTP 401: Bad credentials"* ]]
+}
+
+@test "fails on a link whose file name has a suffix after .yml, in both modes" {
+  wf "$K8S/deploy-prod.yml.bak"
+  run "$SCRIPT" "$TMP/wf"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"BAD"*"deploy-prod.yml.bak"* ]]
+
+  export GH_TOKEN=x PATH="$TMP/stub:$PATH"
+  run "$SCRIPT" "$TMP/wf"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"BAD"*"deploy-prod.yml.bak"* ]]
 }
 
 @test "skips test/ fixtures and passes when there are no links" {

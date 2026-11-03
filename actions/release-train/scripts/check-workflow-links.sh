@@ -23,7 +23,7 @@ ALLOWLIST="${WORKFLOW_LINKS_ALLOWLIST:-$(dirname "$0")/../workflow-links.allowli
 [ $# -gt 0 ] || set -- .github/workflows actions
 for p in "$@"; do [ -e "$p" ] || die "no such path: $p"; done
 
-links=$(grep -rhoE --exclude-dir=test --exclude-dir=testdata 'https://github\.com/signapse/[A-Za-z0-9._-]+/actions/workflows/[A-Za-z0-9._-]+\.ya?ml' "$@" \
+links=$(grep -rhoE --exclude-dir=test --exclude-dir=testdata 'https://github\.com/signapse/[A-Za-z0-9._-]+/actions/workflows/[A-Za-z0-9._-]+' "$@" \
   | sed -E 's|https://github\.com/signapse/([^/]+)/actions/workflows/(.+)|\1/\2|' \
   | sort -u || true)
 
@@ -31,27 +31,35 @@ links=$(grep -rhoE --exclude-dir=test --exclude-dir=testdata 'https://github\.co
 
 if [ -n "${GH_TOKEN:-}" ]; then
   need gh
-  mode="GitHub API"
 else
   [ -f "$ALLOWLIST" ] || die "allow-list not found: $ALLOWLIST"
-  mode="allow-list $ALLOWLIST"
 fi
 
 bad=0
 for link in $links; do
   repo="${link%%/*}"
   file="${link#*/}"
+  target="signapse/$repo .github/workflows/$file"
+  case "$file" in
+    *.yml | *.yaml) ;;
+    *) log "BAD     $target (not a .yml/.yaml file name)"; bad=1; continue ;;
+  esac
   if [ -n "${GH_TOKEN:-}" ]; then
-    gh api "repos/signapse/$repo/contents/.github/workflows/$file" --silent > /dev/null 2>&1 && ok=1 || ok=0
+    if err=$(gh api "repos/signapse/$repo/contents/.github/workflows/$file" --silent 2>&1); then
+      log "ok      $target (GitHub API)"
+    elif [[ "$err" == *"HTTP 404"* ]]; then
+      log "MISSING $target (GitHub API 404: no such file, or the token cannot read $repo)"
+      bad=1
+    else
+      log "UNCHECKED $target (GitHub API error: ${err//$'\n'/ })"
+      bad=1
+    fi
+  elif grep -qxF "$link" "$ALLOWLIST"; then
+    log "listed  $target (allow-list; existence not checked live)"
   else
-    grep -qxF "$link" "$ALLOWLIST" && ok=1 || ok=0
-  fi
-  if [ "$ok" = 1 ]; then
-    log "ok      signapse/$repo .github/workflows/$file"
-  else
-    log "MISSING signapse/$repo .github/workflows/$file (checked via $mode)"
+    log "MISSING $target (not in allow-list $ALLOWLIST)"
     bad=1
   fi
 done
 
-[ "$bad" = 0 ] || die "workflow links point at files that do not exist"
+[ "$bad" = 0 ] || die "workflow links point at files that do not exist or could not be checked"
