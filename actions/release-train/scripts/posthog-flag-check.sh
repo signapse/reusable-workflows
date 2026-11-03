@@ -10,7 +10,7 @@
 #   prod                       -> on for the QA account
 #   prod, SAMPLE synthetic ids -> on for about PROD_PERCENT% of them
 #                                 (exactly none at 0, exactly all at 100)
-#   missing/unknown environment -> off for the other account and every
+#   empty/unknown environment   -> off for the other account; unknown -> off for every
 #                                 synthetic id, at any percentage
 #
 # Env:

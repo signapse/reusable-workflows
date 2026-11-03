@@ -182,7 +182,7 @@ if err != nil {
 2. `PROD_PERCENT=0 posthog-flag-check.sh sig-2749-posthog-qa-cohort-and-environment`
    - AC2: on in `dev`, `development`, `staging` for both accounts; off in `prod` for the other account; 0 of 100 synthetic ids on.
    - AC3: on in `prod` (and `production`) for the QA account.
-   - Fail dark: off for the other account and for every synthetic id with an empty or unknown `environment`.
+   - Fail dark: off for the other account with an empty or unknown `environment`, and for every synthetic id with an unknown one.
 3. Set `groups[2].rollout_percentage` to 10 (UI: the third condition set; or the PATCH above).
 4. `PROD_PERCENT=10 posthog-flag-check.sh sig-2749-posthog-qa-cohort-and-environment`
    - AC4: about 10 of 100 synthetic non-cohort ids on (accepted 1 to 19, three standard deviations); QA account still on. The script refuses a `SAMPLE` too small for the band to exclude 0 and all.
