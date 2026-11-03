@@ -3,8 +3,9 @@
 `.github/workflows/release-train.yml` with `selection_mode: qa-passed` picks the
 **Release Candidate**: the newest build on `main` whose tickets all carry the
 `QA Passed` label (ADR 0001). It replaces the "Ready for Prod" gate and the
-Tuesday/Thursday cron. Re-tagging and deploying the Release Candidate come in
-later tickets (SIG-2764 onwards); for now the train selects and reports.
+Tuesday/Thursday cron. The `promote` job then promotes it to staging
+(SIG-2764, see [Promotion to staging](#promotion-to-staging)); Terraform,
+staging tests and prod come in later tickets.
 
 ## How the Release Candidate is chosen
 
@@ -96,6 +97,98 @@ prod act on that same set.
 
 The job summary shows the same data with links.
 
+Promotion outputs (empty when the promote job did not run, i.e. `outcome` is
+`none` or `already_promoted`):
+
+| Output | Example | Meaning |
+|---|---|---|
+| `promoted` | `true` | Tagged, staging runs it, tickets On Staging. `false` when deferred |
+| `deferred` | `false` | `true` when outside the deploy window; nothing was done |
+| `version` | `1.2.45` | Semver of the Promotion, no prefix |
+| `release_tag` | `1.2.45` | Tag created in git and ECR (prefix follows the repo's existing tags) |
+| `image_digest` | `{"signstream/http":"sha256:…"}` | ECR repository -> digest; same as the dev build's |
+| `promotion_decision` | `open` | `open`, `hotfix`, `deferred` or `resume` |
+
+## Promotion to staging
+
+The `promote` job runs after `select` when `outcome` is `selected`:
+
+1. **Plan** (`promotion-plan.sh`, read-only). Reads the tickets' Linear labels,
+   checks the deploy window and picks the version:
+   - **Deploy window** (`deploy-window.sh`): Monday-Thursday 09:00-16:00 and
+     Friday 09:00-12:00, Europe/London time, so GMT or BST as the clocks say.
+     The start is inside, the end is not (Thu 16:00 is closed). A ticket
+     labelled `hotfix` (`hotfix_label`) bypasses it. SIG-2769 reuses the same
+     script for prod.
+   - **Version** (`promotion-version.sh`): the highest release tag in the
+     repo, bumped by `version-bump.sh` (any `major` label -> major, any
+     `minor` -> minor, else patch). The highest, not the nearest, because
+     Flux's staging ImagePolicy deploys the highest semver tag. The new tag
+     keeps the repo's prefix: bare (`1.2.45`) for every Signapse repo today,
+     which some staging ImagePolicies require.
+2. **Terraform gate** (SIG-2765, not yet): slots in here, before any tag.
+3. **Tag** (`promotion-tag.sh`): for each repository in `services`,
+   `ecr-retag.sh` re-puts the Release Candidate's manifest
+   (`main-<n>-<sha>`) under the release tag. No rebuild: the bytes are the
+   same, and the script reads both digests back and fails if they differ. It
+   never moves an existing release tag to other bytes. Then the commit gets
+   the same tag in git through the GitHub API. The summary lists both digests
+   per repository.
+4. **Wait for staging** (`staging-deploy-wait.sh`, bounded by
+   `staging_deploy_timeout_minutes`): Flux image automation commits the new
+   tag into each `staging_watch_paths` file in signapse-core-k8s (the
+   `{"$imagepolicy": …}` setter line). Then it polls `staging_version_url`
+   if set, otherwise waits `staging_settle_seconds` for the rollout.
+5. **Tickets**: every ticket in `rc_tickets` moves to `On Staging`
+   (`on_staging_state`) with the Ticket Transitioner.
+
+### "Waits for the next window"
+
+Nothing sleeps until the window opens. Outside the window the plan reports
+`deferred`, the run ends green with nothing tagged, deployed or moved, and the
+summary names the next opening. The caller's schedule re-runs the train: the
+hourly backstop at :23 past each hour, plus a run just after 09:00 UK time on
+weekdays (`1 8,9 * * 1-5` in UTC covers both GMT and BST; the run that falls
+outside the window just defers). That run re-selects from scratch and promotes
+whatever is the newest Release Candidate then, which includes the deferred
+one. So a deferred Promotion lands within minutes of the window opening,
+subject to GitHub's cron delays.
+
+### Concurrency
+
+One Promotion per repo at a time, and a running one is never cancelled. Two
+layers:
+
+- The caller template's workflow-level group `release-train-<repo>`
+  (`cancel-in-progress: false`) serialises whole train runs.
+- The `promote` job has its own group, `promotion-<repo>`, also
+  `cancel-in-progress: false`. It holds even for a caller that does not use
+  the template's group, or a second workflow that calls this one. Its name
+  must differ from the caller's group: a job cannot join the group its own
+  run holds, or it would wait for itself forever.
+
+A second run waits for the first. GitHub keeps at most one *pending* run (or
+job) per group, so with three runs the middle one is cancelled while still
+queued, before it has done anything. That is safe because every run
+re-selects from scratch: the survivor promotes the newest Release Candidate,
+or reports `already_promoted` if the first run already tagged it.
+
+### Re-runs and idempotency
+
+- A Release Candidate whose commit already carries a release tag is reported
+  `already_promoted` by `select`, and `promote` does not run. No second
+  version is cut.
+- ECR is tagged before git, and the git tag is what makes the next selection
+  say `already_promoted`. If the run fails after the ECR tag but before the
+  git tag, the next run computes the same version, finds the ECR tags already
+  on the right digest (no-op) and adds the git tag.
+- If the run fails after the git tag (staging wait timed out, a ticket did
+  not move), use **Re-run failed jobs** on that run. The plan sees the tag
+  already on the commit (`resume`), skips the window check, re-verifies the
+  images and finishes the wait and the ticket moves. A fresh run would report
+  `already_promoted` and do nothing, by design: the hourly run must never move
+  tickets back to On Staging after staging tests or prod have moved them on.
+
 ## Caller template (`.github/workflows/release-train.yml` in the product repo)
 
 The event router (SIG-2758) dispatches this file with `ticket` and
@@ -126,9 +219,11 @@ on:
         type: string
   schedule:
     - cron: '23 * * * *'   # hourly backstop for missed QA Passed events
+    - cron: '1 8,9 * * 1-5' # 09:01 UK time on weekdays (GMT or BST): deferred Promotions
 
-# One Promotion per repo at a time. A newer queued run replaces an older queued
+# One train run per repo at a time. A newer queued run replaces an older queued
 # one, which is safe: every run re-reads everything and selects the same build.
+# Do not name it promotion-<repo>: the reusable promote job uses that group.
 concurrency:
   group: release-train-${{ github.repository }}
   cancel-in-progress: false
@@ -141,6 +236,7 @@ permissions:
   pull-requests: read    # PR title and branch per commit
   checks: read
   actions: read          # main-push runs: which commits are builds
+  id-token: write        # ECR role for the re-tag
 
 jobs:
   train:
@@ -151,6 +247,14 @@ jobs:
       trigger_id: ${{ inputs.trigger_id }}
       # build_workflow: main-push.yml   # if the build workflow has another file name
       prod_services: '["signstream-api","signstream-websocket"]'   # deploy-prod.yml service names
+      # Promotion to staging (example: sign-stream-api)
+      services: '["http","websocket","pip-worker"]'
+      ecr_repo_prefix: signstream
+      iam_role_arn: arn:aws:iam::827204657141:role/github-actions-connect
+      staging_watch_paths: |
+        workloads/stg/signstream-api/helmrelease-patch.yaml
+        workloads/stg/signstream-websocket/helmrelease-patch.yaml
+        workloads/stg/signstream-pip-worker/helmrelease-patch.yaml
       read_app_id: ${{ vars.PIPELINE_READ_APP_ID }}
     secrets:
       LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
@@ -162,9 +266,12 @@ required unless `selection_base` is set: the walk starts at the tag prod
 runs, read from `gitops_repo` with the read-only app.
 
 Optional inputs: `qa_passed_label`, `qa_failed_state`, `build_workflow`,
-`release_branch`, `release_tag_pattern`, `linear_team_key`, `gitops_repo`,
-`gitops_ref`, `selection_base`. The Linear defaults
-match the board after SIG-2747.
+`release_branch`, `release_tag_pattern`, `linear_team_key`, `aws_region`
+(default `eu-west-2`), `staging_version_jq`,
+`staging_deploy_timeout_minutes`, `gitops_repo`, `gitops_ref`,
+`selection_base`, `on_staging_state`, `hotfix_label`. The Linear defaults
+match the board after SIG-2747. `deploy_window_now` fakes the clock for the
+window check and is for testing only.
 
 ### Note for stages that dispatch other workflows (SIG-2765)
 
@@ -186,7 +293,17 @@ verdict. Do not report a Terraform failure or block the Promotion on it.
   no rebuild, so a dev-configured image would ship dev config.
 - Prod runs a release tag of this repo on every `prod_services` entry, or
   `selection_base` is set for the first Deployment through the train.
-- The read-only pipeline app (ADR 0005) is installed on signapse-core-k8s.
+- Staging follows release tags: each service's stg ImagePolicy in
+  signapse-core-k8s is a semver policy over the same ECR repository (e.g.
+  `workloads/stg/signstream-api/image-policy-stg.yaml`, range `>=0.0.0`), its
+  stg ImageUpdateAutomation is not suspended, and the `$imagepolicy` setter is
+  in the `staging_watch_paths` file. A stg policy that follows
+  `main-<n>-<sha>` would never wait for the release tag.
+- No ECR semver tag above the repo's highest git release tag. Flux picks the
+  highest; the version is computed from git.
+- The read-only pipeline app (ADR 0005) is installed on signapse-core-k8s,
+  and the ECR role allows `ecr:BatchGetImage`, `ecr:DescribeImages` and
+  `ecr:PutImage` on the service repositories.
 
 Repos that do not meet these yet stay on `ready-for-prod`:
 
