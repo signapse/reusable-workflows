@@ -118,7 +118,7 @@ serve() {
   export VERSION_URL=https://dev.example/version
   serve "$WATCH_PATHS" 1 "main-300-$SHA"
   echo '{"version":"main-299-'"$OLD"'"}' > "$TMP/version.1"
-  echo '{"commit":"'"$SHA"'"}' > "$TMP/version.2"
+  echo '{"version":"'"$SHA"'"}' > "$TMP/version.2"
   run "$SCRIPT"
   [ "$status" -eq 0 ]
   [ "$(cat "$TMP/count/curl")" = "2" ]
@@ -129,6 +129,30 @@ serve() {
   export VERSION_URL=https://dev.example/version
   serve "$WATCH_PATHS" 1 "main-300-$SHA"
   echo '{"version":"main-300"}' > "$TMP/version.1"
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+}
+
+@test "VERSION_URL: only the running-version field counts, not a pending tag" {
+  export VERSION_URL=https://dev.example/version
+  serve "$WATCH_PATHS" 1 "main-300-$SHA"
+  echo '{"version":"main-299","waitingFor":"main-300","commit":"'"$SHA"'"}' > "$TMP/version.1"
+  run "$SCRIPT"
+  [ "$status" -ne 0 ]
+}
+
+@test "VERSION_URL: a tag embedded in a longer value is a near miss" {
+  export VERSION_URL=https://dev.example/version
+  serve "$WATCH_PATHS" 1 "main-300-$SHA"
+  echo '{"version":"domain-main-301-fix"}' > "$TMP/version.1"
+  run "$SCRIPT"
+  [ "$status" -ne 0 ]
+}
+
+@test "VERSION_JQ selects a custom field" {
+  export VERSION_URL=https://dev.example/version VERSION_JQ=.build.tag
+  serve "$WATCH_PATHS" 1 "main-300-$SHA"
+  echo '{"version":"1.2.3","build":{"tag":"main-301-'"$OLD"'"}}' > "$TMP/version.1"
   run "$SCRIPT"
   [ "$status" -eq 0 ]
 }

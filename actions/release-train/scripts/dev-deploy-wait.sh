@@ -11,8 +11,9 @@
 # only cluster-side fact readable from GitHub without cluster credentials. Flux
 # then needs up to source (1m) + Kustomization (2m) + HelmRelease (2m) intervals
 # plus the pod rollout to apply it, so the script then:
-#   * polls VERSION_URL until its body names this SHA or a main-<n> tag with
-#     n >= RUN_NUMBER, when the service exposes one; otherwise
+#   * polls VERSION_URL until the value VERSION_JQ picks from its JSON body
+#     is this SHA or exactly main-<n>[-<sha>] with n >= RUN_NUMBER, when the
+#     service exposes one; otherwise
 #   * waits SETTLE_SECONDS.
 #
 # Env:
@@ -20,7 +21,8 @@
 #   GITOPS_REF       branch Flux writes to (default main)
 #   WATCH_PATHS      newline- or comma-separated file paths in GITOPS_REPO (required)
 #   RUN_NUMBER, SHA  identify this build's tag (required)
-#   VERSION_URL      optional URL whose body names the running build
+#   VERSION_URL      optional URL whose JSON body names the running build
+#   VERSION_JQ       jq path to that value in the body (default .version)
 #   SETTLE_SECONDS   wait after the Flux commit when VERSION_URL is unset (default 420)
 #   TIMEOUT_SECONDS  total budget (default 1200)
 #   POLL_SECONDS     poll interval (default 20)
@@ -32,6 +34,7 @@ source "$(dirname "$0")/../lib/common.sh"
 
 need gh
 need curl
+need jq
 
 GITOPS_REPO="${GITOPS_REPO:-signapse/signapse-core-k8s}"
 GITOPS_REF="${GITOPS_REF:-main}"
@@ -41,6 +44,7 @@ SETTLE_SECONDS="${SETTLE_SECONDS:-420}"
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-1200}"
 POLL_SECONDS="${POLL_SECONDS:-20}"
 VERSION_URL="${VERSION_URL:-}"
+VERSION_JQ="${VERSION_JQ:-.version}"
 
 for n in "$RUN_NUMBER" "$SETTLE_SECONDS" "$TIMEOUT_SECONDS" "$POLL_SECONDS"; do
   case "$n" in "" | *[!0-9]*) die "numeric env expected, got '$n'" ;; esac
@@ -90,11 +94,14 @@ done
 if [ -n "$VERSION_URL" ]; then
   while :; do
     body=$(curl -fsS --max-time 10 "$VERSION_URL" 2>/dev/null || true)
-    # A version body may name the tag with or without its sha suffix.
-    n=$(printf '%s' "$body" | (grep -oE 'main-[0-9]+' || true) | cut -d- -f2 | sort -n | tail -1)
-    if printf '%s' "$body" | grep -qF "$SHA" \
-      || { [ -n "$n" ] && [ "$n" -ge "$RUN_NUMBER" ]; }; then
-      log "dev reports this build (or newer) at ${VERSION_URL}"
+    # Only the running-build field counts, and only as a whole value: the
+    # full sha, or exactly main-<n> / main-<n>-<sha>. Tags elsewhere in the
+    # body (a pending build, a branch name) are ignored.
+    running=$(printf '%s' "$body" | jq -r "($VERSION_JQ) // empty | strings" 2>/dev/null | head -1 || true)
+    n=""
+    if [[ "$running" =~ ^main-([0-9]+)(-[0-9a-f]{40})?$ ]]; then n="${BASH_REMATCH[1]}"; fi
+    if [ "$running" = "$SHA" ] || { [ -n "$n" ] && [ "$n" -ge "$RUN_NUMBER" ]; }; then
+      log "dev runs ${running} at ${VERSION_URL}"
       break
     fi
     log "waiting for ${VERSION_URL} to report ${SHA:0:7} or main-${RUN_NUMBER}+"

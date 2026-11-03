@@ -64,12 +64,17 @@ on:
         default: 'main'
       dev_version_url:
         description: >-
-          Optional dev URL whose body names the running build (its sha or
+          Optional dev URL returning JSON whose dev_version_jq field is the running build (its sha or
           main-<n> tag). Set it to confirm the new pods are serving; unset falls
           back to dev_settle_seconds after the Flux commit.
         required: false
         type: string
         default: ''
+      dev_version_jq:
+        description: 'jq path to the running build in the dev_version_url JSON body; its whole value must be the sha or main-<n>[-<sha>].'
+        required: false
+        type: string
+        default: '.version'
       dev_settle_seconds:
         description: >-
           Best-effort wait after the Flux commit when dev_version_url is unset:
@@ -241,6 +246,7 @@ jobs:
           RUN_NUMBER: ${{ github.run_number }}
           SHA: ${{ github.sha }}
           VERSION_URL: ${{ inputs.dev_version_url }}
+          VERSION_JQ: ${{ inputs.dev_version_jq }}
           SETTLE_SECONDS: ${{ inputs.dev_settle_seconds }}
           TIMEOUT_MINUTES: ${{ inputs.dev_deploy_timeout_minutes }}
         run: |
