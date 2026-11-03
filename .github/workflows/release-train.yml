@@ -1,17 +1,77 @@
 name: Release Train (reusable)
 
-# Composes TrainState from the tag..HEAD range, opens a draft release when the
-# train is ready, and posts the Slack alert carrying the "Cut release tag"
-# button. On `release: published` it instead posts the prod-promotion prompt as
-# a thread reply under that same alert.
+# Two modes, chosen by `selection_mode`:
 #
-# The caller owns `on:` (cron, workflow_dispatch, release) and MUST declare
-# permissions: contents: write, pull-requests: read, checks: read — a reusable
-# workflow can only downgrade the permissions it is handed, never elevate them.
+#   qa-passed (ADR 0001, the Autonomous Delivery Pipeline): the `select` job
+#     picks the Release Candidate, the newest main build whose tickets all
+#     carry QA Passed, and outputs it (rc_sha, rc_image_tag, rc_tickets,
+#     untracked_commits, blocked_by). Callers trigger it from the event router
+#     (workflow_dispatch with `ticket` + `trigger_id`) plus an hourly schedule.
+#     Caller template: docs/RELEASE-TRAIN.md.
+#
+#   ready-for-prod (default, legacy until SIG-2773): composes TrainState from
+#     the tag..HEAD range, opens a draft release when no ticket is outside
+#     "Ready for Prod", and posts the Slack alert carrying the "Cut release
+#     tag" button. On `release: published` it instead posts the prod-promotion
+#     prompt as a thread reply under that same alert.
+#
+# The caller owns `on:` and `permissions:` — a reusable workflow can only
+# downgrade the permissions it is handed, never elevate them. Legacy callers
+# grant contents: write, pull-requests: read, checks: read; qa-passed callers
+# also grant actions: read (the build lookup reads main-push runs).
 
 on:
   workflow_call:
     inputs:
+      selection_mode:
+        description: >-
+          qa-passed: select the newest all-QA-Passed build (ADR 0001).
+          ready-for-prod: legacy "Ready for Prod" train with the Slack cut
+          button; retired by SIG-2773 once the pilot cuts over.
+        required: false
+        type: string
+        default: 'ready-for-prod'
+      ticket:
+        description: >-
+          qa-passed: ticket whose QA Passed label triggered the run (e.g.
+          SIG-123), from the event router. Shown in the summary only; the
+          selection never depends on it, so the hourly run picks the same build.
+        required: false
+        type: string
+        default: ''
+      trigger_id:
+        description: 'qa-passed: Linear webhook delivery id from the event router. Shown in the summary.'
+        required: false
+        type: string
+        default: ''
+      qa_passed_label:
+        description: 'qa-passed: Linear label that marks a ticket approved on dev.'
+        required: false
+        type: string
+        default: 'QA Passed'
+      qa_failed_state:
+        description: 'qa-passed: Linear column that stops the line.'
+        required: false
+        type: string
+        default: 'QA Failed'
+      build_workflow:
+        description: >-
+          qa-passed: file name of the caller's build workflow. A successful run
+          of it on `release_branch` makes a commit a build, tagged
+          main-<run_number>-<sha>.
+        required: false
+        type: string
+        default: 'main-push.yml'
+      release_branch:
+        description: 'qa-passed: branch whose builds are promoted.'
+        required: false
+        type: string
+        default: 'main'
+      release_tag_pattern:
+        description: 'qa-passed: ERE matching Promotion tags; the walk starts at the highest one.'
+        required: false
+        type: string
+        default: '^v?[0-9]+\.[0-9]+\.[0-9]+$'
       linear_team_key:
         description: 'Linear team key, alphanumeric (e.g. SIG)'
         required: false
@@ -59,7 +119,8 @@ on:
       SENTRY_AUTH_TOKEN:
         required: false
       SLACK_BOT_TOKEN:
-        required: true
+        # Only the ready-for-prod mode posts to Slack.
+        required: false
     outputs:
       state:
         description: 'TrainState JSON'
@@ -76,16 +137,139 @@ on:
       alert_ts:
         description: 'Slack ts of the posted alert'
         value: ${{ jobs.compose.outputs.alert_ts }}
+      outcome:
+        description: 'qa-passed: selected | already_promoted | none'
+        value: ${{ jobs.select.outputs.outcome }}
+      rc_sha:
+        description: 'qa-passed: commit of the Release Candidate (empty when none)'
+        value: ${{ jobs.select.outputs.rc_sha }}
+      rc_image_tag:
+        description: 'qa-passed: image tag of the Release Candidate, main-<run_number>-<sha>'
+        value: ${{ jobs.select.outputs.rc_image_tag }}
+      rc_tickets:
+        description: 'qa-passed: comma-separated tickets in the Release Candidate (SIG-1,SIG-2)'
+        value: ${{ jobs.select.outputs.rc_tickets }}
+      untracked_commits:
+        description: 'qa-passed: JSON array [{sha, subject}] of ticketless commits riding along'
+        value: ${{ jobs.select.outputs.untracked_commits }}
+      blocked_by:
+        description: 'qa-passed: ticket that stopped the line (empty when none)'
+        value: ${{ jobs.select.outputs.blocked_by }}
+      selection:
+        description: 'qa-passed: full selection JSON (see actions/release-train/scripts/release-candidate.sh)'
+        value: ${{ jobs.select.outputs.selection }}
 
-permissions:
-  contents: write        # gh release edit (release-metadata coord persistence)
-  pull-requests: read    # train-composer's PR lookups
-  checks: read           # staging gate
+# No workflow-level `permissions:` on purpose: each job declares its own. The
+# select job declares none and inherits the caller's grant, because asking for
+# actions: read here would fail every legacy caller that does not grant it.
 
 jobs:
-  compose:
-    if: github.event_name != 'release'
+  # A typo in selection_mode would otherwise skip every job and pass green.
+  check-mode:
+    if: inputs.selection_mode != 'qa-passed' && inputs.selection_mode != 'ready-for-prod'
     runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Reject unknown selection_mode
+        env:
+          MODE: ${{ inputs.selection_mode }}
+        run: |
+          echo "::error::selection_mode must be qa-passed or ready-for-prod (got '$MODE')"
+          exit 1
+
+  select:
+    if: inputs.selection_mode == 'qa-passed' && github.event_name != 'release'
+    runs-on: ubuntu-latest
+    outputs:
+      outcome: ${{ steps.select.outputs.outcome }}
+      rc_sha: ${{ steps.select.outputs.rc_sha }}
+      rc_image_tag: ${{ steps.select.outputs.rc_image_tag }}
+      rc_tickets: ${{ steps.select.outputs.rc_tickets }}
+      untracked_commits: ${{ steps.select.outputs.untracked_commits }}
+      blocked_by: ${{ steps.select.outputs.blocked_by }}
+      selection: ${{ steps.select.outputs.selection }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_branch }}
+          fetch-depth: 0          # the walk needs history and tags since the last Promotion
+          persist-credentials: false
+
+      # Same pattern as post-publish: the scripts are fetched explicitly so the
+      # ref is visible; Phase 1 flips it to v1 alongside the callers.
+      - name: Fetch release-train scripts
+        uses: actions/checkout@v4
+        with:
+          repository: signapse/reusable-workflows
+          ref: main
+          path: _rw
+          persist-credentials: false
+
+      - name: Select Release Candidate
+        id: select
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+          LINEAR_TEAM_KEY: ${{ inputs.linear_team_key }}
+          QA_PASSED_LABEL: ${{ inputs.qa_passed_label }}
+          QA_FAILED_STATE: ${{ inputs.qa_failed_state }}
+          BUILD_WORKFLOW: ${{ inputs.build_workflow }}
+          BRANCH: ${{ inputs.release_branch }}
+          RELEASE_TAG_PATTERN: ${{ inputs.release_tag_pattern }}
+          TICKET: ${{ inputs.ticket }}
+          TRIGGER_ID: ${{ inputs.trigger_id }}
+        run: |
+          set -euo pipefail
+          sel=$("$GITHUB_WORKSPACE/_rw/actions/release-train/scripts/release-candidate.sh" "" HEAD)
+          eof="EOF_$(openssl rand -hex 8)"
+          {
+            echo "outcome=$(jq -r .outcome <<< "$sel")"
+            echo "rc_sha=$(jq -r '.rc.sha // ""' <<< "$sel")"
+            echo "rc_image_tag=$(jq -r '.rc.image_tag // ""' <<< "$sel")"
+            echo "rc_tickets=$(jq -r '[.tickets[].id] | join(",")' <<< "$sel")"
+            echo "untracked_commits=$(jq -c .untracked_commits <<< "$sel")"
+            echo "blocked_by=$(jq -r '.blocked_by.id // ""' <<< "$sel")"
+            echo "selection<<$eof"
+            echo "$sel"
+            echo "$eof"
+          } >> "$GITHUB_OUTPUT"
+
+          # shellcheck disable=SC2016 # jq bindings, not shell expansion.
+          jq -r --arg ticket "$TICKET" --arg trigger "$TRIGGER_ID" --arg repo "$GITHUB_REPOSITORY" '
+            def short: .[0:7];
+            def commit: "[`\(.sha | short)`](https://github.com/\($repo)/commit/\(.sha)) \(.subject)";
+            "## Release Candidate",
+            "",
+            (if $ticket != "" then "Triggered by \($ticket) (delivery `\($trigger)`)." else "Scheduled run (hourly backstop)." end),
+            "Walked main from `\(.last_tag)` to `\(.head_sha | short)`.",
+            "",
+            (if .outcome == "selected" then
+               "**Selected** `\(.rc.image_tag)` ([build #\(.rc.run_number)](\(.rc.run_url)))."
+             elif .outcome == "already_promoted" then
+               "**No-op:** `\(.rc.image_tag)` is already promoted."
+             else
+               "**No Release Candidate:** no build since `\(.last_tag)` has all its tickets QA Passed."
+             end),
+            "",
+            "### Tickets",
+            (if (.tickets | length) == 0 then "_none_" else (.tickets[] | "- [\(.id)](\(.url)) \(.title) (\(.state))") end),
+            "",
+            "### Untracked commits",
+            (if (.untracked_commits | length) == 0 then "_none_" else (.untracked_commits[] | "- " + commit) end),
+            "",
+            "### Blocked by",
+            (if .blocked_by == null then "_nothing: every walked commit is selectable_"
+             else "- [\(.blocked_by.id)](\(.blocked_by.url)) \(.blocked_by.reason), first merged in " + (.blocked_by | commit)
+             end)
+          ' <<< "$sel" >> "$GITHUB_STEP_SUMMARY"
+
+  compose:
+    if: inputs.selection_mode == 'ready-for-prod' && github.event_name != 'release'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write        # gh release create/edit (release-metadata coord persistence)
+      pull-requests: read    # train-composer's PR lookups
+      checks: read           # staging gate
     outputs:
       state: ${{ steps.compose.outputs.state }}
       next_version: ${{ steps.compose.outputs.next_version }}
@@ -207,6 +391,10 @@ jobs:
   post-publish:
     if: github.event_name == 'release'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write        # release-metadata reads the release body
+      pull-requests: read    # unchanged from the old workflow-level grant
+      checks: read
     env:
       DEPLOY_TO_PROD_URL: ${{ inputs.deploy_to_prod_url }}
     steps:
