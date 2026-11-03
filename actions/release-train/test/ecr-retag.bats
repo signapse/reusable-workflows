@@ -22,7 +22,13 @@ case "$*" in
     ;;
   *"ecr put-image"*)
     echo "PUT_IMAGE_CALLED: $*" > "$TMP/put-image.log"
+    touch "$TMP/put-done"
     echo '{"image":{"imageId":{"imageTag":"1.2.33"}}}'
+    ;;
+  *"ecr describe-images"*)
+    # The dest tag exists only after the put, on the source digest.
+    [ -f "$TMP/put-done" ] || exit 254
+    echo '{"imageDetails":[{"imageDigest":"sha256:X"}]}'
     ;;
 esac
 STUB
@@ -31,6 +37,42 @@ STUB
   [ "$status" -eq 0 ]
   grep -q "signstream/http" "$TMP/put-image.log"
   grep -q -- "--image-tag 1.2.33" "$TMP/put-image.log"
+  printf "%s\n" "$output" | tail -1 | jq -e '.source_digest == "sha256:X" and .tag_digest == "sha256:X" and .tag == "1.2.33"' > /dev/null
+}
+
+@test "fails when the dest digest differs from the source after the put" {
+  cat > "$TMP/stub/aws" <<'STUB'
+#!/usr/bin/env bash
+case "$*" in
+  *"ecr batch-get-image"*)
+    echo '{"images":[{"imageManifest":"M","imageId":{"imageDigest":"sha256:X"}}]}' ;;
+  *"ecr put-image"*) touch "$TMP/put-done"; echo '{}' ;;
+  *"ecr describe-images"*)
+    [ -f "$TMP/put-done" ] || exit 254
+    echo '{"imageDetails":[{"imageDigest":"sha256:Y"}]}' ;;
+esac
+STUB
+  chmod +x "$TMP/stub/aws"
+  run bash "$SCRIPT" signstream/http main-abc123 1.2.33
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"digest mismatch"* ]]
+}
+
+@test "refuses to move a dest tag that points at other bytes" {
+  cat > "$TMP/stub/aws" <<'STUB'
+#!/usr/bin/env bash
+case "$*" in
+  *"ecr batch-get-image"*)
+    echo '{"images":[{"imageManifest":"M","imageId":{"imageDigest":"sha256:X"}}]}' ;;
+  *"ecr describe-images"*) echo '{"imageDetails":[{"imageDigest":"sha256:OLD"}]}' ;;
+  *"ecr put-image"*) touch "$TMP/put-done"; echo '{}' ;;
+esac
+STUB
+  chmod +x "$TMP/stub/aws"
+  run bash "$SCRIPT" signstream/http main-abc123 1.2.33
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"refusing to move"* ]]
+  [ ! -f "$TMP/put-done" ]
 }
 
 @test "exits non-zero when source manifest not found" {
