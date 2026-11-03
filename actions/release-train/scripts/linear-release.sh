@@ -100,6 +100,9 @@ git rev-parse --verify -q "${SINCE}^{commit}" > /dev/null || die "unknown ref: $
 
 # --- 4. tickets + untracked commits ---------------------------------------
 tickets=$(LINEAR_TEAM_KEY="$TEAM_KEY" "$HERE/ticket-extractor.sh" "$SINCE" "$UNTIL" < /dev/null)
+# The issues lookup reads one page of 250, which covers any real Deployment.
+# Refuse (before creating anything) rather than misreport page-2 issues.
+[ "$(jq 'length' <<<"$tickets")" -le 250 ] || die "$(jq 'length' <<<"$tickets") ticket refs in range; more than 250 is not supported (check since)"
 
 # One line per mainline commit whose own message, and every commit it merged
 # in, carries no ticket ref. Walking --first-parent keeps a PR merge commit
@@ -132,10 +135,12 @@ if [ -z "$release" ]; then
   if [ -z "$stage_id" ]; then
     die "stage '$STAGE_NAME' not found in pipeline '$pipeline_name' (has: $(jq -r '[.stages.nodes[].name] | join(", ")' <<<"$pipeline"))"
   fi
-  sha=$(git rev-parse "${UNTIL}^{commit}")
+  # No commitSha yet: it is set after every ticket is attached (step 7), so a
+  # run that fails half-way never becomes the default predecessor (that
+  # lookup skips Releases without a commit) and its tickets are not skipped.
   input=$(jq -nc --arg pid "$pipeline_id" --arg sid "$stage_id" --arg v "$VERSION" \
-    --arg sha "$sha" --arg d "$(describe '[]')" \
-    '{pipelineId:$pid, stageId:$sid, name:$v, version:$v, commitSha:$sha, description:$d}')
+    --arg d "$(describe '[]')" \
+    '{pipelineId:$pid, stageId:$sid, name:$v, version:$v, description:$d}')
   out=$(gql 'mutation($input:ReleaseCreateInput!){ releaseCreate(input:$input){ success release{ id url version stage{ name } } } }' \
     "$(jq -nc --argjson i "$input" '{input:$i}')")
   release=$(jq -c '.releaseCreate.release // empty' <<<"$out")
@@ -153,9 +158,6 @@ release_id=$(jq -r '.id' <<<"$release")
 # error-message matching is needed. Any error after that (auth, rate limit,
 # bad release id) fails the run. addedReleaseIds is additive: re-runs no-op.
 unresolved='[]'
-# One page of 250 covers any real Deployment; refuse rather than misreport
-# issues on a second page as unresolved.
-[ "$(jq 'length' <<<"$tickets")" -le 250 ] || die "$(jq 'length' <<<"$tickets") ticket refs in range; more than 250 is not supported (check since)"
 if [ "$(jq 'length' <<<"$tickets")" -gt 0 ]; then
   numbers=$(jq -c 'map(split("-")[1] | tonumber)' <<<"$tickets")
   found=$(gql 'query($key:String!,$n:[Float!]){ issues(first:250, filter:{team:{key:{eq:$key}}, number:{in:$n}}){ nodes{ id identifier } } }' \
@@ -170,12 +172,11 @@ if [ "$(jq 'length' <<<"$tickets")" -gt 0 ]; then
   done
 fi
 
-# Keep the description true to what is attached (also refreshes it on re-run).
-if [ "$created" != true ] || [ "$unresolved" != '[]' ]; then
-  out=$(gql 'mutation($id:String!,$d:String!){ releaseUpdate(id:$id, input:{description:$d}){ success } }' \
-    "$(jq -nc --arg id "$release_id" --arg d "$(describe "$unresolved")" '{id:$id, d:$d}')")
-  [ "$(jq -r '.releaseUpdate.success // false' <<<"$out")" = "true" ] || die "releaseUpdate (description) failed"
-fi
+# --- 7. finalise: description (true to what is attached) and commitSha ------
+out=$(gql 'mutation($id:String!,$input:ReleaseUpdateInput!){ releaseUpdate(id:$id, input:$input){ success } }' \
+  "$(jq -nc --arg id "$release_id" --arg d "$(describe "$unresolved")" --arg sha "$(git rev-parse "${UNTIL}^{commit}")" \
+    '{id:$id, input:{description:$d, commitSha:$sha}}')")
+[ "$(jq -r '.releaseUpdate.success // false' <<<"$out")" = "true" ] || die "releaseUpdate (description, commitSha) failed"
 
 jq -nc --argjson r "$release" --argjson created "$created" --arg since "$SINCE" \
   --argjson t "$tickets" --argjson u "$untracked" --argjson n "$unresolved" \

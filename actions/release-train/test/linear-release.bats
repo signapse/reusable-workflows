@@ -104,7 +104,9 @@ teardown() { rm -rf "$TMP"; }
   [ "$(jq -r '.input.pipelineId' "$STATE/create-vars.json")" = "pipe-1" ]
   [ "$(jq -r '.input.stageId' "$STATE/create-vars.json")" = "st-dep" ]
   [ "$(jq -r '.input.version' "$STATE/create-vars.json")" = "v0.0.1" ]
-  [ "$(jq -r '.input.commitSha' "$STATE/create-vars.json")" = "$(git rev-parse v0.0.1)" ]
+  # commitSha is set only after tickets are attached, not on create
+  [ "$(jq -r '.input.commitSha // "none"' "$STATE/create-vars.json")" = "none" ]
+  [ "$(jq -r '.input.commitSha' "$STATE/update-vars.json")" = "$(git rev-parse v0.0.1)" ]
   grep -qx "issueUpdate uuid-SIG-101" "$STATE/calls"
   grep -qx "issueUpdate uuid-SIG-102" "$STATE/calls"
 }
@@ -182,7 +184,7 @@ EOF
   [ "$status" -eq 0 ]
   [ "$(jq -c '.tickets' <<<"$output")" = '["SIG-101"]' ]
   [ "$(jq -c '.unresolved' <<<"$output")" = '["SIG-102"]' ]
-  [[ "$(jq -r '.d' "$STATE/update-vars.json")" == *"not found in Linear: SIG-102"* ]]
+  [[ "$(jq -r '.input.description' "$STATE/update-vars.json")" == *"not found in Linear: SIG-102"* ]]
   ! grep -qx "issueUpdate uuid-SIG-102" "$STATE/calls"
 }
 
@@ -248,6 +250,7 @@ EOF
   run "$SCRIPT" v0.0.9 HEAD v0.0.0
   [ "$status" -ne 0 ]
   [[ "$output" == *"more than 250 is not supported"* ]]
+  ! grep -q releaseCreate "$STATE/calls"
 }
 
 @test "pipeline-config.sh keeps '#' inside a quoted value" {
@@ -255,4 +258,13 @@ EOF
   CFG="$BATS_TEST_DIRNAME/../scripts/pipeline-config.sh"
   [ "$("$CFG" linear_pipeline)" = "Production #1" ]
   [ "$("$CFG" sentry_project)" = "a #b" ]
+}
+
+@test "attach fails half-way: Release left without commitSha, so it is not a default predecessor" {
+  touch "$STATE/deny"
+  run "$SCRIPT" v0.0.1 v0.0.1 v0.0.0
+  [ "$status" -ne 0 ]
+  grep -q '^releaseCreate$' "$STATE/calls"
+  ! grep -q '^releaseUpdate$' "$STATE/calls"
+  [ "$(jq -r '.input.commitSha // "none"' "$STATE/create-vars.json")" = "none" ]
 }
