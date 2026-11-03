@@ -123,6 +123,15 @@ sql() { printf '%s\n' "$1" >"$BATS_TEST_TMPDIR/m.up.sql"; run python3 "$SCRIPT" 
   [[ "$output" == *"DROP COLUMN users.legacy"* ]]
 }
 
+@test "DO LANGUAGE with a quoted or string language name is checked" {
+  sql 'DO LANGUAGE "plpgsql" $$ BEGIN ALTER TABLE users DROP COLUMN legacy; END $$;'
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"DROP COLUMN users.legacy"* ]]
+  sql "DO LANGUAGE 'plpgsql' \$\$ BEGIN ALTER TABLE users DROP COLUMN legacy; END \$\$;"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"DROP COLUMN users.legacy"* ]]
+}
+
 @test "single-quoted DO body is checked" {
   sql "DO 'BEGIN ALTER TABLE users DROP COLUMN legacy; END';"
   [ "$status" -eq 1 ]
