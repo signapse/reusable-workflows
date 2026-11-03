@@ -225,6 +225,26 @@ run_gate() { run bash -c "echo '$1' | '$SCRIPT' 2>/dev/null"; }
   [[ "$(reason SIG-1)" == *"did not pass"* ]]
 }
 
+@test "no dev smoke job and only skipped/neutral runs is not a successful build" {
+  issue SIG-1 "In Review" https://github.com/signapse/app/pull/10 https://github.com/signapse/infra/pull/3
+  pr signapse/infra 3 closed true sha3
+  runs signapse/infra sha3 '[{"id":30,"status":"completed","conclusion":"skipped"},{"id":31,"status":"completed","conclusion":"neutral"}]'
+  jobs signapse/infra 30 '[]'
+  jobs signapse/infra 31 '[]'
+  run_gate '["SIG-1"]'
+  [ "$(decision SIG-1)" = false ]
+}
+
+@test "no dev smoke job: one successful run plus a skipped one passes" {
+  issue SIG-1 "In Review" https://github.com/signapse/app/pull/10 https://github.com/signapse/infra/pull/3
+  pr signapse/infra 3 closed true sha3
+  runs signapse/infra sha3 '[{"id":30,"status":"completed","conclusion":"success"},{"id":31,"status":"completed","conclusion":"skipped"}]'
+  jobs signapse/infra 30 '[]'
+  jobs signapse/infra 31 '[]'
+  run_gate '["SIG-1"]'
+  [ "$(decision SIG-1)" = true ]
+}
+
 @test "merged PR with no main-push run yet stays" {
   issue SIG-1 "In Review" https://github.com/signapse/app/pull/10 https://github.com/signapse/api/pull/7
   pr signapse/api 7 closed true sha7

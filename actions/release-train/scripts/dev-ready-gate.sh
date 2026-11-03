@@ -19,7 +19,8 @@
 #      its merge commit has a job matching SMOKE_JOB_PATTERN that succeeded.
 #      PRs closed without merging are ignored. A merged PR in a repo whose runs
 #      have no such job (a repo not on the pipeline, e.g. Terraform) counts as
-#      passed only once every push run on its merge commit succeeded.
+#      passed only once a push run on its merge commit succeeded and none
+#      failed (all-skipped/neutral is not enough).
 # The caller only invokes this after this build's own smoke passed, so the
 # CURRENT_PRS are taken as passed.
 #
@@ -100,7 +101,8 @@ pr_verdict() {
     echo "block|${repo}#${num} build still running"
   elif printf '%s' "$runs" | jq -e 'length == 0' > /dev/null; then
     echo "block|${repo}#${num} has no main-push run on ${sha:0:7} yet"
-  elif printf '%s' "$runs" | jq -e 'all(.[]; .conclusion == "success" or .conclusion == "skipped" or .conclusion == "neutral")' > /dev/null; then
+  elif printf '%s' "$runs" | jq -e 'any(.[]; .conclusion == "success")
+      and all(.[]; .conclusion == "success" or .conclusion == "skipped" or .conclusion == "neutral")' > /dev/null; then
     echo "pass|${repo}#${num} merged and its runs passed; ${repo} has no dev smoke job"
   else
     echo "block|${repo}#${num} has no dev smoke job and a run on ${sha:0:7} did not pass"
