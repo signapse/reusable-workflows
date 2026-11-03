@@ -57,7 +57,12 @@ case "$q" in
   *orderBy:createdAt*)
     # Previous-Release lookup for the default range start.
     echo "prev-releases $(jq -c . <<<"$v")" >> "$STATE/calls"
-    cat "$STATE/prev.json" 2>/dev/null || printf '{"data":{"releases":{"nodes":[]}}}' ;;
+    # Honour the createdAt < before filter like Linear does.
+    if [ -f "$STATE/prev.json" ]; then
+      jq -c --arg b "$(jq -r '.before' <<<"$v")" '.data.releases.nodes |= map(select(.createdAt < $b))' "$STATE/prev.json"
+    else
+      printf '{"data":{"releases":{"nodes":[]}}}'
+    fi ;;
   *"releases("*)
     echo "releases" >> "$STATE/calls"
     if [ -f "$STATE/release.json" ]; then
@@ -192,8 +197,8 @@ EOF
   # v0.0.1 was deployed. v0.0.2 was tagged but failed staging (never a
   # Release). v0.0.3 is deployed: its range must start at v0.0.1, not v0.0.2.
   jq -nc --arg sha "$(git rev-parse v0.0.1)" \
-    '{data:{releases:{nodes:[{version:"v0.0.1", commitSha:$sha, createdAt:"2026-11-01T00:00:00Z"},
-                             {version:"v0.0.0", commitSha:null, createdAt:"2026-10-01T00:00:00Z"}]}}}' > "$STATE/prev.json"
+    '{data:{releases:{nodes:[{version:"v0.0.1", commitSha:$sha, createdAt:"2020-11-01T00:00:00Z"},
+                             {version:"v0.0.0", commitSha:null, createdAt:"2020-10-01T00:00:00Z"}]}}}' > "$STATE/prev.json"
   git commit -q --allow-empty -m "feat(SIG-103): in the skipped RC"
   git tag v0.0.2
   git commit -q --allow-empty -m "feat(SIG-104): in the deployed RC"
@@ -220,4 +225,34 @@ EOF
   [ "$("$CFG" sentry_project)" = "signstream" ]
   [ "$("$CFG" missing_key)" = "" ]
   [ "$("$CFG" sentry_project /nonexistent.yml)" = "" ]
+}
+
+@test "re-run of an older version: range ends at its own predecessor, not at a newer Release" {
+  # v0.0.1 (deployed 1 Nov) then v0.0.2 (deployed 2 Nov). Re-running v0.0.2's
+  # predecessor v0.0.1 must not scan from v0.0.2 (empty / wrong range).
+  git commit -q --allow-empty -m "feat(SIG-105): later"
+  git tag v0.0.2
+  jq -nc --arg s0 "$(git rev-parse v0.0.0)" --arg s2 "$(git rev-parse v0.0.2)" \
+    '{data:{releases:{nodes:[{version:"v0.0.0", commitSha:$s0, createdAt:"2020-10-01T00:00:00Z"},
+                             {version:"v0.0.2", commitSha:$s2, createdAt:"2020-11-02T00:00:00Z"}]}}}' > "$STATE/prev.json"
+  jq -nc '{id:"rel-1", url:"https://linear.app/signapse/release/rel-1", version:"v0.0.1", stage:{name:"Rolling Out"}, createdAt:"2020-11-01T00:00:00Z"}' > "$STATE/release.json"
+  run --separate-stderr "$SCRIPT" v0.0.1 v0.0.1
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.since' <<<"$output")" = "$(git rev-parse v0.0.0)" ]
+  [ "$(jq -c '.tickets' <<<"$output")" = '["SIG-101","SIG-102"]' ]
+  [ "$(jq -r '.created' <<<"$output")" = "false" ]
+}
+
+@test "more than 250 ticket refs: refuses rather than misreport some as unresolved" {
+  for i in $(seq 1000 1250); do git commit -q --allow-empty -m "SIG-$i"; done
+  run "$SCRIPT" v0.0.9 HEAD v0.0.0
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"more than 250 is not supported"* ]]
+}
+
+@test "pipeline-config.sh keeps '#' inside a quoted value" {
+  printf 'linear_pipeline: "Production #1"  # comment\nsentry_project: '"'"'a #b'"'"'\n' > .signapse/pipeline.yml
+  CFG="$BATS_TEST_DIRNAME/../scripts/pipeline-config.sh"
+  [ "$("$CFG" linear_pipeline)" = "Production #1" ]
+  [ "$("$CFG" sentry_project)" = "a #b" ]
 }

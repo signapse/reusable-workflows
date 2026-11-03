@@ -75,11 +75,20 @@ if [ -z "$pipeline" ]; then
 fi
 pipeline_id=$(jq -r '.id' <<<"$pipeline")
 
-# --- 2. commit range ------------------------------------------------------
+# --- 2. existing Release for this version (idempotency) -------------------
+existing=$(gql 'query($pid:ID!,$v:String!){ releases(filter:{pipeline:{id:{eq:$pid}}, version:{eq:$v}}){ nodes{ id url version stage{ name } createdAt } } }' \
+  "$(jq -nc --arg pid "$pipeline_id" --arg v "$VERSION" '{pid:$pid, v:$v}')")
+release=$(jq -c '.releases.nodes[0] // empty' <<<"$existing")
+
+# --- 3. commit range ------------------------------------------------------
+# On a re-run the range must end where this Release's own predecessor ended,
+# not at a newer Release, so look only at Releases created before it.
 git rev-parse --verify -q "${UNTIL}^{commit}" > /dev/null || die "unknown ref: $UNTIL"
 if [ -z "$SINCE" ]; then
-  prev=$(gql 'query($pid:ID!,$v:String!){ releases(first:50, orderBy:createdAt, filter:{pipeline:{id:{eq:$pid}}, version:{neq:$v}, stage:{type:{neq:canceled}}}){ nodes{ version commitSha createdAt } } }' \
-    "$(jq -nc --arg pid "$pipeline_id" --arg v "$VERSION" '{pid:$pid, v:$v}')")
+  before=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  [ -z "$release" ] || before=$(jq -r '.createdAt' <<<"$release")
+  prev=$(gql 'query($pid:ID!,$v:String!,$before:DateTimeOrDuration!){ releases(first:50, orderBy:createdAt, filter:{pipeline:{id:{eq:$pid}}, version:{neq:$v}, stage:{type:{neq:canceled}}, createdAt:{lt:$before}}){ nodes{ version commitSha createdAt } } }' \
+    "$(jq -nc --arg pid "$pipeline_id" --arg v "$VERSION" --arg b "$before" '{pid:$pid, v:$v, before:$b}')")
   latest=$(jq -c '[.releases.nodes[] | select(.commitSha != null and .commitSha != "")] | max_by(.createdAt) // empty' <<<"$prev")
   [ -n "$latest" ] || die "pipeline '$pipeline_name' has no earlier Release with a commit; pass 'since' (the last commit deployed to prod) for the first Deployment"
   SINCE=$(jq -r '.commitSha' <<<"$latest")
@@ -89,7 +98,7 @@ if [ -z "$SINCE" ]; then
 fi
 git rev-parse --verify -q "${SINCE}^{commit}" > /dev/null || die "unknown ref: $SINCE"
 
-# --- 3. tickets + untracked commits ---------------------------------------
+# --- 4. tickets + untracked commits ---------------------------------------
 tickets=$(LINEAR_TEAM_KEY="$TEAM_KEY" "$HERE/ticket-extractor.sh" "$SINCE" "$UNTIL" < /dev/null)
 
 # One line per mainline commit whose own message, and every commit it merged
@@ -104,10 +113,7 @@ untracked=$(
   done | jq -R . | jq -sc '.'
 )
 
-# --- 4. find or create the Release ------------------------------------------
-existing=$(gql 'query($pid:ID!,$v:String!){ releases(filter:{pipeline:{id:{eq:$pid}}, version:{eq:$v}}){ nodes{ id url version stage{ name } } } }' \
-  "$(jq -nc --arg pid "$pipeline_id" --arg v "$VERSION" '{pid:$pid, v:$v}')")
-release=$(jq -c '.releases.nodes[0] // empty' <<<"$existing")
+# --- 5. create the Release if missing ------------------------------------------
 
 describe() { # <unresolved-json>
   local repo="${GITHUB_REPOSITORY:-}" sha
@@ -141,12 +147,15 @@ else
 fi
 release_id=$(jq -r '.id' <<<"$release")
 
-# --- 5. attach tickets --------------------------------------------------
+# --- 6. attach tickets --------------------------------------------------
 # Resolve all refs in one issues query: a ref that is not a Linear issue is
 # simply absent from the result (reported as unresolved, not fatal), so no
 # error-message matching is needed. Any error after that (auth, rate limit,
 # bad release id) fails the run. addedReleaseIds is additive: re-runs no-op.
 unresolved='[]'
+# One page of 250 covers any real Deployment; refuse rather than misreport
+# issues on a second page as unresolved.
+[ "$(jq 'length' <<<"$tickets")" -le 250 ] || die "$(jq 'length' <<<"$tickets") ticket refs in range; more than 250 is not supported (check since)"
 if [ "$(jq 'length' <<<"$tickets")" -gt 0 ]; then
   numbers=$(jq -c 'map(split("-")[1] | tonumber)' <<<"$tickets")
   found=$(gql 'query($key:String!,$n:[Float!]){ issues(first:250, filter:{team:{key:{eq:$key}}, number:{in:$n}}){ nodes{ id identifier } } }' \
