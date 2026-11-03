@@ -233,3 +233,19 @@ serve() {
   grep -q "Dev deploy confirmed" "$TMP/summary.md"
   ! grep -q "fallback" "$TMP/summary.md"
 }
+
+@test "VERSION_URL: a trailing newline makes the value invalid" {
+  export VERSION_URL=https://dev.example/version
+  serve "$WATCH_PATHS" 1 "main-300-$SHA"
+  printf '{"version":"main-300\\n"}' > "$TMP/version.1"
+  run "$SCRIPT"
+  [ "$status" -ne 0 ]
+}
+
+@test "VERSION_URL: a path yielding several values is invalid" {
+  export VERSION_URL=https://dev.example/version VERSION_JQ='.versions[]'
+  serve "$WATCH_PATHS" 1 "main-300-$SHA"
+  echo '{"versions":["main-300","main-299"]}' > "$TMP/version.1"
+  run "$SCRIPT"
+  [ "$status" -ne 0 ]
+}

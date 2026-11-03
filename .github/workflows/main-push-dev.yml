@@ -397,16 +397,16 @@ jobs:
           path: _rw
           persist-credentials: false
 
-      - name: Checkout merge commit (context fallback)
+      - name: Checkout push range (context fallback)
         if: ${{ needs.context.result != 'success' }}
         uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          fetch-depth: 0
           path: _src
           persist-credentials: false
 
-      # context failed, so its PR list is missing: rebuild it for the merge
-      # commit alone with this repo's own token. If even that fails, notify
+      # context failed, so its PR list is missing: rebuild it for the push
+      # range with this repo's own token. If even that fails, notify
       # with an empty list (Slack and the run's error still fire).
       - name: Merged PRs (context fallback)
         id: fallback
@@ -414,11 +414,17 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           SHA: ${{ github.sha }}
+          BEFORE: ${{ github.event.before }}
           REPO: ${{ github.repository }}
         run: |
           set -uo pipefail
           cd "$GITHUB_WORKSPACE/_src"
-          if prs=$("$GITHUB_WORKSPACE/_rw/actions/release-train/scripts/merged-prs.sh" "$REPO" "${SHA}~1" "$SHA"); then
+          # Same range as context: the whole push, else the merge commit alone.
+          if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ] \
+            || ! git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
+            BEFORE="${SHA}~1"
+          fi
+          if prs=$("$GITHUB_WORKSPACE/_rw/actions/release-train/scripts/merged-prs.sh" "$REPO" "$BEFORE" "$SHA"); then
             echo "prs=$prs" >> "$GITHUB_OUTPUT"
           else
             echo "::warning::could not list merged PRs for ${SHA}; notifying Slack only"

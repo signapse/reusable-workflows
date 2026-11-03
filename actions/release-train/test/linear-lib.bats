@@ -64,3 +64,8 @@ teardown() { rm -rf "$TMP" /tmp/linear-request-body.* 2>/dev/null || true; }
   [ "$status" -eq 1 ]
   [[ "$output" == *"HTTP 401"* ]]
 }
+
+@test "linear_gql: other errors mentioning 'not found' are failures, not misses" {
+  LINEAR_RESP='{"errors":[{"message":"Authentication token not found"}]}' run linear_gql 'query{x}'
+  [ "$status" -eq 1 ]
+}

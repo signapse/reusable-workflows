@@ -114,7 +114,11 @@ if [ -n "$VERSION_URL" ]; then
     # body (a pending build, a branch name) are ignored.
     # A value with a newline (or a path yielding several values) is never a
     # single build id, so it is rejected rather than trimmed to a line.
-    running=$(printf '%s' "$body" | jq -r "($VERSION_JQ) // empty | strings" 2>/dev/null || true)
+    # Validated inside jq, before command substitution can strip a trailing
+    # newline: exactly one string value, with no newline anywhere in it.
+    running=$(printf '%s' "$body" | jq -r "[($VERSION_JQ) // empty]
+      | if length == 1 and (.[0] | type) == \"string\" and (.[0] | test(\"[\\\\n\\\\r]\") | not)
+        then .[0] else empty end" 2>/dev/null || true)
     n=""
     if [[ "$running" != *$'\n'* && "$running" =~ ^main-([0-9]+)(-[0-9a-f]{40})?$ ]]; then n="${BASH_REMATCH[1]}"; fi
     if [ "$running" = "$SHA" ] || { [ -n "$n" ] && [ "$n" -ge "$RUN_NUMBER" ]; }; then
