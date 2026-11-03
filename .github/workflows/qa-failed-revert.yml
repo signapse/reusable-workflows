@@ -1,0 +1,180 @@
+name: QA Failed revert (reusable)
+
+# Opens a revert PR for each ticket that has sat in QA Failed for
+# `threshold_hours` (SIG-2766, ADR 0001), so one stuck ticket cannot stop its
+# repo's line for days. Stateless: callers run it hourly. Logic and outputs:
+# actions/release-train/scripts/qa-failed-revert.sh. Caller template:
+# docs/RELEASE-TRAIN.md, "Revert PRs for tickets stuck in QA Failed".
+#
+# The PR is opened with a Prodzilla GitHub App token minted here (ADR 0005).
+# Never GITHUB_TOKEN: PRs it opens do not trigger CI, so the revert would sit
+# untested. The caller only needs to grant `contents: read`.
+
+on:
+  workflow_call:
+    inputs:
+      prodzilla_app_id:
+        description: Prodzilla GitHub App ID. Required; the run fails without it.
+        type: string
+        required: false
+        default: ''
+      threshold_hours:
+        description: >-
+          Hours a ticket must have been in QA Failed before its revert PR is
+          opened. Decimals allowed, so QA can test with minutes (0.1 = 6 min).
+        type: string
+        required: false
+        default: '24'
+      slack_channel:
+        description: Channel for conflict alerts (needs SLACK_BOT_TOKEN). Empty disables them.
+        type: string
+        required: false
+        default: ''
+      qa_failed_state:
+        description: Linear column for QA Failed tickets.
+        type: string
+        required: false
+        default: 'QA Failed'
+      linear_team_key:
+        description: Linear team key used as the ticket prefix.
+        type: string
+        required: false
+        default: 'SIG'
+      release_branch:
+        description: Branch whose commits are reverted and that the revert PR targets.
+        type: string
+        required: false
+        default: 'main'
+      release_tag_pattern:
+        description: ERE for Promotion tags; only commits since the last one are reverted.
+        type: string
+        required: false
+        default: '^v?[0-9]+\.[0-9]+\.[0-9]+$'
+    secrets:
+      PRODZILLA_APP_PRIVATE_KEY:
+        description: Prodzilla GitHub App private key. Required; the run fails without it.
+        required: false
+      LINEAR_API_KEY:
+        required: true
+      SLACK_BOT_TOKEN:
+        description: Needed only when slack_channel is set.
+        required: false
+    outputs:
+      result:
+        description: The script's JSON result (one entry per QA Failed ticket).
+        value: ${{ jobs.revert.outputs.result }}
+
+jobs:
+  revert:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    # Two overlapping runs could both pass the dedupe check; the second push to
+    # the same branch would then fail. Serialise per repo instead.
+    concurrency:
+      group: qa-failed-revert-${{ github.repository }}
+      cancel-in-progress: false
+    outputs:
+      result: ${{ steps.revert.outputs.result }}
+    steps:
+      - name: Check Prodzilla app inputs
+        id: repo
+        env:
+          APP_ID: ${{ inputs.prodzilla_app_id }}
+          HAS_KEY: ${{ secrets.PRODZILLA_APP_PRIVATE_KEY != '' }}
+        run: |
+          set -euo pipefail
+          missing=()
+          [ -n "$APP_ID" ] || missing+=("input prodzilla_app_id")
+          [ "$HAS_KEY" = true ] || missing+=("secret PRODZILLA_APP_PRIVATE_KEY")
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error title=Prodzilla app not configured::Missing ${missing[*]}. Revert PRs must be opened by the Prodzilla GitHub App: a GITHUB_TOKEN PR does not trigger CI, so there is no fallback. See docs/RELEASE-TRAIN.md."
+            exit 1
+          fi
+          echo "name=${GITHUB_REPOSITORY#*/}" >> "$GITHUB_OUTPUT"
+
+      - name: Mint Prodzilla token for this repo
+        id: app
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ inputs.prodzilla_app_id }}
+          private-key: ${{ secrets.PRODZILLA_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ steps.repo.outputs.name }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      # The app token is persisted so the script's `git push` is the app's.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_branch }}
+          fetch-depth: 0          # the walk needs history and tags since the last Promotion
+          token: ${{ steps.app.outputs.token }}
+
+      # Same pattern as release-train.yml: scripts fetched explicitly so the
+      # ref is visible; Phase 1 flips it to v1 alongside the callers.
+      - name: Fetch release-train scripts
+        uses: actions/checkout@v4
+        with:
+          repository: signapse/reusable-workflows
+          ref: main
+          path: _rw
+          persist-credentials: false
+
+      - name: Commit as the Prodzilla app
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          SLUG: ${{ steps.app.outputs.app-slug }}
+        run: |
+          set -euo pipefail
+          id=$(gh api "users/${SLUG}%5Bbot%5D" --jq .id)
+          git config user.name "${SLUG}[bot]"
+          git config user.email "${id}+${SLUG}[bot]@users.noreply.github.com"
+          # Keep the scripts checkout out of `git status`.
+          echo "_rw/" >> .git/info/exclude
+
+      - name: Open revert PRs
+        id: revert
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+          LINEAR_TEAM_KEY: ${{ inputs.linear_team_key }}
+          QA_FAILED_STATE: ${{ inputs.qa_failed_state }}
+          THRESHOLD_HOURS: ${{ inputs.threshold_hours }}
+          BRANCH: ${{ inputs.release_branch }}
+          RELEASE_TAG_PATTERN: ${{ inputs.release_tag_pattern }}
+          SLACK_CHANNEL: ${{ inputs.slack_channel }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          status=0
+          res=$("$GITHUB_WORKSPACE/_rw/actions/release-train/scripts/qa-failed-revert.sh" "" HEAD) || status=$?
+          if [ -z "$res" ]; then
+            echo "::error::qa-failed-revert.sh failed before producing a result (exit $status); see the log above."
+            exit "$status"
+          fi
+          echo "result=$res" >> "$GITHUB_OUTPUT"
+          {
+            echo "## QA Failed revert PRs"
+            echo
+            echo "Threshold: $(jq -r .threshold_hours <<< "$res")h. Commits since \`$(jq -r .last_tag <<< "$res")\`."
+            echo
+            if [ "$(jq '.tickets | length' <<< "$res")" -eq 0 ]; then
+              echo "No ticket with commits since the last Promotion is in QA Failed."
+            else
+              echo "| Ticket | In QA Failed | Action | PR | Notes |"
+              echo "|---|---|---|---|---|"
+              jq -r '.tickets[] | "| [\(.id)](\(.url)) | \(.age_hours // "?")h | \(.action) | \(.pr_url // "") | "
+                + ([ (if .conflict then "conflict at \(.conflict.sha[0:7]) in \(.conflict.files | join(", "))" else empty end),
+                     (.skipped[] | "skipped \(.sha[0:7]): \(.reason)"),
+                     (if (.shared_with | length) > 0 then "shares commits with \(.shared_with | join(", "))" else empty end),
+                     (if .action == "branch_exists" then "branch exists without an open PR" else empty end),
+                     (if .action == "no_history" then "no history entry moving it into QA Failed" else empty end),
+                     (.error // empty) ] | join("; ")) + " |"' <<< "$res"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          jq -r '.tickets[] | select(.action == "opened_draft_conflict" or .action == "branch_exists" or .action == "no_history")
+            | "::warning title=\(.id)::\(.action) \(.pr_url // "")"' <<< "$res"
+          jq -r '.tickets[] | select(.action == "failed") | "::error title=\(.id)::\(.error)"' <<< "$res"
+          exit "$status"
