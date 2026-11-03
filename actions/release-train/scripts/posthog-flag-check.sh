@@ -10,7 +10,8 @@
 #   prod                       -> on for the QA account
 #   prod, SAMPLE synthetic ids -> on for about PROD_PERCENT% of them
 #                                 (exactly none at 0, exactly all at 100)
-#   missing/unknown environment -> off for the other account at any percentage
+#   missing/unknown environment -> off for the other account and every
+#                                 synthetic id, at any percentage
 #
 # Env:
 #   POSTHOG_PROJECT_TOKEN  required, the public project token (phc_...)
@@ -90,11 +91,18 @@ if [ "$PERCENT" -gt 0 ] && [ "$PERCENT" -lt 100 ] && { [ "$lo" -eq 0 ] || [ "$hi
 fi
 
 # AC4: share of synthetic non-cohort ids that get the flag in prod.
+# The same ids with an unknown environment must all stay off, whatever the
+# percentage, so a catch-all prod condition cannot hide behind one account.
 on=0
+leaked=0
 for i in $(seq 1 "$N"); do
   r=$(evaluate "sig-flag-check-${KEY}-${i}" prod)
   if [ "$r" = true ]; then on=$((on + 1)); fi
+  r=$(evaluate "sig-flag-check-${KEY}-${i}" unknown)
+  if [ "$r" = true ]; then leaked=$((leaked + 1)); fi
 done
+label="fail dark, ${leaked}/${N} synthetic ids on with an unknown environment"
+if [ "$leaked" -eq 0 ]; then pass "$label"; else fail "$label"; fi
 label="AC4 prod at ${PERCENT}%, ${on}/${N} synthetic non-cohort ids on (accept ${lo}-${hi})"
 if [ "$on" -ge "$lo" ] && [ "$on" -le "$hi" ]; then pass "$label"; else fail "$label"; fi
 

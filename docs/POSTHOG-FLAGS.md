@@ -76,7 +76,8 @@ Consequence: the Rollout percentage counts users, not customer accounts. During 
 
 Conditions are OR'd, so a person matching any condition gets the flag.
 
-- **Every condition names its environment; there is no catch-all.** A client whose `environment` is missing or misspelt matches only `groups[1]`, so it sees the flag dark (off) at every Rollout percentage, including 100. The cost: an app that does not pass `environment` never gets the feature, only its QA Cohort users do. That is deliberate. The flag is removed from code after Done, so the feature does not stay hidden behind it.
+- **Every condition names its environment; there is no catch-all.** A non-cohort client whose `environment` override is missing or misspelt matches no condition, so it sees the flag dark (off) at every Rollout percentage, including 100. QA Cohort members still match `groups[1]` and see it. The cost: an app that does not pass `environment` never gets the feature for its non-cohort users. That is deliberate. The flag is removed from code after Done, so the feature does not stay hidden behind it.
+- **`environment` must never be stored on a person.** When a request carries no override, PostHog falls back to stored person properties, so a stored `environment=prod` would put that person into the Rollout regardless of where the request came from. Apps must not send `environment` in `$set`, `$set_once`, `identify` properties or `setPersonProperties`; only the evaluation-time override and the event super property are allowed. Today no person in the project has a stored `environment` (checked 2026-11-03).
 - `ensure_experience_continuity` is off: it is not needed for boolean flags with stable distinct_ids and it disables local evaluation.
 - PostHog hashes flag key + distinct_id, so the people on at 10% stay on at 50% and 100%.
 
@@ -156,13 +157,16 @@ client, _ := posthog.NewWithConfig(os.Getenv("POSTHOG_PROJECT_TOKEN"), posthog.C
 })
 defer client.Close()
 
-on, err := client.IsFeatureEnabled(posthog.FeatureFlagPayload{
+res, err := client.IsFeatureEnabled(posthog.FeatureFlagPayload{
     Key:              "sig-123-some-feature",
     DistinctId:       userID, // account-service id, no auth0| prefix
     PersonProperties: posthog.NewProperties().Set("environment", env), // "dev" | "staging" | "prod"
 })
+// IsFeatureEnabled returns interface{}: a bool for boolean flags. An error or
+// any non-bool result is treated as off (fail dark).
+on, _ := res.(bool)
 if err != nil {
-    on = false // fail dark: an unanswered flag is off
+    on = false
 }
 ```
 
@@ -178,7 +182,7 @@ if err != nil {
 2. `PROD_PERCENT=0 posthog-flag-check.sh sig-2749-posthog-qa-cohort-and-environment`
    - AC2: on in `dev`, `development`, `staging` for both accounts; off in `prod` for the other account; 0 of 100 synthetic ids on.
    - AC3: on in `prod` (and `production`) for the QA account.
-   - Fail dark: off for the other account with an empty or unknown `environment`.
+   - Fail dark: off for the other account and for every synthetic id with an empty or unknown `environment`.
 3. Set `groups[2].rollout_percentage` to 10 (UI: the third condition set; or the PATCH above).
 4. `PROD_PERCENT=10 posthog-flag-check.sh sig-2749-posthog-qa-cohort-and-environment`
    - AC4: about 10 of 100 synthetic non-cohort ids on (accepted 1 to 19, three standard deviations); QA account still on. The script refuses a `SAMPLE` too small for the band to exclude 0 and all.

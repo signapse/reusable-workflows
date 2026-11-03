@@ -148,6 +148,13 @@ EOF
   [[ "$output" == *"FAIL fail dark, unknown environment"* ]]
 }
 
+@test "check: a catch-all prod condition is caught at 10% by the sample" {
+  stub_curl
+  STUB_CATCH_ALL=1 STUB_PERCENT=10 PROD_PERCENT=10 SAMPLE=100 run "$CHECK" sig-1-thing
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"FAIL fail dark, 10/100 synthetic ids on with an unknown environment"* ]]
+}
+
 @test "check: refuses a sample too small to tell 10% from 0%" {
   stub_curl
   STUB_PERCENT=0 PROD_PERCENT=10 SAMPLE=20 run "$CHECK" sig-1-thing
