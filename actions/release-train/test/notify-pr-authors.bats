@@ -56,12 +56,18 @@ teardown() { rm -rf "$TMP"; }
   [ "$(echo "$output" | tail -1)" = 0 ]
 }
 
-@test "no merged PRs: nothing posted" {
-  SLACK_CHANNEL='#eng' run bash -c "echo '[]' | '$SCRIPT' build 2>/dev/null"
+@test "no merged PRs: no comment, but Slack still reports the failure" {
+  SLACK_CHANNEL='#eng' SLACK_BOT_TOKEN=x run bash -c "echo '[]' | '$SCRIPT' build 2>/dev/null"
   [ "$status" -eq 0 ]
   [ "$output" = 0 ]
   [ ! -f "$TMP/comments" ]
-  [ ! -f "$TMP/slack" ]
+  [[ "$(jq -r .text "$TMP/slack")" == *"*build*"*"No merged PR found"* ]]
+}
+
+@test "empty stdin is treated as no PRs" {
+  run bash -c "'$SCRIPT' build < /dev/null 2>/dev/null"
+  [ "$status" -eq 0 ]
+  [ "$output" = 0 ]
 }
 
 @test "Slack is skipped unless a channel is set" {

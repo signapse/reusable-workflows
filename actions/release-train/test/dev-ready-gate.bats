@@ -24,9 +24,18 @@ for arg in "$@"; do
   [ "$prev" = "-d" ] && body="$arg"
   prev="$arg"
 done
+case "${LINEAR_MODE:-}" in
+  http401)   printf '{"errors":[{"message":"Authentication required"}]}\n401'; exit 0 ;;
+  ratelimit) printf '{"errors":[{"message":"Rate limit exceeded"}],"data":null}\n200'; exit 0 ;;
+esac
 id=$(echo "$body" | jq -r '.variables.id')
 node=$(jq -c --arg id "$id" '.[$id] // null' "$LINEAR_FIXTURE")
-printf '{"data":{"issue":%s}}\n200' "$node"
+if [ "$node" = null ]; then
+  # What Linear returns for an unknown identifier.
+  printf '{"errors":[{"message":"Entity not found: Issue","extensions":{"code":"INPUT_ERROR"}}],"data":null}\n200'
+else
+  printf '{"data":{"issue":%s}}\n200' "$node"
+fi
 EOS
 
   # Fake gh api: serves fixture files, applying --jq like the real CLI.
@@ -127,6 +136,21 @@ run_gate() { run bash -c "echo '$1' | '$SCRIPT' 2>/dev/null"; }
   [ "$status" -eq 0 ]
   [ "$(decision SIG-404)" = false ]
   [[ "$(reason SIG-404)" == *"not found"* ]]
+}
+
+@test "Linear auth failure fails the run instead of reporting not found" {
+  issue SIG-1 "In Review" https://github.com/signapse/app/pull/10
+  LINEAR_MODE=http401 run bash -c "echo '[\"SIG-1\"]' | '$SCRIPT'"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Linear lookup of SIG-1 failed"* ]]
+  [[ "$output" != *'"move"'* ]]
+}
+
+@test "Linear GraphQL error (rate limit) fails the run" {
+  issue SIG-1 "In Review" https://github.com/signapse/app/pull/10
+  LINEAR_MODE=ratelimit run bash -c "echo '[\"SIG-1\"]' | '$SCRIPT'"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Rate limit exceeded"* ]]
 }
 
 @test "ticket with no PR attachments moves on the commit mention alone" {

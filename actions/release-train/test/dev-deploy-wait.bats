@@ -14,7 +14,8 @@ setup() {
   export GITOPS_DIR="$TMP/gitops" COUNT_DIR="$TMP/count"
   export RUN_NUMBER=300 SHA POLL_SECONDS=10 TIMEOUT_SECONDS=60 SETTLE_SECONDS=30
   export WATCH_PATHS="workloads/dev/api/helmrelease-patch.yaml"
-  unset VERSION_URL GITOPS_REPO GITOPS_REF
+  unset VERSION_URL VERSION_JQ GITOPS_REPO GITOPS_REF
+  export GITHUB_STEP_SUMMARY="$TMP/summary.md"
 
   cat > "$TMP/stub/gh" <<'EOS'
 #!/usr/bin/env bash
@@ -29,7 +30,9 @@ f=""
 for i in $(seq 1 "$n"); do
   [ -f "$GITOPS_DIR/$key.$i" ] && f="$GITOPS_DIR/$key.$i"
 done
-[ -n "$f" ] || { echo "HTTP 404" >&2; exit 1; }
+[ -n "$f" ] || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
+# A file holding only "ERR <text>" makes that poll fail with <text>.
+if head -1 "$f" | grep -q '^ERR '; then sed -n '1s/^ERR //p' "$f" >&2; exit 1; fi
 cat "$f"
 EOS
   # curl serves $TMP/version.<poll> the same way.
@@ -180,4 +183,53 @@ serve() {
   run "$SCRIPT"
   [ "$status" -ne 0 ]
   [[ "$output" == *"WATCH_PATHS is empty"* ]]
+}
+
+@test "missing watch path (HTTP 404) fails fast, without waiting" {
+  run "$SCRIPT"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"HTTP 404"* ]]
+  [[ "$output" == *"check dev_watch_paths"* ]]
+  [ ! -f "$TMP/count/sleeps" ]
+}
+
+@test "no access to the GitOps repo (HTTP 403) fails fast" {
+  echo "ERR gh: Resource not accessible by integration (HTTP 403)" > "$GITOPS_DIR/$(echo "$WATCH_PATHS" | tr '/' '_').1"
+  run "$SCRIPT"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"(HTTP 403)"* ]]
+  [ ! -f "$TMP/count/sleeps" ]
+}
+
+@test "transient GitHub error (HTTP 502) is retried" {
+  echo "ERR gh: Bad Gateway (HTTP 502)" > "$GITOPS_DIR/$(echo "$WATCH_PATHS" | tr '/' '_').1"
+  serve "$WATCH_PATHS" 2 "main-300-$SHA"
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"transient error"* ]]
+}
+
+@test "VERSION_URL: a value with a newline is rejected, not trimmed" {
+  export VERSION_URL=https://dev.example/version
+  serve "$WATCH_PATHS" 1 "main-300-$SHA"
+  printf '{"version":"main-300\\nmain-299"}' > "$TMP/version.1"
+  run "$SCRIPT"
+  [ "$status" -ne 0 ]
+}
+
+@test "job summary says plainly when the fixed-wait fallback was used" {
+  serve "$WATCH_PATHS" 1 "main-300-$SHA"
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  grep -q "Dev deploy NOT confirmed: fixed-wait fallback used" "$TMP/summary.md"
+}
+
+@test "job summary records a confirmed deploy when VERSION_URL matched" {
+  export VERSION_URL=https://dev.example/version
+  serve "$WATCH_PATHS" 1 "main-300-$SHA"
+  echo '{"version":"main-300"}' > "$TMP/version.1"
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+  grep -q "Dev deploy confirmed" "$TMP/summary.md"
+  ! grep -q "fallback" "$TMP/summary.md"
 }

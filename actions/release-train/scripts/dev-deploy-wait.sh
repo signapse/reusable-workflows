@@ -69,14 +69,29 @@ max_run() {
   (grep -oE 'main-[0-9]+-[0-9a-f]{40}' || true) | cut -d- -f2 | sort -n | tail -1
 }
 
+summary() { [ -z "${GITHUB_STEP_SUMMARY:-}" ] || printf '%s\n' "$*" >> "$GITHUB_STEP_SUMMARY"; }
+
+errf=$(mktemp)
+trap 'rm -f "$errf"' EXIT
+
 # Phase 1: Flux has committed this build (or newer) for every watched file.
 pending="$paths"
 while :; do
   still=""
   while IFS= read -r p; do
     [ -n "$p" ] || continue
-    body=$(gh api -H 'Accept: application/vnd.github.raw+json' \
-      "repos/${GITOPS_REPO}/contents/${p}?ref=${GITOPS_REF}" 2>/dev/null || true)
+    err=""
+    if ! body=$(gh api -H 'Accept: application/vnd.github.raw+json' \
+      "repos/${GITOPS_REPO}/contents/${p}?ref=${GITOPS_REF}" 2>"$errf"); then
+      body=""
+      err=$(cat "$errf")
+      # Access and path problems never fix themselves: fail now rather than
+      # burn the whole budget and blame the PR author for a deploy failure.
+      if [[ "$err" =~ HTTP\ (401|403|404) ]]; then
+        die "cannot read ${GITOPS_REPO}/${p}@${GITOPS_REF} (HTTP ${BASH_REMATCH[1]}): check dev_watch_paths and that the read app is installed on ${GITOPS_REPO}. ${err}"
+      fi
+      log "transient error reading ${p}, retrying: ${err}"
+    fi
     n=$(printf '%s' "$body" | max_run)
     if [ -n "$n" ] && [ "$n" -ge "$RUN_NUMBER" ]; then
       log "Flux committed main-${n} to ${p}"
@@ -97,11 +112,14 @@ if [ -n "$VERSION_URL" ]; then
     # Only the running-build field counts, and only as a whole value: the
     # full sha, or exactly main-<n> / main-<n>-<sha>. Tags elsewhere in the
     # body (a pending build, a branch name) are ignored.
-    running=$(printf '%s' "$body" | jq -r "($VERSION_JQ) // empty | strings" 2>/dev/null | head -1 || true)
+    # A value with a newline (or a path yielding several values) is never a
+    # single build id, so it is rejected rather than trimmed to a line.
+    running=$(printf '%s' "$body" | jq -r "($VERSION_JQ) // empty | strings" 2>/dev/null || true)
     n=""
-    if [[ "$running" =~ ^main-([0-9]+)(-[0-9a-f]{40})?$ ]]; then n="${BASH_REMATCH[1]}"; fi
+    if [[ "$running" != *$'\n'* && "$running" =~ ^main-([0-9]+)(-[0-9a-f]{40})?$ ]]; then n="${BASH_REMATCH[1]}"; fi
     if [ "$running" = "$SHA" ] || { [ -n "$n" ] && [ "$n" -ge "$RUN_NUMBER" ]; }; then
       log "dev runs ${running} at ${VERSION_URL}"
+      summary "Dev deploy confirmed: ${VERSION_URL} reports \`${running}\` (wanted main-${RUN_NUMBER} or newer)."
       break
     fi
     log "waiting for ${VERSION_URL} to report ${SHA:0:7} or main-${RUN_NUMBER}+"
@@ -112,6 +130,7 @@ else
   settle=$SETTLE_SECONDS
   [ "$settle" -le "$remaining" ] || settle=$remaining
   log "no VERSION_URL; allowing ${settle}s for Flux to apply the commit and roll pods"
+  summary "**Dev deploy NOT confirmed: fixed-wait fallback used.** Flux committed main-${RUN_NUMBER} (or newer); with no \`dev_version_url\` set, waited ${settle}s for the rollout and assumed it finished. Smoke may have run against the previous build if the rollout was slow."
   sleep "$settle"
 fi
 

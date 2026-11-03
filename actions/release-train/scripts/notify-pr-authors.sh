@@ -2,7 +2,8 @@
 # notify-pr-authors.sh <failed-stage>
 #
 # Tells the authors of the PRs merged in a failed main-push build that their
-# tickets stayed where they were. Reads merged-prs.sh JSON on stdin.
+# tickets stayed where they were. Reads merged-prs.sh JSON on stdin; an
+# empty list still posts to Slack, so a failure is never silent.
 #   * Comments on each merged PR (pings its author). Needs GH_TOKEN with
 #     pull-requests:write; a failed comment is a warning, not an error.
 #   * Also posts one Slack message to SLACK_CHANNEL when it is set (needs
@@ -28,9 +29,7 @@ SLACK_CHANNEL="${SLACK_CHANNEL:-}"
 prs=$(cat)
 count=$(printf '%s' "${prs:-[]}" | jq 'length')
 if [ "$count" -eq 0 ]; then
-  log "no merged PRs in this build; nobody to notify"
-  echo 0
-  exit 0
+  log "no merged PRs found for this build; no PR to comment on"
 fi
 
 links="[run](${RUN_URL})"
@@ -49,13 +48,14 @@ Tickets linked to this PR move only once this run passes: after a fix reaches de
   else
     echo "::warning::could not comment on ${repo}#${num}; does the caller grant pull-requests: write?"
   fi
-done < <(printf '%s' "$prs" | jq -c '.[]')
+done < <(printf '%s' "${prs:-[]}" | jq -c '.[]')
 
 if [ -n "$SLACK_CHANNEL" ]; then
   # shellcheck disable=SC2016 # jq bindings, not shell expansion.
-  text=$(printf '%s' "$prs" | jq -r --arg stage "$STAGE" --arg run "$RUN_URL" '
+  text=$(printf '%s' "${prs:-[]}" | jq -r --arg stage "$STAGE" --arg run "$RUN_URL" '
     ":red_circle: main build failed at *\($stage)* (<\($run)|run>); tickets not moved to On Dev · Ready for QA.\n"
-    + ([.[] | "• <\(.url)|\(.repo)#\(.number)> \(.title | gsub("&";"&amp;") | gsub("<";"&lt;") | gsub(">";"&gt;")) (@\(.author))"] | join("\n"))')
+    + (if length == 0 then "No merged PR found for this build."
+       else [.[] | "• <\(.url)|\(.repo)#\(.number)> \(.title | gsub("&";"&amp;") | gsub("<";"&lt;") | gsub(">";"&gt;")) (@\(.author))"] | join("\n") end)')
   resp=$(jq -nc --arg c "$SLACK_CHANNEL" --arg t "$text" '{channel:$c, text:$t}' | slack_post || true)
   if [ "$(printf '%s' "$resp" | jq -r '.ok // false' 2>/dev/null)" != "true" ]; then
     echo "::warning::Slack notification to ${SLACK_CHANNEL} failed: ${resp}"

@@ -34,7 +34,9 @@ name: Main Push · dev smoke and QA hand-off (reusable)
 #         build_result: ${{ needs.build.result }}
 #         dev_watch_paths: workloads/dev/signstream-api/helmrelease-patch.yaml
 #         read_app_id: ${{ vars.PIPELINE_READ_APP_ID }}
-#       secrets: inherit
+#       secrets: inherit   # or pass LINEAR_API_KEY, READ_APP_PRIVATE_KEY,
+#                          # SLACK_BOT_TOKEN and the E2E_* secrets by name.
+#                          # signapse-e2e only ever receives the 4 E2E_* ones.
 #
 # The "Dev smoke verdict" job name is what other repos' runs look for when a
 # ticket is linked to PRs in several repos. Do not rename it without changing
@@ -124,6 +126,15 @@ on:
       READ_APP_PRIVATE_KEY:
         required: true
       SLACK_BOT_TOKEN:
+        required: false
+      # Forwarded to signapse-e2e for the dev smoke run, nothing else.
+      E2E_DEV_SIGNSTUDIO_ADMIN_API_TOKEN:
+        required: false
+      E2E_DEV_SIGNSTUDIO_USER_EMAIL:
+        required: false
+      E2E_DEV_SIGNSTUDIO_USER_PASSWORD:
+        required: false
+      E2E_LINEAR_API_KEY:
         required: false
     outputs:
       verdict:
@@ -256,11 +267,21 @@ jobs:
 
   dev-smoke:
     needs: wait-for-dev
+    # The ref is literal: GitHub does not evaluate expressions in `uses:`, so
+    # it cannot be a caller input. Pin it here (a tag or sha, via a PR to this
+    # repo) once signapse-e2e cuts one; callers pin this file's own ref.
     uses: signapse/signapse-e2e/.github/workflows/playwright.yml@main
     with:
       environment: dev
       grep: ${{ inputs.smoke_grep }}
-    secrets: inherit
+    # Only what the suite reads for a called dev run (E2E_<ENV>_* + Linear),
+    # never `inherit`. signapse-e2e must declare these under
+    # on.workflow_call.secrets for explicit passing to be accepted.
+    secrets:
+      E2E_DEV_SIGNSTUDIO_ADMIN_API_TOKEN: ${{ secrets.E2E_DEV_SIGNSTUDIO_ADMIN_API_TOKEN }}
+      E2E_DEV_SIGNSTUDIO_USER_EMAIL: ${{ secrets.E2E_DEV_SIGNSTUDIO_USER_EMAIL }}
+      E2E_DEV_SIGNSTUDIO_USER_PASSWORD: ${{ secrets.E2E_DEV_SIGNSTUDIO_USER_PASSWORD }}
+      E2E_LINEAR_API_KEY: ${{ secrets.E2E_LINEAR_API_KEY }}
 
   verdict:
     name: Dev smoke verdict
@@ -360,7 +381,9 @@ jobs:
 
   notify-failure:
     needs: [context, verdict]
-    if: ${{ !cancelled() && needs.verdict.result == 'failure' && needs.context.result == 'success' }}
+    # Runs on every failed verdict, even when context failed too, so a
+    # failure is always reported somewhere.
+    if: ${{ !cancelled() && needs.verdict.result == 'failure' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -374,15 +397,44 @@ jobs:
           path: _rw
           persist-credentials: false
 
+      - name: Checkout merge commit (context fallback)
+        if: ${{ needs.context.result != 'success' }}
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+          path: _src
+          persist-credentials: false
+
+      # context failed, so its PR list is missing: rebuild it for the merge
+      # commit alone with this repo's own token. If even that fails, notify
+      # with an empty list (Slack and the run's error still fire).
+      - name: Merged PRs (context fallback)
+        id: fallback
+        if: ${{ needs.context.result != 'success' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -uo pipefail
+          cd "$GITHUB_WORKSPACE/_src"
+          if prs=$("$GITHUB_WORKSPACE/_rw/actions/release-train/scripts/merged-prs.sh" "$REPO" "${SHA}~1" "$SHA"); then
+            echo "prs=$prs" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::could not list merged PRs for ${SHA}; notifying Slack only"
+            echo "prs=[]" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Notify PR authors
         env:
           GH_TOKEN: ${{ github.token }}
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_CHANNEL: ${{ inputs.slack_channel }}
-          PRS: ${{ needs.context.outputs.prs }}
+          PRS: ${{ needs.context.outputs.prs || steps.fallback.outputs.prs || '[]' }}
           STAGE: ${{ needs.verdict.outputs.failed_stage || 'dev smoke' }}
           REPORT_URL: ${{ needs.verdict.outputs.report_url }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
+          echo "::error::Merged build failed at ${STAGE}; tickets were not moved. ${RUN_URL}"
           echo "$PRS" | "$GITHUB_WORKSPACE/_rw/actions/release-train/scripts/notify-pr-authors.sh" "$STAGE"

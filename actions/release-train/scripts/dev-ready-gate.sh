@@ -117,10 +117,18 @@ add() {
 }
 
 while IFS= read -r id; do
+  # A genuine miss (rc 3) only skips this ticket; any other Linear failure
+  # (bad key, rate limit, outage) fails the run instead of reporting every
+  # ticket as "not found" and going green.
+  rc=0
   # shellcheck disable=SC2016 # GraphQL variables, not shell expansion.
-  resp=$(linear_query 'query($id:String!){issue(id:$id){identifier state{name} attachments{nodes{url}}}}' \
-    "$(jq -nc --arg id "$id" '{id:$id}')" || true)
-  issue=$(printf '%s' "$resp" | jq -c '.data.issue // empty' 2>/dev/null || true)
+  data=$(linear_gql 'query($id:String!){issue(id:$id){identifier state{name} attachments{nodes{url}}}}' \
+    "$(jq -nc --arg id "$id" '{id:$id}')") || rc=$?
+  if [ "$rc" -ne 0 ] && [ "$rc" -ne 3 ]; then
+    die "Linear lookup of $id failed; no tickets moved"
+  fi
+  issue=""
+  [ "$rc" -ne 0 ] || issue=$(printf '%s' "$data" | jq -c '.issue // empty')
   if [ -z "$issue" ]; then
     add "$id" false "not found in Linear"
     continue
