@@ -22,8 +22,8 @@
 # depends on which ticket triggered the run, so a repeat run with nothing
 # changed selects the same build (the hourly backstop relies on this).
 #
-# <last-tag> empty or omitted: the highest tag merged into <head-ref> that
-# matches RELEASE_TAG_PATTERN (the last Promotion). <head-ref> defaults to HEAD.
+# <last-tag> empty or omitted: the nearest tag matching RELEASE_TAG_PATTERN on
+# <head-ref>'s first-parent history (the last Promotion). <head-ref> defaults to HEAD.
 #
 # Output:
 #   {last_tag, head_sha, outcome, already_promoted,
@@ -69,9 +69,19 @@ HERE="$(dirname "$0")"
 head_sha=$(git rev-parse --verify "${HEAD_REF}^{commit}") || die "unknown ref: $HEAD_REF"
 
 if [ -z "$LAST_TAG" ]; then
-  LAST_TAG=$(git tag --merged "$head_sha" --sort=-v:refname \
-    | { grep -E "$RELEASE_TAG_PATTERN" || true; } | head -n 1)
-  [ -n "$LAST_TAG" ] || die "no tag matching $RELEASE_TAG_PATTERN on $HEAD_REF; seed one (git tag 0.0.0 <sha>)"
+  # The last Promotion is the nearest matching tag on the release branch's
+  # first-parent history. Ancestry, not version order: a tag on a merged side
+  # branch, or a mix of bare and v-prefixed tags, must not move the boundary.
+  # Tags on one commit are tried highest version first.
+  tagmap=$(git tag --merged "$head_sha" --sort=-v:refname \
+    | { grep -E "$RELEASE_TAG_PATTERN" || true; } \
+    | while IFS= read -r t; do printf '%s %s\n' "$(git rev-parse "${t}^{commit}")" "$t"; done)
+  if [ -n "$tagmap" ]; then
+    LAST_TAG=$(git rev-list --first-parent "$head_sha" \
+      | awk 'NR == FNR { if (!($1 in m)) m[$1] = $2; next } ($1 in m) { print m[$1]; exit }' \
+        <(printf '%s\n' "$tagmap") -)
+  fi
+  [ -n "$LAST_TAG" ] || die "no tag matching $RELEASE_TAG_PATTERN on $HEAD_REF's first-parent history; seed one (git tag 0.0.0 <sha>)"
 fi
 git rev-parse --verify -q "${LAST_TAG}^{commit}" > /dev/null || die "unknown tag: $LAST_TAG"
 log "last Promotion tag: $LAST_TAG"
@@ -87,20 +97,32 @@ ticket_verdict() {
   local id="$1" resp issue
   VERDICT=$(printf '%s' "$VERDICTS" | jq -c --arg id "$id" '.[$id] // empty')
   if [ -n "$VERDICT" ]; then return 0; fi
-  # A Linear failure must never let a ticket through, so it blocks; the run
-  # fails below rather than selecting past a ticket it could not read.
+  # A Linear failure must never let a ticket through: a failed call, an
+  # unparsable reply, GraphQL errors next to issue data, or an issue missing
+  # the fields the verdict reads all fail the run rather than select past it.
   # shellcheck disable=SC2016 # GraphQL variable, not shell expansion.
   resp=$(linear_query 'query($id:String!){issue(id:$id){identifier title url state{name} labels{nodes{name}}}}' \
     "$(jq -nc --arg id "$id" '{id:$id}')") || die "Linear query for $id failed"
-  issue=$(printf '%s' "$resp" | jq -c '.data.issue // empty' 2>/dev/null || true)
+  printf '%s' "$resp" | jq -e 'type == "object"' > /dev/null 2>&1 \
+    || die "Linear returned an unparsable reply for $id"
+  issue=$(printf '%s' "$resp" | jq -c '.data.issue // empty')
   if [ -z "$issue" ]; then
-    VERDICT=$(jq -nc --arg id "$id" \
-      '{id:$id, title:"", url:"", state:"", blocks:true, reason:"not found in Linear"}')
+    # issue: null is how Linear answers an unknown identifier. It blocks.
+    # shellcheck disable=SC2016 # jq bindings, not shell expansion.
+    VERDICT=$(printf '%s' "$resp" | jq -c --arg id "$id" '
+      ([.errors[]?.message] | join("; ")) as $e
+      | {id:$id, title:"", url:"", state:"", blocks:true,
+         reason: ("not found in Linear" + (if $e != "" then " (\($e))" else "" end))}')
   else
+    printf '%s' "$resp" | jq -e '(.errors // []) | length == 0' > /dev/null \
+      || die "Linear returned errors with partial data for $id: $(printf '%s' "$resp" | jq -c .errors)"
+    printf '%s' "$issue" | jq -e '(.identifier | type) == "string" and (.state.name | type) == "string"
+        and (.labels.nodes | type) == "array"' > /dev/null \
+      || die "Linear reply for $id lacks identifier, state or labels: $issue"
     # shellcheck disable=SC2016 # jq bindings, not shell expansion.
     VERDICT=$(printf '%s' "$issue" | jq -c --arg passed "$QA_PASSED_LABEL" --arg failed "$QA_FAILED_STATE" '
       {id: .identifier, title, url, state: .state.name} as $t
-      | ([.labels.nodes[]?.name] | index($passed) != null) as $has
+      | ([.labels.nodes[].name] | index($passed) != null) as $has
       | if .state.name == $failed then $t + {blocks:true, reason:"in \($failed)"}
         elif ($has | not) then $t + {blocks:true, reason:"no \($passed) label (state \(.state.name))"}
         else $t + {blocks:false, reason:""} end')

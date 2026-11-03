@@ -27,6 +27,7 @@ done
 [ -f "$TMP/linear-down" ] && { printf 'boom\n500'; exit 0; }
 id=$(echo "$body" | jq -r '.variables.id')
 echo "$id" >> "$TMP/linear-calls"
+[ -f "$TMP/raw-$id" ] && { printf '%s\n200' "$(cat "$TMP/raw-$id")"; exit 0; }
 node=$(jq -c --arg id "$id" '.[$id] // null' "$TMP/linear.json")
 printf '{"data":{"issue":%s}}\n200' "$node"
 EOS
@@ -262,7 +263,7 @@ a_then_b() {
   echo "$output" | jq -e '.outcome == "none" and .rc == null and .last_tag == "1.0.0"' > /dev/null
 }
 
-@test "walks from the highest release tag, ignoring other tags" {
+@test "walks from the nearest release tag, ignoring other tags" {
   commit "feat(SIG-1): A"; built "feat(SIG-1): A" 11
   git tag 1.0.1
   git tag not-a-release
@@ -272,6 +273,73 @@ a_then_b() {
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.last_tag == "1.0.1" and [.tickets[].id] == ["SIG-2"]' > /dev/null
   ! grep -qx SIG-1 "$TMP/linear-calls"
+}
+
+@test "a higher release tag on a merged side branch does not move the boundary" {
+  git checkout -q -b side
+  commit "side work"
+  git tag 9.9.9
+  git checkout -q main
+  commit "feat(SIG-1): A"; built "feat(SIG-1): A" 11
+  git merge -q --no-ff side -m "Merge side"
+  built "Merge side" 12
+  ticket SIG-1 "On Dev · Ready for QA" "QA Passed"
+  run select_rc
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.last_tag == "1.0.0" and [.tickets[].id] == ["SIG-1"]' > /dev/null
+  echo "$output" | jq -e --arg m "$(sha_of "Merge side")" '.rc.sha == $m' > /dev/null
+}
+
+@test "a newer bare tag wins over an older v-prefixed one" {
+  commit "feat(SIG-1): A"
+  git tag v1.9.0
+  commit "feat(SIG-2): B"
+  git tag 2.0.0
+  commit "feat(SIG-3): C"; built "feat(SIG-3): C" 13
+  ticket SIG-3 "On Dev · Ready for QA" "QA Passed"
+  run select_rc
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.last_tag == "2.0.0" and [.tickets[].id] == ["SIG-3"]' > /dev/null
+}
+
+@test "Linear errors next to issue data fail the run" {
+  a_then_b
+  ticket SIG-2 "On Dev · Ready for QA" "QA Passed"
+  echo '{"data":{"issue":{"identifier":"SIG-1","title":"A","url":"u","state":null,"labels":{"nodes":[{"name":"QA Passed"}]}}},"errors":[{"message":"state failed"}]}' > "$TMP/raw-SIG-1"
+  run select_rc
+  [ "$status" -ne 0 ]
+  grep -q "errors with partial data" "$TMP/stderr"
+}
+
+@test "a Linear issue without state fails the run" {
+  a_then_b
+  echo '{"data":{"issue":{"identifier":"SIG-1","title":"A","url":"u","labels":{"nodes":[{"name":"QA Passed"}]}}}}' > "$TMP/raw-SIG-1"
+  run select_rc
+  [ "$status" -ne 0 ]
+  grep -q "lacks identifier, state or labels" "$TMP/stderr"
+}
+
+@test "an unparsable Linear reply fails the run" {
+  a_then_b
+  echo 'not json' > "$TMP/raw-SIG-1"
+  run select_rc
+  [ "$status" -ne 0 ]
+}
+
+@test "Linear errors with no issue block the ticket and keep the error" {
+  a_then_b
+  ticket SIG-2 "On Dev · Ready for QA" "QA Passed"
+  echo '{"data":{"issue":null},"errors":[{"message":"Entity not found"}]}' > "$TMP/raw-SIG-1"
+  run select_rc
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.rc == null and .blocked_by.reason == "not found in Linear (Entity not found)"' > /dev/null
+}
+
+@test "ticket-like text that is not a reference does not block" {
+  commit "chore: bump SIG-123abc fixture"; built "chore: bump SIG-123abc fixture" 11
+  run select_rc
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.rc.image_tag != null and (.untracked_commits | length) == 1' > /dev/null
 }
 
 @test "a Release Candidate that already carries a release tag is a no-op" {

@@ -68,7 +68,7 @@ on:
         type: string
         default: 'main'
       release_tag_pattern:
-        description: 'qa-passed: ERE matching Promotion tags; the walk starts at the highest one.'
+        description: 'qa-passed: ERE matching Promotion tags; the walk starts at the nearest one on the first-parent history of the branch.'
         required: false
         type: string
         default: '^v?[0-9]+\.[0-9]+\.[0-9]+$'
@@ -234,34 +234,8 @@ jobs:
             echo "$eof"
           } >> "$GITHUB_OUTPUT"
 
-          # shellcheck disable=SC2016 # jq bindings, not shell expansion.
-          jq -r --arg ticket "$TICKET" --arg trigger "$TRIGGER_ID" --arg repo "$GITHUB_REPOSITORY" '
-            def short: .[0:7];
-            def commit: "[`\(.sha | short)`](https://github.com/\($repo)/commit/\(.sha)) \(.subject)";
-            "## Release Candidate",
-            "",
-            (if $ticket != "" then "Triggered by \($ticket) (delivery `\($trigger)`)." else "Scheduled run (hourly backstop)." end),
-            "Walked main from `\(.last_tag)` to `\(.head_sha | short)`.",
-            "",
-            (if .outcome == "selected" then
-               "**Selected** `\(.rc.image_tag)` ([build #\(.rc.run_number)](\(.rc.run_url)))."
-             elif .outcome == "already_promoted" then
-               "**No-op:** `\(.rc.image_tag)` is already promoted."
-             else
-               "**No Release Candidate:** no build since `\(.last_tag)` has all its tickets QA Passed."
-             end),
-            "",
-            "### Tickets",
-            (if (.tickets | length) == 0 then "_none_" else (.tickets[] | "- [\(.id)](\(.url)) \(.title) (\(.state))") end),
-            "",
-            "### Untracked commits",
-            (if (.untracked_commits | length) == 0 then "_none_" else (.untracked_commits[] | "- " + commit) end),
-            "",
-            "### Blocked by",
-            (if .blocked_by == null then "_nothing: every walked commit is selectable_"
-             else "- [\(.blocked_by.id)](\(.blocked_by.url)) \(.blocked_by.reason), first merged in " + (.blocked_by | commit)
-             end)
-          ' <<< "$sel" >> "$GITHUB_STEP_SUMMARY"
+          "$GITHUB_WORKSPACE/_rw/actions/release-train/scripts/release-candidate-summary.sh" \
+            <<< "$sel" >> "$GITHUB_STEP_SUMMARY"
 
   compose:
     if: inputs.selection_mode == 'ready-for-prod' && github.event_name != 'release'
@@ -389,7 +363,7 @@ jobs:
           fi
 
   post-publish:
-    if: github.event_name == 'release'
+    if: inputs.selection_mode == 'ready-for-prod' && github.event_name == 'release'
     runs-on: ubuntu-latest
     permissions:
       contents: write        # release-metadata reads the release body
