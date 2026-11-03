@@ -23,7 +23,7 @@ on:
         type: string
         default: ''
       since:
-        description: 'Exclusive lower bound of the commit range (the previous Deployment''s tag). Empty uses the tag before `sha`.'
+        description: 'Exclusive lower bound of the commit range. Empty uses the commit of the pipeline''s latest Linear Release (the last Deployment that was not rolled back). Required for a pipeline''s first Deployment.'
         required: false
         type: string
         default: ''
@@ -48,7 +48,7 @@ on:
         type: string
         default: 'signapse'
       sentry_project:
-        description: 'Sentry project slug. Empty skips the Sentry release.'
+        description: 'Sentry project slug. Empty reads `sentry_project` from .signapse/pipeline.yml; still empty skips Sentry with a warning.'
         required: false
         type: string
         default: ''
@@ -57,6 +57,11 @@ on:
         required: false
         type: string
         default: 'production'
+      reusable_workflows_ref:
+        description: 'Ref of signapse/reusable-workflows to load the release-train scripts from.'
+        required: false
+        type: string
+        default: 'main'
     secrets:
       LINEAR_API_KEY:
         required: true
@@ -78,6 +83,9 @@ on:
       sentry_version:
         description: 'Sentry release version (equals `version`); empty when Sentry is skipped.'
         value: ${{ jobs.sentry-release.outputs.version }}
+      since:
+        description: 'Commit the scanned range started after (input `since`, or the latest Release''s commit).'
+        value: ${{ jobs.linear-release.outputs.since }}
 
 permissions:
   contents: read
@@ -85,11 +93,17 @@ permissions:
 jobs:
   linear-release:
     runs-on: ubuntu-latest
+    # Serialise runs for one version so two can't both miss the lookup and
+    # create two Releases. Never cancel: a queued run is a no-op re-run.
+    concurrency:
+      group: deployment-release-${{ github.repository }}-${{ inputs.version }}
+      cancel-in-progress: false
     outputs:
       id: ${{ steps.release.outputs.id }}
       url: ${{ steps.release.outputs.url }}
       created: ${{ steps.release.outputs.created }}
       tickets: ${{ steps.release.outputs.tickets }}
+      since: ${{ steps.release.outputs.since }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -102,30 +116,9 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: signapse/reusable-workflows
-          ref: main
+          ref: ${{ inputs.reusable_workflows_ref }}
           path: _rw
           persist-credentials: false
-
-      - name: Resolve commit range
-        id: range
-        env:
-          VERSION: ${{ inputs.version }}
-          INPUT_SHA: ${{ inputs.sha }}
-          INPUT_SINCE: ${{ inputs.since }}
-        run: |
-          set -euo pipefail
-          if [ -n "$INPUT_SHA" ]; then
-            until_ref="$INPUT_SHA"
-          else
-            until_ref=$(git rev-parse "${VERSION}^{commit}")
-          fi
-          since="$INPUT_SINCE"
-          if [ -z "$since" ]; then
-            since=$(git describe --tags --abbrev=0 "${until_ref}^" 2>/dev/null) \
-              || { echo "::error::no tag before ${until_ref}; pass the previous Deployment's tag as 'since'"; exit 1; }
-          fi
-          echo "since=$since" >> "$GITHUB_OUTPUT"
-          echo "until=$until_ref" >> "$GITHUB_OUTPUT"
 
       - name: Create or reuse Linear Release
         id: release
@@ -135,16 +128,18 @@ jobs:
           LINEAR_STAGE: ${{ inputs.linear_stage }}
           LINEAR_TEAM_KEY: ${{ inputs.linear_team_key }}
           VERSION: ${{ inputs.version }}
-          SINCE: ${{ steps.range.outputs.since }}
-          UNTIL: ${{ steps.range.outputs.until }}
+          INPUT_SHA: ${{ inputs.sha }}
+          SINCE: ${{ inputs.since }}
         run: |
           set -euo pipefail
-          out=$(./_rw/actions/release-train/scripts/linear-release.sh "$VERSION" "$SINCE" "$UNTIL")
+          until_ref="${INPUT_SHA:-$(git rev-parse "${VERSION}^{commit}")}"
+          out=$(./_rw/actions/release-train/scripts/linear-release.sh "$VERSION" "$until_ref" "$SINCE")
           {
             echo "id=$(jq -r '.id' <<<"$out")"
             echo "url=$(jq -r '.url' <<<"$out")"
             echo "created=$(jq -r '.created' <<<"$out")"
             echo "tickets=$(jq -c '.tickets' <<<"$out")"
+            echo "since=$(jq -r '.since' <<<"$out")"
           } >> "$GITHUB_OUTPUT"
           {
             echo "### Linear Release $(jq -r '.version' <<<"$out")"
@@ -156,23 +151,44 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   sentry-release:
-    if: inputs.sentry_project != ''
     runs-on: ubuntu-latest
     outputs:
-      version: ${{ inputs.version }}
+      version: ${{ steps.project.outputs.project != '' && inputs.version || '' }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Fetch release-train scripts
+        uses: actions/checkout@v4
+        with:
+          repository: signapse/reusable-workflows
+          ref: ${{ inputs.reusable_workflows_ref }}
+          path: _rw
+          persist-credentials: false
+
+      - name: Resolve Sentry project
+        id: project
+        env:
+          INPUT_PROJECT: ${{ inputs.sentry_project }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          project="${INPUT_PROJECT:-$(./_rw/actions/release-train/scripts/pipeline-config.sh sentry_project)}"
+          if [ -z "$project" ]; then
+            echo "::warning::No Sentry project (input sentry_project or sentry_project in .signapse/pipeline.yml); skipping the Sentry release for $VERSION"
+          fi
+          echo "project=$project" >> "$GITHUB_OUTPUT"
+
       - name: Create Sentry release
+        if: steps.project.outputs.project != ''
         # Same pinned action and settings as retag-release.yml.
         uses: getsentry/action-release@ff07929a6537bac57790c3451cf4d364aca38528 # v3
         env:
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
           SENTRY_ORG: ${{ inputs.sentry_org }}
-          SENTRY_PROJECT: ${{ inputs.sentry_project }}
+          SENTRY_PROJECT: ${{ steps.project.outputs.project }}
         with:
           version: ${{ inputs.version }}
           environment: ${{ inputs.sentry_environment }}

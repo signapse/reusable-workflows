@@ -19,19 +19,24 @@ jobs:
     uses: signapse/reusable-workflows/.github/workflows/deployment-release.yml@main
     with:
       version: ${{ needs.promote.outputs.tag }}    # e.g. v1.4.0
-      since: ${{ needs.promote.outputs.prev_tag }} # previous Deployment's tag
-      sentry_project: signstream
     secrets:
       LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
       SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
 ```
 
-The pipeline name comes from the product repo's `.signapse/pipeline.yml`:
+The pipeline name and Sentry project come from the product repo's `.signapse/pipeline.yml` (inputs override them):
 
 ```yaml
 product: Signstream
 linear_pipeline: SignStream   # exact name of the Linear release pipeline
+sentry_project: signstream    # Sentry project slug; omit for no Sentry release (a warning is printed)
 ```
+
+### Commit range
+
+The Release lists tickets from commits in `since..sha`. By default `since` is the `commitSha` of the pipeline's latest Release, ignoring this version and Releases in a canceled stage (`Rolled back`). In other words, it's the last commit that actually reached prod. It deliberately isn't the previous git tag: a Release Candidate that failed staging is tagged but never deployed, so its tickets belong in the next Release. A pipeline's first Deployment has no earlier Release, so pass `since` explicitly there.
+
+Runs for the same repository and version are serialised (`concurrency`), so concurrent calls can't create two Releases.
 
 ## Inputs
 
@@ -39,13 +44,14 @@ linear_pipeline: SignStream   # exact name of the Linear release pipeline
 |---|---|---|---|
 | `version` | yes | | Release Candidate's semver tag. Used verbatim as the Linear Release name and version and as the Sentry release version. |
 | `sha` | no | commit of `version` | Commit the Deployment ships; also stored as the Release's `commitSha`. |
-| `since` | no | tag before `sha` | Exclusive lower bound of the scanned range (`since..sha`). Pass the previous Deployment's tag. |
+| `since` | no | latest Release's commit | Exclusive lower bound of the scanned range (`since..sha`). Required for the pipeline's first Deployment. |
 | `linear_pipeline` | no | `linear_pipeline` in `.signapse/pipeline.yml` | Linear release pipeline name (exact match). |
 | `linear_stage` | no | `Deployed` | Stage a new Release is created in. |
 | `linear_team_key` | no | `SIG` | Team prefix for ticket refs in commit messages. |
 | `sentry_org` | no | `signapse` | Sentry org slug. |
-| `sentry_project` | no | empty | Sentry project slug. Empty skips the Sentry release. |
+| `sentry_project` | no | `sentry_project` in `.signapse/pipeline.yml` | Sentry project slug. Still empty: Sentry is skipped with a `::warning::`. |
 | `sentry_environment` | no | `production` | Sentry deploy environment. |
+| `reusable_workflows_ref` | no | `main` | Ref of this repo to load the release-train scripts from. Pin it together with the `uses:` ref. |
 
 ## Outputs
 
@@ -55,16 +61,18 @@ linear_pipeline: SignStream   # exact name of the Linear release pipeline
 | `linear_release_url` | Linear Release URL. |
 | `linear_release_created` | `true` when this run created the Release, `false` when it already existed. |
 | `tickets` | JSON array of ticket ids attached, e.g. `["SIG-1","SIG-2"]`. |
-| `sentry_version` | The Sentry release version (equals `version`); empty when `sentry_project` is empty. |
+| `sentry_version` | The Sentry release version (equals `version`); empty when Sentry was skipped. |
+| `since` | The commit the scanned range started after. |
 
-The job summary shows the number of untracked commits (the list is in the Release description) and the ticket refs that do not exist in Linear. Unknown ticket refs are reported, not fatal; any other Linear error when attaching a ticket fails the run.
+The job summary shows the number of untracked commits (the list is in the Release description) and the ticket refs that do not exist in Linear. Ticket refs are resolved in one `issues` query; refs that are not Linear issues are absent from the result and reported, not fatal. Any error after that (auth, rate limit, bad release id) fails the run.
 
 ## Failure modes
 
 - Pipeline not found: `Linear release pipeline '<name>' not found. Create it in Linear (Settings > Releases) or fix linear_pipeline in .signapse/pipeline.yml.`
 - No pipeline name anywhere: `no linear_pipeline input and no .signapse/pipeline.yml`.
 - Stage missing: `stage 'Deployed' not found in pipeline 'SignStream' (has: Released)`.
-- No tag before `sha` and no `since`: pass `since` explicitly (first Deployment of a repo).
+- No earlier Release in the pipeline and no `since`: `pipeline '<name>' has no earlier Release with a commit; pass 'since'` (first Deployment).
+- Latest Release's commit not in this repo: pass `since`.
 
 ## Why the GraphQL API and not `linear-release-action`
 
@@ -74,7 +82,7 @@ The spec names `linear/linear-release-action`. It does not fit this pipeline's R
 - Creating in the completed stage fires Linear's "release completed" status automations, which could move tickets to Done at Deployment time instead of after the Stability Window.
 - It authenticates with a per-pipeline access key (one secret per product pipeline), and it computes its own commit range from the pipeline's last Release rather than the Release Candidate's range.
 
-So the step calls the Linear GraphQL API with the workspace `LINEAR_API_KEY` the release train already uses: `releasePipelines` (by name) → `releases` (by pipeline + version) → `releaseCreate` (with `stageId`) → `issueUpdate(addedReleaseIds)` per ticket. Tickets come from `ticket-extractor.sh`, the same extractor the release train uses.
+So the step calls the Linear GraphQL API with the workspace `LINEAR_API_KEY` the release train already uses: `releasePipelines` (by name) → `releases` (latest non-canceled, for the range start) → `releases` (by pipeline + version) → `releaseCreate` (with `stageId`) → `issues` (team key + numbers) → `issueUpdate(addedReleaseIds)` per found issue. Tickets come from `ticket-extractor.sh`, the same extractor the release train uses.
 
 ## Linear pipeline setup (SIG-2748)
 
@@ -94,4 +102,4 @@ Linear has no separate release status field: a Release's lifecycle is its stage,
 1. In Linear (SIG-2748): create the Production pipelines and add the stages above to each. Confirm a continuous pipeline accepts `started` and `canceled` stages; if it does not, make the pipelines scheduled.
 2. Check the Engineering team's workflow automations for a "release completed" rule, and that it should fire on `Released` only.
 3. GitHub: make `LINEAR_API_KEY` (workspace API key with write access to issues and releases) and `SENTRY_AUTH_TOKEN` (`project:releases`, `org:read`) available to each product repo that calls this workflow.
-4. Add `linear_pipeline` to each product repo's `.signapse/pipeline.yml`.
+4. Add `linear_pipeline` and `sentry_project` to each product repo's `.signapse/pipeline.yml`.

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# linear-release.sh <version> <since-ref> <until-ref>
+# linear-release.sh <version> <until-ref> [since-ref]
 #
 # Records one Deployment as one Release in the product's Linear release
 # pipeline. Idempotent on <version>: if the pipeline already has a Release
@@ -8,10 +8,16 @@
 #
 #   1. Resolve the pipeline by exact name (LINEAR_PIPELINE, else
 #      `linear_pipeline` in $PIPELINE_CONFIG, default .signapse/pipeline.yml).
-#   2. Look up a Release with that version in the pipeline; create it in stage
+#   2. Commit range <since>..<until>. <since> defaults to the commitSha of the
+#      pipeline's latest Release that is not this version and not in a
+#      canceled stage (Rolled back): the last thing that actually reached prod.
+#      Not the previous git tag: a Release Candidate that failed staging is
+#      tagged but never deployed, and its tickets must land in the next Release.
+#   3. Look up a Release with that version in the pipeline; create it in stage
 #      LINEAR_STAGE (default "Deployed") if there is none.
-#   3. Attach every ticket ticket-extractor finds in <since>..<until>.
-#      Commits with no ticket are listed in the description as untracked.
+#   4. Attach every ticket ticket-extractor finds in the range. Commits with no
+#      ticket are listed in the description as untracked; refs that are not
+#      Linear issues are listed as not found.
 #
 # Uses the workspace GraphQL API (LINEAR_API_KEY), not linear-release-action:
 # the action's access key is per pipeline and, on continuous pipelines, it
@@ -19,7 +25,7 @@
 # docs/DEPLOYMENT-RELEASE.md.
 #
 # stdout: one JSON object
-#   {"id","url","version","stage","created":bool,"tickets":[..],
+#   {"id","url","version","stage","created":bool,"since","tickets":[..],
 #    "untracked":[..],"unresolved":[..]}
 
 # shellcheck disable=SC2016 # GraphQL $variables are literal, not shell expansions
@@ -28,10 +34,10 @@ source "$(dirname "$0")/../lib/common.sh"
 # shellcheck source=SCRIPTDIR/../lib/linear.sh
 source "$(dirname "$0")/../lib/linear.sh"
 
-[ $# -ge 3 ] || die "usage: linear-release.sh <version> <since-ref> <until-ref>"
+[ $# -ge 2 ] || die "usage: linear-release.sh <version> <until-ref> [since-ref]"
 VERSION="$1"
-SINCE="$2"
-UNTIL="$3"
+UNTIL="$2"
+SINCE="${3:-}"
 [ -n "$VERSION" ] || die "version is empty"
 
 need git
@@ -47,9 +53,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 pipeline_name="${LINEAR_PIPELINE:-}"
 if [ -z "$pipeline_name" ]; then
   [ -f "$CONFIG" ] || die "no linear_pipeline input and no $CONFIG; add 'linear_pipeline: <name>' to $CONFIG"
-  # Flat key per the .signapse/pipeline.yml contract; strip comment and quotes.
-  pipeline_name=$(sed -n 's/^linear_pipeline:[[:space:]]*//p' "$CONFIG" | head -1 \
-    | sed -e 's/[[:space:]]#.*$//' -e 's/[[:space:]]*$//' -e "s/^[\"']//" -e "s/[\"']\$//")
+  pipeline_name=$("$HERE/pipeline-config.sh" linear_pipeline "$CONFIG")
   [ -n "$pipeline_name" ] || die "$CONFIG has no linear_pipeline key"
 fi
 
@@ -71,10 +75,21 @@ if [ -z "$pipeline" ]; then
 fi
 pipeline_id=$(jq -r '.id' <<<"$pipeline")
 
-# --- 2. tickets + untracked commits ---------------------------------------
+# --- 2. commit range ------------------------------------------------------
 git rev-parse --verify -q "${UNTIL}^{commit}" > /dev/null || die "unknown ref: $UNTIL"
+if [ -z "$SINCE" ]; then
+  prev=$(gql 'query($pid:ID!,$v:String!){ releases(first:50, orderBy:createdAt, filter:{pipeline:{id:{eq:$pid}}, version:{neq:$v}, stage:{type:{neq:canceled}}}){ nodes{ version commitSha createdAt } } }' \
+    "$(jq -nc --arg pid "$pipeline_id" --arg v "$VERSION" '{pid:$pid, v:$v}')")
+  latest=$(jq -c '[.releases.nodes[] | select(.commitSha != null and .commitSha != "")] | max_by(.createdAt) // empty' <<<"$prev")
+  [ -n "$latest" ] || die "pipeline '$pipeline_name' has no earlier Release with a commit; pass 'since' (the last commit deployed to prod) for the first Deployment"
+  SINCE=$(jq -r '.commitSha' <<<"$latest")
+  git rev-parse --verify -q "${SINCE}^{commit}" > /dev/null \
+    || die "latest Release $(jq -r '.version' <<<"$latest") points at $SINCE, which is not in this repo; pass 'since'"
+  log "range starts after Release $(jq -r '.version' <<<"$latest") ($SINCE)"
+fi
 git rev-parse --verify -q "${SINCE}^{commit}" > /dev/null || die "unknown ref: $SINCE"
 
+# --- 3. tickets + untracked commits ---------------------------------------
 tickets=$(LINEAR_TEAM_KEY="$TEAM_KEY" "$HERE/ticket-extractor.sh" "$SINCE" "$UNTIL" < /dev/null)
 
 # One line per mainline commit whose own message, and every commit it merged
@@ -89,7 +104,7 @@ untracked=$(
   done | jq -R . | jq -sc '.'
 )
 
-# --- 3. find or create the Release ------------------------------------------
+# --- 4. find or create the Release ------------------------------------------
 existing=$(gql 'query($pid:ID!,$v:String!){ releases(filter:{pipeline:{id:{eq:$pid}}, version:{eq:$v}}){ nodes{ id url version stage{ name } } } }' \
   "$(jq -nc --arg pid "$pipeline_id" --arg v "$VERSION" '{pid:$pid, v:$v}')")
 release=$(jq -c '.releases.nodes[0] // empty' <<<"$existing")
@@ -126,23 +141,25 @@ else
 fi
 release_id=$(jq -r '.id' <<<"$release")
 
-# --- 4. attach tickets (addedReleaseIds is additive, so re-runs are no-ops) --
-# A ref Linear does not know (typo, other workspace) is reported, not fatal.
-# Any other failure (auth, rate limit, 5xx) fails the run rather than leave a
-# Release with silently missing tickets.
+# --- 5. attach tickets --------------------------------------------------
+# Resolve all refs in one issues query: a ref that is not a Linear issue is
+# simply absent from the result (reported as unresolved, not fatal), so no
+# error-message matching is needed. Any error after that (auth, rate limit,
+# bad release id) fails the run. addedReleaseIds is additive: re-runs no-op.
 unresolved='[]'
-for t in $(jq -r '.[]' <<<"$tickets"); do
-  resp=$(linear_query 'mutation($id:String!,$rid:String!){ issueUpdate(id:$id, input:{addedReleaseIds:[$rid]}){ success } }' \
-    "$(jq -nc --arg id "$t" --arg rid "$release_id" '{id:$id, rid:$rid}')") || die "attaching $t failed"
-  [ "$(jq -r '.data.issueUpdate.success // false' <<<"$resp")" = "true" ] && continue
-  errs=$(jq -r '[.errors[]?.message] | join("; ")' <<<"$resp")
-  if grep -qi 'not found' <<<"$errs"; then
-    log "WARN: $t not found in Linear: $errs"
-    unresolved=$(jq -c --arg t "$t" '. + [$t]' <<<"$unresolved")
-  else
-    die "attaching $t failed: ${errs:-issueUpdate returned success=false}"
-  fi
-done
+if [ "$(jq 'length' <<<"$tickets")" -gt 0 ]; then
+  numbers=$(jq -c 'map(split("-")[1] | tonumber)' <<<"$tickets")
+  found=$(gql 'query($key:String!,$n:[Float!]){ issues(first:250, filter:{team:{key:{eq:$key}}, number:{in:$n}}){ nodes{ id identifier } } }' \
+    "$(jq -nc --arg key "$TEAM_KEY" --argjson n "$numbers" '{key:$key, n:$n}')")
+  unresolved=$(jq -c --argjson f "$found" '. - [$f.issues.nodes[].identifier]' <<<"$tickets")
+  [ "$unresolved" = '[]' ] || log "WARN: not Linear issues: $(jq -r 'join(", ")' <<<"$unresolved")"
+  for row in $(jq -c '.issues.nodes[]' <<<"$found"); do
+    out=$(gql 'mutation($id:String!,$rid:String!){ issueUpdate(id:$id, input:{addedReleaseIds:[$rid]}){ success } }' \
+      "$(jq -nc --arg id "$(jq -r '.id' <<<"$row")" --arg rid "$release_id" '{id:$id, rid:$rid}')")
+    [ "$(jq -r '.issueUpdate.success // false' <<<"$out")" = "true" ] \
+      || die "attaching $(jq -r '.identifier' <<<"$row") to Release $release_id failed"
+  done
+fi
 
 # Keep the description true to what is attached (also refreshes it on re-run).
 if [ "$created" != true ] || [ "$unresolved" != '[]' ]; then
@@ -151,7 +168,7 @@ if [ "$created" != true ] || [ "$unresolved" != '[]' ]; then
   [ "$(jq -r '.releaseUpdate.success // false' <<<"$out")" = "true" ] || die "releaseUpdate (description) failed"
 fi
 
-jq -nc --argjson r "$release" --argjson created "$created" \
+jq -nc --argjson r "$release" --argjson created "$created" --arg since "$SINCE" \
   --argjson t "$tickets" --argjson u "$untracked" --argjson n "$unresolved" \
-  '{id:$r.id, url:$r.url, version:$r.version, stage:$r.stage.name, created:$created,
+  '{id:$r.id, url:$r.url, version:$r.version, stage:$r.stage.name, created:$created, since:$since,
     tickets:($t - $n), untracked:$u, unresolved:$n}'

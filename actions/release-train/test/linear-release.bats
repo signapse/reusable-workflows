@@ -43,13 +43,21 @@ case "$q" in
   *issueUpdate*)
     id=$(jq -r '.id' <<<"$v")
     echo "issueUpdate $id" >> "$STATE/calls"
-    if grep -qx "$id" "$STATE/missing" 2>/dev/null; then
-      printf '{"errors":[{"message":"Entity not found: Issue"}],"data":null}'
-    elif [ -f "$STATE/deny" ]; then
+    if [ -f "$STATE/deny" ]; then
       printf '{"errors":[{"message":"Authentication required"}],"data":null}'
     else
       printf '{"data":{"issueUpdate":{"success":true}}}'
     fi ;;
+  *"issues("*)
+    # Every requested SIG-<n> exists unless listed in $STATE/missing.
+    echo "issues" >> "$STATE/calls"
+    jq -c --rawfile miss <(cat "$STATE/missing" 2>/dev/null || true) '
+      ($miss | split("\n") | map(select(. != ""))) as $m
+      | {data:{issues:{nodes:[.n[] | "SIG-\(.)" | select(IN($m[]) | not) | {id:("uuid-" + .), identifier:.}]}}}' <<<"$v" ;;
+  *orderBy:createdAt*)
+    # Previous-Release lookup for the default range start.
+    echo "prev-releases $(jq -c . <<<"$v")" >> "$STATE/calls"
+    cat "$STATE/prev.json" 2>/dev/null || printf '{"data":{"releases":{"nodes":[]}}}' ;;
   *"releases("*)
     echo "releases" >> "$STATE/calls"
     if [ -f "$STATE/release.json" ]; then
@@ -81,7 +89,7 @@ EOS
 teardown() { rm -rf "$TMP"; }
 
 @test "create: Release in stage Deployed with the range's tickets" {
-  run --separate-stderr "$SCRIPT" v0.0.1 v0.0.0 v0.0.1
+  run --separate-stderr "$SCRIPT" v0.0.1 v0.0.1 v0.0.0
   [ "$status" -eq 0 ]
   [ "$(jq -r '.id' <<<"$output")" = "rel-1" ]
   [ "$(jq -r '.url' <<<"$output")" = "https://linear.app/signapse/release/rel-1" ]
@@ -92,12 +100,12 @@ teardown() { rm -rf "$TMP"; }
   [ "$(jq -r '.input.stageId' "$STATE/create-vars.json")" = "st-dep" ]
   [ "$(jq -r '.input.version' "$STATE/create-vars.json")" = "v0.0.1" ]
   [ "$(jq -r '.input.commitSha' "$STATE/create-vars.json")" = "$(git rev-parse v0.0.1)" ]
-  grep -qx "issueUpdate SIG-101" "$STATE/calls"
-  grep -qx "issueUpdate SIG-102" "$STATE/calls"
+  grep -qx "issueUpdate uuid-SIG-101" "$STATE/calls"
+  grep -qx "issueUpdate uuid-SIG-102" "$STATE/calls"
 }
 
 @test "untracked: commit with no ticket is listed in the description, no error" {
-  run --separate-stderr "$SCRIPT" v0.0.1 v0.0.0 v0.0.1
+  run --separate-stderr "$SCRIPT" v0.0.1 v0.0.1 v0.0.0
   [ "$status" -eq 0 ]
   [ "$(jq -r '.untracked | length' <<<"$output")" = "1" ]
   [[ "$(jq -r '.untracked[0]' <<<"$output")" == *"chore: bump deps" ]]
@@ -114,16 +122,16 @@ teardown() { rm -rf "$TMP"; }
   git commit -q --allow-empty -m "SIG-200 done"
   git checkout -q -
   git merge -q --no-ff -m "Merge pull request #1 from feat" feat
-  run --separate-stderr "$SCRIPT" v0.0.2 v0.0.1 HEAD
+  run --separate-stderr "$SCRIPT" v0.0.2 HEAD v0.0.1
   [ "$status" -eq 0 ]
   [ "$(jq -c '.untracked' <<<"$output")" = '[]' ]
   [ "$(jq -c '.tickets' <<<"$output")" = '["SIG-200"]' ]
 }
 
 @test "idempotent: second run for the same version reuses the Release" {
-  run --separate-stderr "$SCRIPT" v0.0.1 v0.0.0 v0.0.1
+  run --separate-stderr "$SCRIPT" v0.0.1 v0.0.1 v0.0.0
   [ "$status" -eq 0 ]
-  run --separate-stderr "$SCRIPT" v0.0.1 v0.0.0 v0.0.1
+  run --separate-stderr "$SCRIPT" v0.0.1 v0.0.1 v0.0.0
   [ "$status" -eq 0 ]
   [ "$(grep -c '^releaseCreate$' "$STATE/calls")" -eq 1 ]
   [ "$(jq -r '.created' <<<"$output")" = "false" ]
@@ -133,7 +141,7 @@ teardown() { rm -rf "$TMP"; }
 
 @test "missing pipeline: clear error naming the pipeline, nothing created" {
   printf '{"data":{"releasePipelines":{"nodes":[]}}}' > "$STATE/pipelines.json"
-  run "$SCRIPT" v0.0.1 v0.0.0 v0.0.1
+  run "$SCRIPT" v0.0.1 v0.0.1 v0.0.0
   [ "$status" -ne 0 ]
   [[ "$output" == *"Linear release pipeline 'SignStream' not found"* ]]
   ! grep -q releaseCreate "$STATE/calls"
@@ -141,7 +149,7 @@ teardown() { rm -rf "$TMP"; }
 
 @test "missing pipeline config: clear error when no input and no pipeline.yml" {
   rm .signapse/pipeline.yml
-  run "$SCRIPT" v0.0.1 v0.0.0 v0.0.1
+  run "$SCRIPT" v0.0.1 v0.0.1 v0.0.0
   [ "$status" -ne 0 ]
   [[ "$output" == *"no linear_pipeline input and no .signapse/pipeline.yml"* ]]
 }
@@ -150,7 +158,7 @@ teardown() { rm -rf "$TMP"; }
   cat > "$STATE/pipelines.json" <<'EOF'
 {"data":{"releasePipelines":{"nodes":[{"id":"pipe-1","name":"SignStream","type":"continuous","stages":{"nodes":[{"id":"st-rel","name":"Released","type":"completed"}]}}]}}}
 EOF
-  run "$SCRIPT" v0.0.1 v0.0.0 v0.0.1
+  run "$SCRIPT" v0.0.1 v0.0.1 v0.0.0
   [ "$status" -ne 0 ]
   [[ "$output" == *"stage 'Deployed' not found in pipeline 'SignStream' (has: Released)"* ]]
   ! grep -q releaseCreate "$STATE/calls"
@@ -158,23 +166,58 @@ EOF
 
 @test "LINEAR_PIPELINE and LINEAR_STAGE override config and default" {
   rm .signapse/pipeline.yml
-  LINEAR_PIPELINE=SignStream LINEAR_STAGE="Rolling Out" run --separate-stderr "$SCRIPT" v0.0.1 v0.0.0 v0.0.1
+  LINEAR_PIPELINE=SignStream LINEAR_STAGE="Rolling Out" run --separate-stderr "$SCRIPT" v0.0.1 v0.0.1 v0.0.0
   [ "$status" -eq 0 ]
   [ "$(jq -r '.input.stageId' "$STATE/create-vars.json")" = "st-roll" ]
 }
 
 @test "ticket not in Linear: reported as unresolved, run still succeeds" {
   echo SIG-102 > "$STATE/missing"
-  run --separate-stderr "$SCRIPT" v0.0.1 v0.0.0 v0.0.1
+  run --separate-stderr "$SCRIPT" v0.0.1 v0.0.1 v0.0.0
   [ "$status" -eq 0 ]
   [ "$(jq -c '.tickets' <<<"$output")" = '["SIG-101"]' ]
   [ "$(jq -c '.unresolved' <<<"$output")" = '["SIG-102"]' ]
   [[ "$(jq -r '.d' "$STATE/update-vars.json")" == *"not found in Linear: SIG-102"* ]]
+  ! grep -qx "issueUpdate uuid-SIG-102" "$STATE/calls"
 }
 
-@test "attach failure other than not-found (auth): run fails, not reported as unresolved" {
+@test "attach failure (auth / bad release id): run fails, not reported as unresolved" {
   touch "$STATE/deny"
-  run "$SCRIPT" v0.0.1 v0.0.0 v0.0.1
+  run "$SCRIPT" v0.0.1 v0.0.1 v0.0.0
   [ "$status" -ne 0 ]
-  [[ "$output" == *"attaching SIG-101 failed: Authentication required"* ]]
+  [[ "$output" == *"Linear API error: Authentication required"* ]]
+}
+
+@test "since defaults to the latest Release's commit: a skipped RC's tickets land in the next Release" {
+  # v0.0.1 was deployed. v0.0.2 was tagged but failed staging (never a
+  # Release). v0.0.3 is deployed: its range must start at v0.0.1, not v0.0.2.
+  jq -nc --arg sha "$(git rev-parse v0.0.1)" \
+    '{data:{releases:{nodes:[{version:"v0.0.1", commitSha:$sha, createdAt:"2026-11-01T00:00:00Z"},
+                             {version:"v0.0.0", commitSha:null, createdAt:"2026-10-01T00:00:00Z"}]}}}' > "$STATE/prev.json"
+  git commit -q --allow-empty -m "feat(SIG-103): in the skipped RC"
+  git tag v0.0.2
+  git commit -q --allow-empty -m "feat(SIG-104): in the deployed RC"
+  git tag v0.0.3
+  run --separate-stderr "$SCRIPT" v0.0.3 v0.0.3
+  [ "$status" -eq 0 ]
+  [ "$(jq -c '.tickets' <<<"$output")" = '["SIG-103","SIG-104"]' ]
+  [ "$(jq -r '.since' <<<"$output")" = "$(git rev-parse v0.0.1)" ]
+  # lookup excludes this version (re-runs) and canceled stages (Rolled back)
+  grep -q '^prev-releases .*"v":"v0.0.3"' "$STATE/calls"
+}
+
+@test "since: no earlier Release and no explicit since → clear error" {
+  run "$SCRIPT" v0.0.1 v0.0.1
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"has no earlier Release with a commit; pass 'since'"* ]]
+  ! grep -q releaseCreate "$STATE/calls"
+}
+
+@test "pipeline-config.sh reads keys, strips comments and quotes, empty when absent" {
+  printf 'product: Signstream\nlinear_pipeline: "SignStream"  # prod\nsentry_project: signstream\n' > .signapse/pipeline.yml
+  CFG="$BATS_TEST_DIRNAME/../scripts/pipeline-config.sh"
+  [ "$("$CFG" linear_pipeline)" = "SignStream" ]
+  [ "$("$CFG" sentry_project)" = "signstream" ]
+  [ "$("$CFG" missing_key)" = "" ]
+  [ "$("$CFG" sentry_project /nonexistent.yml)" = "" ]
 }
