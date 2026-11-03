@@ -7,6 +7,12 @@ name: Main Push (reusable)
 #
 # `run_number` is the CALLER's run number: the counter belongs to the caller
 # repo's workflow, so each service repo keeps its own monotonic sequence.
+#
+# Dev smoke + ticket hand-off (opt-in): add a second job in the same caller
+# workflow that calls main-push-dev.yml with `needs: <this job>`. It waits for
+# dev to run this tag, runs signapse-e2e @smoke on dev, and moves the build's
+# tickets to "On Dev · Ready for QA". It lives in its own file so callers that
+# do not opt in never depend on signapse-e2e. See main-push-dev.yml.
 
 on:
   workflow_call:

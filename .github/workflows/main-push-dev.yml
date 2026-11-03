@@ -1,0 +1,363 @@
+name: Main Push · dev smoke and QA hand-off (reusable)
+
+# Companion to main-push.yml (SIG-2759). After a merged build is pushed:
+#   1. waits, with a time limit, until dev runs the new main-<run_number>-<sha>
+#      tag (Flux image automation commit in the GitOps repo, then a version URL
+#      or a settle period; see actions/release-train/scripts/dev-deploy-wait.sh),
+#   2. runs signapse-e2e @smoke on dev (workflow_call, ADR 0002),
+#   3. on pass, moves the build's tickets from In Review to
+#      "On Dev · Ready for QA" once every PR linked to each ticket, in any repo,
+#      is merged and passed its own dev smoke (dev-ready-gate.sh),
+#   4. on build, deploy or smoke failure, leaves tickets alone and notifies the
+#      merged PRs' authors (PR comment, plus Slack when slack_channel is set).
+#
+# It is a separate file, not a job inside main-push.yml, because GitHub
+# resolves every `uses:` workflow when a run is queued, even for jobs whose
+# `if:` is false. Referencing signapse-e2e from main-push.yml would make every
+# existing main-push caller depend on that repo being callable.
+#
+# Call it from the SAME workflow run as main-push.yml (it reads that run's
+# run_number and sha), and keep that caller workflow named main-push.yml:
+#
+#   jobs:
+#     build:
+#       uses: signapse/reusable-workflows/.github/workflows/main-push.yml@main
+#       ...
+#     dev:
+#       needs: build
+#       if: ${{ !cancelled() }}
+#       uses: signapse/reusable-workflows/.github/workflows/main-push-dev.yml@main
+#       permissions:
+#         contents: read
+#         pull-requests: write   # failure comment on the merged PR
+#       with:
+#         build_result: ${{ needs.build.result }}
+#         dev_watch_paths: workloads/dev/signstream-api/helmrelease-patch.yaml
+#         read_app_id: ${{ vars.PIPELINE_READ_APP_ID }}
+#       secrets: inherit
+#
+# The "Dev smoke verdict" job name is what other repos' runs look for when a
+# ticket is linked to PRs in several repos. Do not rename it without changing
+# SMOKE_JOB_PATTERN in dev-ready-gate.sh.
+
+on:
+  workflow_call:
+    inputs:
+      build_result:
+        description: "needs.<main-push job>.result from the caller. Anything but 'success' is a build failure."
+        required: true
+        type: string
+      dev_watch_paths:
+        description: >-
+          Newline- or comma-separated files in gitops_repo that Flux image
+          automation rewrites with this repo's dev tags, one per service
+          (e.g. workloads/dev/signstream-api/helmrelease-patch.yaml).
+        required: true
+        type: string
+      gitops_repo:
+        required: false
+        type: string
+        default: 'signapse/signapse-core-k8s'
+      gitops_ref:
+        required: false
+        type: string
+        default: 'main'
+      dev_version_url:
+        description: >-
+          Optional dev URL whose body names the running build (its sha or
+          main-<n> tag). Set it to confirm the new pods are serving; unset falls
+          back to dev_settle_seconds after the Flux commit.
+        required: false
+        type: string
+        default: ''
+      dev_settle_seconds:
+        description: 'Wait after the Flux commit when dev_version_url is unset (source 1m + Kustomization 2m + HelmRelease 2m intervals in dev).'
+        required: false
+        type: number
+        default: 240
+      dev_deploy_timeout_minutes:
+        description: 'Time limit for dev to run the new tag. Exceeding it fails the build as a dev deploy failure.'
+        required: false
+        type: number
+        default: 20
+      smoke_grep:
+        required: false
+        type: string
+        default: '@smoke'
+      linear_team_key:
+        description: 'Linear team key, alphanumeric'
+        required: false
+        type: string
+        default: 'SIG'
+      ticket_from_states:
+        description: 'Comma-separated Linear states a ticket may move from. Tickets in any other state (further along, QA Failed) stay put.'
+        required: false
+        type: string
+        default: 'In Review,PR in Review'
+      ticket_target_state:
+        required: false
+        type: string
+        default: 'On Dev · Ready for QA'
+      slack_channel:
+        description: 'Optional Slack channel for build/smoke failure notices, in addition to the PR comment.'
+        required: false
+        type: string
+        default: ''
+      read_app_id:
+        description: >-
+          GitHub App id of the read-only pipeline app (ADR 0005). Its token
+          reads the GitOps repo and the pulls/actions of every repo a ticket
+          links to.
+        required: true
+        type: string
+    secrets:
+      LINEAR_API_KEY:
+        required: true
+      READ_APP_PRIVATE_KEY:
+        required: true
+      SLACK_BOT_TOKEN:
+        required: false
+    outputs:
+      verdict:
+        description: 'passed | failed'
+        value: ${{ jobs.verdict.outputs.verdict }}
+      failed_stage:
+        description: 'build | dev deploy | dev smoke (empty on pass)'
+        value: ${{ jobs.verdict.outputs.failed_stage }}
+      report_url:
+        description: 'signapse-e2e report for the dev smoke run'
+        value: ${{ jobs.verdict.outputs.report_url }}
+
+jobs:
+  # Merged PRs and ticket refs for this push, computed once for both outcomes.
+  context:
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      prs: ${{ steps.ctx.outputs.prs }}
+      tickets: ${{ steps.ctx.outputs.tickets }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fetch pipeline scripts
+        uses: actions/checkout@v4
+        with:
+          repository: signapse/reusable-workflows
+          ref: main
+          path: _rw
+          persist-credentials: false
+
+      - name: Mint read-only app token
+        id: app
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ inputs.read_app_id }}
+          private-key: ${{ secrets.READ_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          permission-contents: read
+          permission-pull-requests: read
+
+      - name: Merged PRs and tickets in this push
+        id: ctx
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          BEFORE: ${{ github.event.before }}
+          SHA: ${{ github.sha }}
+          REPO: ${{ github.repository }}
+          LINEAR_TEAM_KEY: ${{ inputs.linear_team_key }}
+        run: |
+          set -euo pipefail
+          RT="$GITHUB_WORKSPACE/_rw/actions/release-train/scripts"
+          # A push carries the previous head in `before`; workflow_dispatch and
+          # first pushes do not, so fall back to the merge commit alone.
+          if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ] \
+            || ! git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
+            BEFORE="${SHA}~1"
+          fi
+          echo "Range: ${BEFORE}..${SHA}"
+          prs=$("$RT/merged-prs.sh" "$REPO" "$BEFORE" "$SHA")
+          # Ticket refs come from commit messages plus each PR's title and
+          # branch, NOT its body: bodies cite related tickets ("blocked by
+          # SIG-1") that this build does not deliver.
+          tickets=$(echo "$prs" | jq -r '.[] | .title, .head_ref' \
+            | "$RT/ticket-extractor.sh" "$BEFORE" "$SHA")
+          echo "PRs: $prs"
+          echo "Tickets: $tickets"
+          {
+            echo "prs=$prs"
+            echo "tickets=$tickets"
+          } >> "$GITHUB_OUTPUT"
+
+  wait-for-dev:
+    if: ${{ inputs.build_result == 'success' }}
+    runs-on: ubuntu-latest
+    # Backstop only; dev-deploy-wait.sh enforces dev_deploy_timeout_minutes.
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - name: Fetch pipeline scripts
+        uses: actions/checkout@v4
+        with:
+          repository: signapse/reusable-workflows
+          ref: main
+          path: _rw
+          persist-credentials: false
+
+      - name: Mint read-only app token
+        id: app
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ inputs.read_app_id }}
+          private-key: ${{ secrets.READ_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          permission-contents: read
+
+      - name: Wait for dev to run main-${{ github.run_number }}
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          GITOPS_REPO: ${{ inputs.gitops_repo }}
+          GITOPS_REF: ${{ inputs.gitops_ref }}
+          WATCH_PATHS: ${{ inputs.dev_watch_paths }}
+          RUN_NUMBER: ${{ github.run_number }}
+          SHA: ${{ github.sha }}
+          VERSION_URL: ${{ inputs.dev_version_url }}
+          SETTLE_SECONDS: ${{ inputs.dev_settle_seconds }}
+          TIMEOUT_MINUTES: ${{ inputs.dev_deploy_timeout_minutes }}
+        run: |
+          set -euo pipefail
+          export TIMEOUT_SECONDS=$((TIMEOUT_MINUTES * 60))
+          "$GITHUB_WORKSPACE/_rw/actions/release-train/scripts/dev-deploy-wait.sh"
+
+  dev-smoke:
+    needs: wait-for-dev
+    uses: signapse/signapse-e2e/.github/workflows/playwright.yml@main
+    with:
+      environment: dev
+      grep: ${{ inputs.smoke_grep }}
+    secrets: inherit
+
+  verdict:
+    name: Dev smoke verdict
+    needs: [wait-for-dev, dev-smoke]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    permissions: {}
+    outputs:
+      verdict: ${{ steps.v.outputs.verdict }}
+      failed_stage: ${{ steps.v.outputs.failed_stage }}
+      report_url: ${{ needs.dev-smoke.outputs.report_url }}
+    steps:
+      - name: Decide
+        id: v
+        env:
+          BUILD: ${{ inputs.build_result }}
+          WAIT: ${{ needs.wait-for-dev.result }}
+          SMOKE: ${{ needs.dev-smoke.result }}
+          SMOKE_RESULT: ${{ needs.dev-smoke.outputs.result }}
+          REPORT_URL: ${{ needs.dev-smoke.outputs.report_url }}
+        run: |
+          set -euo pipefail
+          stage=""
+          if [ "$BUILD" != "success" ]; then stage="build"
+          elif [ "$WAIT" != "success" ]; then stage="dev deploy"
+          elif [ "$SMOKE" != "success" ] || [ "$SMOKE_RESULT" != "passed" ]; then stage="dev smoke"
+          fi
+          if [ -z "$stage" ]; then
+            echo "verdict=passed" >> "$GITHUB_OUTPUT"
+            echo "Dev smoke passed. ${REPORT_URL}" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "verdict=failed" >> "$GITHUB_OUTPUT"
+          echo "failed_stage=$stage" >> "$GITHUB_OUTPUT"
+          echo "::error::Merged build failed at ${stage} (build=${BUILD}, wait=${WAIT}, smoke=${SMOKE}/${SMOKE_RESULT:-none}). Tickets stay where they are. ${REPORT_URL}"
+          exit 1
+
+  tickets-to-dev-qa:
+    needs: [context, verdict]
+    if: ${{ needs.verdict.outputs.verdict == 'passed' && needs.context.outputs.tickets != '[]' && needs.context.outputs.tickets != '' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Fetch pipeline scripts
+        uses: actions/checkout@v4
+        with:
+          repository: signapse/reusable-workflows
+          ref: main
+          path: _rw
+          persist-credentials: false
+
+      - name: Mint read-only app token
+        id: app
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ inputs.read_app_id }}
+          private-key: ${{ secrets.READ_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          permission-actions: read
+          permission-pull-requests: read
+
+      - name: Move tickets whose linked PRs all passed dev smoke
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+          TICKETS: ${{ needs.context.outputs.tickets }}
+          PRS: ${{ needs.context.outputs.prs }}
+          FROM_STATES: ${{ inputs.ticket_from_states }}
+          TARGET_STATE: ${{ inputs.ticket_target_state }}
+        run: |
+          set -euo pipefail
+          RT="$GITHUB_WORKSPACE/_rw/actions/release-train/scripts"
+          CURRENT_PRS=$(echo "$PRS" | jq -c '[.[] | "\(.repo)#\(.number)"]')
+          export CURRENT_PRS
+          decisions=$(echo "$TICKETS" | "$RT/dev-ready-gate.sh")
+          movable=$(echo "$decisions" | jq -c '[.[] | select(.move) | .id]')
+          results=$(echo "$movable" | "$RT/ticket-transitioner.sh" "$TARGET_STATE")
+          {
+            echo "### Tickets → ${TARGET_STATE}"
+            echo
+            echo "| Ticket | Decision | Reason |"
+            echo "|---|---|---|"
+            echo "$decisions" | jq -r --argjson r "$results" '.[] | . as $d
+              | ($r | map(select(.id == $d.id)) | first) as $t
+              | "| \(.id) | \(if .move then (if $t.success then "moved" else "move failed: \($t.error // "unknown")" end) else "stays" end) | \(.reason) |"'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if echo "$results" | jq -e 'any(.[]; .success | not)' > /dev/null; then
+            echo "::error::some tickets failed to move: $results"
+            exit 1
+          fi
+
+  notify-failure:
+    needs: [context, verdict]
+    if: ${{ !cancelled() && needs.verdict.result == 'failure' && needs.context.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Fetch pipeline scripts
+        uses: actions/checkout@v4
+        with:
+          repository: signapse/reusable-workflows
+          ref: main
+          path: _rw
+          persist-credentials: false
+
+      - name: Notify PR authors
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL: ${{ inputs.slack_channel }}
+          PRS: ${{ needs.context.outputs.prs }}
+          STAGE: ${{ needs.verdict.outputs.failed_stage || 'dev smoke' }}
+          REPORT_URL: ${{ needs.verdict.outputs.report_url }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          echo "$PRS" | "$GITHUB_WORKSPACE/_rw/actions/release-train/scripts/notify-pr-authors.sh" "$STAGE"
