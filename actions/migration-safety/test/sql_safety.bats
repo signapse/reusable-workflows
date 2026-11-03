@@ -48,7 +48,7 @@ check() { run python3 "$SCRIPT" "$FX/$1"; }
 @test "ADD COLUMN NOT NULL without DEFAULT fails" {
   check add_not_null_no_default.up.sql
   [ "$status" -eq 1 ]
-  [[ "$output" == *"BLOCK: ADD COLUMN NOT NULL accounts.region (no DEFAULT)"* ]]
+  [[ "$output" == *"BLOCK: ADD COLUMN NOT NULL accounts.region (no non-null DEFAULT)"* ]]
 }
 
 @test "additive migration passes with no output" {
@@ -110,5 +110,77 @@ check() { run python3 "$SCRIPT" "$FX/$1"; }
 
 @test "missing file is a usage error (exit 2)" {
   run python3 "$SCRIPT" "$FX/does-not-exist.sql"
+  [ "$status" -eq 2 ]
+}
+
+# --- edge cases raised in review (PR #38) -----------------------------------
+
+sql() { printf '%s\n' "$1" >"$BATS_TEST_TMPDIR/m.up.sql"; run python3 "$SCRIPT" "$BATS_TEST_TMPDIR/m.up.sql"; }
+
+@test "DO LANGUAGE plpgsql \$\$ body is checked" {
+  sql 'DO LANGUAGE plpgsql $$ BEGIN ALTER TABLE users DROP COLUMN legacy; END $$;'
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"DROP COLUMN users.legacy"* ]]
+}
+
+@test "single-quoted DO body is checked" {
+  sql "DO 'BEGIN ALTER TABLE users DROP COLUMN legacy; END';"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"DROP COLUMN users.legacy"* ]]
+}
+
+@test "ALTER VIEW ... SET SCHEMA fails" {
+  sql 'ALTER MATERIALIZED VIEW reporting.daily SET SCHEMA archive;'
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"BLOCK: SET SCHEMA reporting.daily -> schema archive (view)"* ]]
+}
+
+@test "ADD COLUMN ... PRIMARY KEY without default fails" {
+  sql 'ALTER TABLE tenants ADD COLUMN tenant_id bigint PRIMARY KEY;'
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"ADD COLUMN NOT NULL tenants.tenant_id"* ]]
+}
+
+@test "ADD COLUMN NOT NULL DEFAULT NULL fails; CHECK (x IS NOT NULL) passes" {
+  sql 'ALTER TABLE accounts ADD COLUMN region text NOT NULL DEFAULT NULL;'
+  [ "$status" -eq 1 ]
+  sql 'ALTER TABLE accounts ADD COLUMN region text CHECK (region IS NOT NULL);'
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "quoted identifier with an escaped quote is still parsed" {
+  sql 'ALTER TABLE accounts RENAME COLUMN "old""column" TO current_column;'
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"BLOCK: RENAME COLUMN accounts."* ]]
+}
+
+@test "CREATE TABLE IF NOT EXISTS does not exempt later drops (table may already exist)" {
+  sql $'CREATE TABLE IF NOT EXISTS users (id bigint);\nALTER TABLE users DROP COLUMN email;'
+  [ "$status" -eq 1 ]
+  [[ "$output" == *":2: BLOCK: DROP COLUMN users.email"* ]]
+}
+
+@test "DROP TYPE CASCADE fails; DROP FUNCTION warns; plain DROP TYPE passes" {
+  sql 'DROP TYPE IF EXISTS status_enum CASCADE;'
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"BLOCK: DROP TYPE CASCADE status_enum"* ]]
+  sql 'DROP FUNCTION IF EXISTS touch_updated_at;'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"warn: DROP ROUTINE touch_updated_at"* ]]
+  sql 'DROP TYPE IF EXISTS status_enum;'
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "goose: line numbers stay right with text before -- +goose Up" {
+  sql $'-- header\n-- more\n\n-- +goose Up\nALTER TABLE t DROP COLUMN c;\n-- +goose Down\nALTER TABLE t ADD COLUMN c int;'
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"m.up.sql:5: BLOCK: DROP COLUMN t.c"* ]]
+}
+
+@test "non-UTF-8 file is an error (exit 2), not a blocked migration" {
+  printf 'ALTER TABLE t ADD COLUMN c text DEFAULT \xff;\n' >"$BATS_TEST_TMPDIR/bad.up.sql"
+  run python3 "$SCRIPT" "$BATS_TEST_TMPDIR/bad.up.sql"
   [ "$status" -eq 2 ]
 }
