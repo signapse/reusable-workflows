@@ -22,13 +22,23 @@ jobs:
       - name: Run bats
         working-directory: actions/release-train/test
         run: bats .
-      - name: Check workflow links exist
-        # Pull requests check the checked-in allow-list
-        # (actions/release-train/workflow-links.allowlist) without credentials,
-        # because PR code must not receive the token. On push to main, where the
-        # code is trusted, WORKFLOW_LINKS_TOKEN (read access to every linked repo)
-        # makes it ask the GitHub API instead; without the secret it stays on the
-        # allow-list.
+      - name: Check workflow links exist (allow-list, no credentials)
         env:
-          GH_TOKEN: ${{ github.event_name == 'push' && secrets.WORKFLOW_LINKS_TOKEN || '' }}
+          GH_TOKEN: ''
+        run: actions/release-train/scripts/check-workflow-links.sh
+
+  # Live check on main only. WORKFLOW_LINKS_TOKEN (Contents: read on every
+  # linked repo) must be an environment secret on `workflow-links`, whose
+  # deployment branches are restricted to main, so a PR's own copy of this file
+  # cannot read it. Without the secret this falls back to the allow-list.
+  workflow-links-api:
+    needs: bats
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    environment: workflow-links
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check workflow links exist (GitHub API)
+        env:
+          GH_TOKEN: ${{ secrets.WORKFLOW_LINKS_TOKEN }}
         run: actions/release-train/scripts/check-workflow-links.sh
