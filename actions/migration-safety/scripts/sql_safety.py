@@ -50,8 +50,9 @@ def mask(sql):
     do_tags = []  # stack of open DO-block dollar tags whose body we scan
 
     def after_do(k):
-        # `DO $$`, `DO LANGUAGE plpgsql $$`, `DO 'body'` all run at migration time.
-        return re.search(r"\bDO(?:\s+LANGUAGE\s+\w+)?\s*$", "".join(out[max(0, k - 60):k]), re.I)
+        # `DO $$`, `DO LANGUAGE plpgsql $$` (name bare, "quoted" or 'string'),
+        # `DO 'body'` all run at migration time.
+        return re.search(r"\bDO(?:\s+LANGUAGE\s+(?:\w+|\"[^\"]*\"|'[^']*'))?\s*$", "".join(out[max(0, k - 60):k]), re.I)
 
     def blank(a, b):
         for k in range(a, b):
