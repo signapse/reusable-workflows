@@ -24,12 +24,13 @@ on:
       migration_paths:
         description: >-
           Extended regex over repo-relative paths of migration files. Default
-          matches golang-migrate and goose (`.../migrations/*.sql`) and Flyway
+          matches golang-migrate and goose (`.../migrations/*.sql`, also
+          `.../language_migrations/*.sql`) and Flyway
           (`.../db/migration/*.sql`). `*.down.sql` and Flyway `U*__*.sql` are
           always skipped.
         required: false
         type: string
-        default: '(^|/)migrations?/.+\.sql$'
+        default: '(^|/)[A-Za-z0-9_-]*migrations?/.+\.sql$'
       reusable_workflows_ref:
         description: 'Ref of signapse/reusable-workflows to load the check scripts from.'
         required: false

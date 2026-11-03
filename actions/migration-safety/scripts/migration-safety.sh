@@ -23,9 +23,21 @@ source "$here/override.sh"
 
 : "${BASE_SHA:?BASE_SHA is required}"
 : "${HEAD_SHA:?HEAD_SHA is required}"
-# golang-migrate (migrations/NNN_x.up.sql), goose (migrations/NNN_x.sql) and
-# Flyway (db/migration/V1__x.sql).
-regex="${MIGRATION_PATH_REGEX:-(^|/)migrations?/.+\.sql$}"
+# golang-migrate (migrations/NNN_x.up.sql, also e.g. language_migrations/),
+# goose (migrations/NNN_x.sql) and Flyway (db/migration/V1__x.sql).
+regex="${MIGRATION_PATH_REGEX:-(^|/)[A-Za-z0-9_-]*migrations?/.+\.sql$}"
+
+# Fail closed: a diff or regex error must not look like "no migrations".
+changed=$(git diff --name-only --diff-filter=AMR "${BASE_SHA}...${HEAD_SHA}") || {
+  echo "migration-safety: git diff ${BASE_SHA}...${HEAD_SHA} failed" >&2
+  exit 2
+}
+grc=0
+matched=$(grep -E -- "$regex" <<<"$changed") || grc=$?
+if [ "$grc" -gt 1 ]; then
+  echo "migration-safety: invalid MIGRATION_PATH_REGEX: $regex" >&2
+  exit 2
+fi
 
 files=()
 while IFS= read -r f; do
@@ -36,7 +48,7 @@ while IFS= read -r f; do
     U[0-9]*__*.sql) continue ;;      # Flyway undo migration
   esac
   files+=("$f")
-done < <(git diff --name-only --diff-filter=AMR "${BASE_SHA}...${HEAD_SHA}" | grep -E -- "$regex" || true)
+done < <([ -z "$matched" ] || printf '%s\n' "$matched")
 
 [ "${#files[@]}" -gt 0 ] || exit 0
 
@@ -48,6 +60,13 @@ report=$(python3 "$here/sql_safety.py" --format "$fmt" "${files[@]}") || rc=$?
 [ -z "$report" ] || printf '%s\n' "$report"
 [ "$rc" -le 1 ] || exit "$rc"
 
+blocked=()
+while IFS= read -r f; do blocked+=("$f"); done < <(grep -E ':[0-9]+: BLOCK: ' <<<"$report" | sed -E 's/:[0-9]+: BLOCK: .*//' | sort -u)
+if [ "$rc" -eq 1 ] && [ "${#blocked[@]}" -eq 0 ]; then
+  echo "migration-safety: the SQL checker failed without reporting a finding" >&2
+  exit 2
+fi
+
 summary() { [ -z "${GITHUB_STEP_SUMMARY:-}" ] || printf '%s\n' "$@" >>"$GITHUB_STEP_SUMMARY"; }
 findings() { grep -E ':[0-9]+: (BLOCK|warn): ' <<<"$report" | sed 's/^/    /' || true; }
 
@@ -56,9 +75,6 @@ if [ "$rc" -eq 0 ]; then
   summary "### Migration safety: passed" "" "${#files[@]} migration file(s) checked, no destructive change." "" '```' "$(findings)" '```'
   exit 0
 fi
-
-blocked=()
-while IFS= read -r f; do blocked+=("$f"); done < <(grep -E ':[0-9]+: BLOCK: ' <<<"$report" | sed -E 's/:[0-9]+: BLOCK: .*//' | sort -u)
 
 if hit=$(find_override "${blocked[@]}"); then
   login=${hit%%$'\t'*}

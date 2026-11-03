@@ -8,11 +8,11 @@ Only the migration files the PR **adds or changes** (`git diff base...head`), an
 
 | Layout | Used by | Up direction |
 |---|---|---|
-| golang-migrate: `.../migrations/NNN_name.up.sql` | billing-service-api, account-service-api, translation-service-api, sign-stream-platform-api | `*.up.sql`; `*.down.sql` is skipped |
+| golang-migrate: `.../migrations/NNN_name.up.sql` (also `language_migrations/`) | billing-service-api, account-service-api, translation-service-api, sign-stream-platform-api | `*.up.sql`; `*.down.sql` is skipped |
 | goose: `.../migrations/NNN_name.sql` | (none today) | the `-- +goose Up` section only |
 | Flyway: `.../db/migration/V1__name.sql` | hub-api, video-translation-api | `V*` / `R*` files; `U*` undo files are skipped |
 
-The SQL is read as Postgres. Comments, string literals, quoted identifiers and function bodies (`AS $$ ... $$`) are ignored. Statements inside a `DO $$ ... $$` block run during the migration, so they **are** checked. Statements can span lines, and keywords match in any case.
+The SQL is read as Postgres. Comments, string literals, quoted identifiers and function bodies (`AS $$ ... $$`) are ignored. Statements inside a `DO` block (`DO $$ ... $$`, `DO LANGUAGE plpgsql $$ ... $$`, `DO '...'`) run during the migration, so they **are** checked. Statements can span lines, and keywords match in any case.
 
 ### Blocks the PR
 
@@ -23,19 +23,21 @@ The SQL is read as Postgres. Comments, string literals, quoted identifiers and f
 | `RENAME` of a table, column, view, schema, type, enum value or type attribute; `ALTER TABLE ... SET SCHEMA` | It still uses the old name |
 | `ALTER [COLUMN] ... TYPE` / `SET DATA TYPE` | It may not read or write the new type (and the table is rewritten under lock). This includes widening (`INT` to `BIGINT`, a longer `VARCHAR`), which a reviewer can override |
 | `ALTER COLUMN ... SET NOT NULL` | Its INSERTs may leave the column out |
-| `ADD COLUMN ... NOT NULL` with no `DEFAULT` | Its INSERTs don't know the column and fail |
+| `ADD COLUMN ... NOT NULL` or `PRIMARY KEY` with no non-null `DEFAULT` | Its INSERTs don't know the column and fail |
+| `DROP TYPE` / `DROP DOMAIN ... CASCADE` | CASCADE also drops every column of that type |
 
-Changes to a table that the **same migration** creates are not flagged, because no earlier code can depend on it.
+Changes to a table that the **same migration** creates with a plain `CREATE TABLE` are not flagged, because no earlier code can depend on it. `CREATE TABLE IF NOT EXISTS` doesn't count, because the table may already exist.
 
 ### Warns but passes
 
 | Statement | Why it isn't blocking |
 |---|---|
+| `DROP FUNCTION` / `PROCEDURE` / `SEQUENCE` | The previous code may call them, but most are trigger functions replaced in the same migration, so the reviewer checks |
 | `DROP INDEX`, `ALTER TABLE ... DROP CONSTRAINT`, `RENAME CONSTRAINT`, `ALTER INDEX ... RENAME` | The previous code's reads and writes still succeed. A dropped index or constraint costs performance or loosens a rule; it doesn't change the shape the code reads. Our migrations often drop and recreate one in the same file (billing 004 and 025). The one real break is an `ON CONFLICT` that targets the dropped unique index or names the constraint, so the warning annotation asks the reviewer to check for that |
 
 ### Passes silently
 
-A new table, a nullable column, a column with a `DEFAULT`, `CREATE INDEX`, `ADD CONSTRAINT`, `DROP NOT NULL`, `DROP DEFAULT`, data `UPDATE`s. A PR that changes no migration file prints nothing and passes.
+A new table, a nullable column, a column with a `DEFAULT`, `CREATE INDEX`, `ADD CONSTRAINT`, `DROP NOT NULL`, `DROP DEFAULT`, data `UPDATE`s. A PR that changes no migration file prints nothing and passes. If the diff can't be computed or `migration_paths` is an invalid regex, the check fails (exit 2) rather than passing.
 
 ### Not covered
 
@@ -65,7 +67,7 @@ Then make **`migration-safety / Migration safety`** a required status check in t
 
 | Input | Default | Meaning |
 |---|---|---|
-| `migration_paths` | `(^\|/)migrations?/.+\.sql$` | Extended regex over repo-relative paths |
+| `migration_paths` | `(^\|/)[A-Za-z0-9_-]*migrations?/.+\.sql$` | Extended regex over repo-relative paths |
 | `reusable_workflows_ref` | `main` | Which ref of this repo to load the scripts from |
 
 ## Override

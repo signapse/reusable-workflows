@@ -125,7 +125,8 @@ add_migration() { cp "$FX/$1" "$MIG/$2"; }
   cp "$FX/drop_table.up.sql" src/main/resources/db/migration/U2__undo.sql
   commit_pr
   run bash "$SCRIPT"
-  [ "$status" -eq 0 ] && [ -z "$output" ]
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
   cp "$FX/drop_table.up.sql" src/main/resources/db/migration/V2__drop_invitation.sql
   commit_pr
   run bash "$SCRIPT"
@@ -133,12 +134,36 @@ add_migration() { cp "$FX/$1" "$MIG/$2"; }
   [[ "$output" == *"db/migration/V2__drop_invitation.sql:1: BLOCK: DROP TABLE invitation"* ]]
 }
 
+@test "language_migrations/ (translation-service-api) is checked by default" {
+  mkdir -p internal/adaptors/storage/postgres/language_migrations
+  cp "$FX/drop_table.up.sql" internal/adaptors/storage/postgres/language_migrations/003_x.up.sql
+  commit_pr
+  run bash "$SCRIPT"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"language_migrations/003_x.up.sql:1: BLOCK: DROP TABLE invitation"* ]]
+}
+
+@test "fails closed (exit 2) when the base commit is missing" {
+  add_migration drop_column.up.sql 002_drop.up.sql
+  commit_pr
+  BASE_SHA=0000000000000000000000000000000000000000 run bash "$SCRIPT"
+  [ "$status" -eq 2 ]
+}
+
+@test "fails closed (exit 2) on an invalid MIGRATION_PATH_REGEX" {
+  add_migration drop_column.up.sql 002_drop.up.sql
+  commit_pr
+  MIGRATION_PATH_REGEX='(' run bash "$SCRIPT"
+  [ "$status" -eq 2 ]
+}
+
 @test "MIGRATION_PATH_REGEX narrows which files are checked" {
   mkdir -p tools/migrations
   cp "$FX/drop_table.up.sql" tools/migrations/x.up.sql
   commit_pr
   MIGRATION_PATH_REGEX='^internal/.*\.sql$' run bash "$SCRIPT"
-  [ "$status" -eq 0 ] && [ -z "$output" ]
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
 }
 
 @test "GitHub mode writes annotations and a step summary" {

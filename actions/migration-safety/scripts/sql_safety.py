@@ -7,19 +7,21 @@ the "up" direction of migration files and reports:
 
   block  - the previous code would break: DROP TABLE/VIEW/SCHEMA, DROP COLUMN,
            RENAME of a table/view/column/type/enum value, ALTER COLUMN ... TYPE,
-           SET NOT NULL, ADD COLUMN ... NOT NULL without DEFAULT, SET SCHEMA.
+           SET NOT NULL, ADD COLUMN ... NOT NULL / PRIMARY KEY without a
+           non-null DEFAULT, SET SCHEMA, DROP TYPE/DOMAIN ... CASCADE.
   warn   - usually safe, but worth a reviewer's look: DROP INDEX,
-           DROP CONSTRAINT, RENAME of an index or constraint. The previous
+           DROP CONSTRAINT, RENAME of an index or constraint (the previous
            code's reads and writes still succeed; the risk is an
-           `ON CONFLICT` that names the dropped unique index/constraint.
+           `ON CONFLICT` that names it); DROP FUNCTION/PROCEDURE/SEQUENCE.
 
 Usage: sql_safety.py [--format plain|github] FILE...
 Exit:  0 no blocking finding, 1 at least one, 2 usage/IO error.
 
 Postgres dialect (all Signapse SQL services run Postgres). Comments, string
 literals, quoted identifiers and dollar-quoted bodies are masked before
-matching, except the body of a `DO $$ ... $$` block, which runs at migration
-time and so is checked. Dynamic SQL (`EXECUTE '...'`) is not inspected.
+matching, except the body of a DO block (`DO $$ ... $$`, `DO LANGUAGE x $$`,
+`DO '...'`), which runs at migration time and so is checked. Dynamic SQL
+(`EXECUTE '...'`) is not inspected.
 """
 
 import re
@@ -46,6 +48,10 @@ def mask(sql):
     n = len(sql)
     i = 0
     do_tags = []  # stack of open DO-block dollar tags whose body we scan
+
+    def after_do(k):
+        # `DO $$`, `DO LANGUAGE plpgsql $$`, `DO 'body'` all run at migration time.
+        return re.search(r"\bDO(?:\s+LANGUAGE\s+\w+)?\s*$", "".join(out[max(0, k - 60):k]), re.I)
 
     def blank(a, b):
         for k in range(a, b):
@@ -85,11 +91,17 @@ def mask(sql):
                         continue
                     break
                 j += 1
-            blank(i + 1, min(j, n))
+            if after_do(i):
+                # Single-quoted DO body: check its statements in place. Same
+                # length, so offsets still hold ('' inside reads as empty strings).
+                out[i + 1:min(j, n)] = mask(sql[i + 1:min(j, n)])
+            else:
+                blank(i + 1, min(j, n))
             i = j + 1
         elif c == '"':
-            j = sql.find('"', i + 1)
-            j = n if j < 0 else j
+            j = i + 1
+            while j < n and not (sql[j] == '"' and sql[j + 1:j + 2] != '"'):
+                j += 2 if sql[j] == '"' else 1  # "" is an escaped quote
             for k in range(i + 1, j):
                 if not re.match(r"[A-Za-z0-9_$]", sql[k]):
                     out[k] = "_"
@@ -104,7 +116,7 @@ def mask(sql):
                 do_tags.pop()
                 blank(i, i + len(tag))
                 i += len(tag)
-            elif re.search(r"\bDO\s*$", "".join(out[max(0, i - 40):i]), re.I):
+            elif after_do(i):
                 do_tags.append(tag)
                 blank(i, i + len(tag))
                 i += len(tag)
@@ -128,7 +140,8 @@ def up_section(sql):
             keep = True
         elif re.match(r"\s*--\s*\+goose\s+Down\b", line, re.I):
             keep = False
-        out.append(line if keep else "")
+        # Blank, not drop, so offsets and line numbers match the file.
+        out.append(line if keep else " " * len(line))
     return "\n".join(out)
 
 
@@ -198,10 +211,14 @@ def check_alter_table(table, actions):
             yield ("block", "SET NOT NULL", f"{table}.{m.group(1)}", off)
             continue
         m = re.match(rf"ADD\s+(?:COLUMN\s+)?(?:IF\s+NOT\s+EXISTS\s+)?({IDENT})", a, re.I)
+        # Ignore parenthesised parts, e.g. CHECK (x IS NOT NULL).
+        top = u
+        while re.search(r"\([^()]*\)", top):
+            top = re.sub(r"\([^()]*\)", " ", top)
         if (m and m.group(1).upper() not in ADD_NOT_A_COLUMN
-                and re.search(r"\bNOT\s+NULL\b", u)
-                and not re.search(r"\b(DEFAULT|GENERATED|(?:SMALL|BIG)?SERIAL)\b", u)):
-            yield ("block", "ADD COLUMN NOT NULL", f"{table}.{m.group(1)} (no DEFAULT)", off)
+                and re.search(r"\b(NOT\s+NULL|PRIMARY\s+KEY)\b", top)
+                and not re.search(r"\bDEFAULT\s+(?!NULL\b)|\b(GENERATED|(?:SMALL|BIG)?SERIAL)\b", top)):
+            yield ("block", "ADD COLUMN NOT NULL", f"{table}.{m.group(1)} (no non-null DEFAULT)", off)
             continue
         if re.match(r"SET\s+SCHEMA\b", a, re.I):
             yield ("block", "SET SCHEMA", table, off)
@@ -218,8 +235,10 @@ REASONS = {
     "DROP TYPE ATTRIBUTE": "the previous code may still use this attribute",
     "ALTER COLUMN TYPE": "the previous code may not read or write the new type (and the table is rewritten under lock)",
     "SET NOT NULL": "the previous code may insert rows without this column",
-    "ADD COLUMN NOT NULL": "the previous code's INSERTs do not set this column and fail without a DEFAULT",
+    "ADD COLUMN NOT NULL": "the previous code's INSERTs do not set this column and fail without a non-null DEFAULT",
     "SET SCHEMA": "the previous code still uses the old schema-qualified name",
+    "DROP TYPE CASCADE": "CASCADE also drops every column of this type, which the previous code still uses",
+    "DROP ROUTINE": "the previous code may still call this function, procedure or sequence",
     "DROP INDEX": "safe for reads and writes, but breaks an ON CONFLICT that relies on it",
     "DROP CONSTRAINT": "safe for reads and writes, but breaks an ON CONFLICT ON CONSTRAINT that names it",
     "RENAME CONSTRAINT": "breaks an ON CONFLICT ON CONSTRAINT that names it",
@@ -239,6 +258,9 @@ RULES = [
     ("warn", "RENAME INDEX", rf"\bALTER\s+INDEX\s+(?:IF\s+EXISTS\s+)?({IDENT})\s+RENAME\s+TO\s+({IDENT})", "{0} -> {1}"),
     ("block", "RENAME TYPE", rf"\bALTER\s+TYPE\s+({IDENT})\s+(RENAME\s+(?:TO|VALUE|ATTRIBUTE)\b[^;]*)", "{0}: {1}"),
     ("block", "DROP TYPE ATTRIBUTE", rf"\bALTER\s+TYPE\s+({IDENT})\s+DROP\s+ATTRIBUTE\s+(?:IF\s+EXISTS\s+)?({IDENT})", "{0}.{1}"),
+    ("block", "SET SCHEMA", rf"\bALTER\s+(?:MATERIALIZED\s+)?VIEW\s+(?:IF\s+EXISTS\s+)?({IDENT})\s+SET\s+SCHEMA\s+({IDENT})", "{0} -> schema {1} (view)"),
+    ("block", "DROP TYPE CASCADE", rf"\bDROP\s+(?:TYPE|DOMAIN)\s+(?:IF\s+EXISTS\s+)?({IDENT}(?:\s*,\s*{IDENT})*)\s+CASCADE\b", "{0}"),
+    ("warn", "DROP ROUTINE", rf"\bDROP\s+(?:FUNCTION|PROCEDURE|SEQUENCE)\s+(?:IF\s+EXISTS\s+)?({IDENT})", "{0}"),
     ("block", "RENAME TABLE", rf"\bALTER\s+SCHEMA\s+({IDENT})\s+RENAME\s+TO\s+({IDENT})", "schema {0} -> {1}"),
 ]
 CREATE_TABLE = rf"\bCREATE\s+(?:(?:GLOBAL|LOCAL)\s+)?(?:(?:TEMP|TEMPORARY|UNLOGGED)\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?({IDENT})"
@@ -249,8 +271,8 @@ DROP_TABLE = rf"\bDROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?({IDENT}(?:\s*,\s*{IDENT})*)
 def analyse(sql):
     """Return [(severity, kind, detail, offset)] for one migration's text.
 
-    Changes to a table created earlier in the same migration are ignored: the
-    previous code cannot depend on a table that did not exist for it.
+    Changes to a table created (plain CREATE TABLE, not IF NOT EXISTS) earlier
+    in the same migration are ignored: the previous code cannot depend on it.
     """
     text = up_section(sql)
     masked = mask(text)
@@ -258,7 +280,9 @@ def analyse(sql):
     created = set()
     for off, stmt in statements(masked):
         for m in re.finditer(CREATE_TABLE, stmt, re.I):
-            created.add(bare(m.group(1)).lower())
+            # IF NOT EXISTS may be a no-op on a table the previous code uses.
+            if not re.search(r"\bIF\s+NOT\s+EXISTS\b", m.group(0), re.I):
+                created.add(bare(m.group(1)).lower())
 
         m = re.search(ALTER_TABLE, stmt, re.I)
         if m:
@@ -299,7 +323,7 @@ def main(argv):
         try:
             with open(path, encoding="utf-8") as fh:
                 sql = fh.read()
-        except OSError as e:
+        except (OSError, UnicodeDecodeError) as e:
             print(f"{path}: {e}", file=sys.stderr)
             return 2
         for sev, kind, detail, off in analyse(sql):
