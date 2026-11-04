@@ -932,14 +932,8 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
+    # No checkout: the alert must not depend on fetching anything (review fix).
     steps:
-      - name: Fetch release-train scripts
-        uses: actions/checkout@v4
-        with:
-          repository: signapse/reusable-workflows
-          ref: main
-          path: _rw
-          persist-credentials: false
       - name: Alert Slack and end red
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
@@ -950,13 +944,16 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
-          msg="Prod runs \`${TAG}\` but the verdict job did not record the @prod-safe result (smoke job ${SMOKE_JOB}, result ${SMOKE_RESULT:-none}). Nothing was rolled back and no ticket moved. Check prod, then re-run failed jobs or roll back by hand."
+          msg="Prod runs \`${TAG}\` but its @prod-safe result is unknown: the suite gave no verdict, or the verdict job did not record it (smoke job ${SMOKE_JOB}, result ${SMOKE_RESULT:-none}). Nothing was rolled back and no ticket moved. Check prod, then re-run the smoke or roll back by hand."
           echo "::error::${msg}"
-          if [ -n "$SLACK_BOT_TOKEN" ]; then
-            # shellcheck source=/dev/null
-            source "$GITHUB_WORKSPACE/_rw/actions/release-train/lib/slack.sh"
-            resp=$(jq -nc --arg c "$SLACK_CHANNEL" --arg t ":rotating_light: <!channel> ${GITHUB_REPOSITORY}: ${msg} <${RUN_URL}|Run>" '{channel: $c, text: $t}' | slack_post) || resp='{"ok":false}'
-            [ "$(jq -r .ok <<< "$resp")" = true ] || echo "::error::Slack alert failed: $resp"
+          if [ -z "$SLACK_BOT_TOKEN" ]; then
+            echo "::error::No SLACK_BOT_TOKEN: the alert was not posted."
+          else
+            resp=$(jq -nc --arg c "$SLACK_CHANNEL" --arg t ":rotating_light: <!channel> ${GITHUB_REPOSITORY}: ${msg} <${RUN_URL}|Run>" '{channel: $c, text: $t}' \
+              | curl -sS --max-time 20 -X POST https://slack.com/api/chat.postMessage \
+                  -H "Authorization: Bearer ${SLACK_BOT_TOKEN}" -H 'Content-Type: application/json; charset=utf-8' --data-binary @-) \
+              || resp='{"ok":false,"error":"curl failed"}'
+            [ "$(jq -r '.ok // false' <<< "$resp" 2> /dev/null)" = true ] || echo "::error::Slack alert failed: $resp"
           fi
           exit 1
 
@@ -1042,7 +1039,9 @@ jobs:
           MAX_ATTEMPTS: ${{ inputs.rollback_max_attempts }}
         run: |
           set -euo pipefail
-          export TIMEOUT_SECONDS=$((TIMEOUT_MINUTES * 60))
+          # awk, not $((...)): the input is a number and may be fractional.
+          TIMEOUT_SECONDS=$(awk -v m="$TIMEOUT_MINUTES" 'BEGIN { printf "%d", m * 60 }')
+          export TIMEOUT_SECONDS
           if [ -z "$GH_TOKEN" ]; then
             res=$(jq -nc --argjson s "$SERVICES" '{ok: false, needs_human: true, reason: "no Prodzilla token, nothing was dispatched",
               results: [$s[] | {service: ., ok: false, result: "not_dispatched", restored: "", run_url: "", reason: "not rolled back: the Prodzilla token could not be minted"}]}')
