@@ -964,7 +964,10 @@ jobs:
   # "Fail", "Failure handling"). Only after a Deployment that actually reached
   # prod; a cancelled run never rolls back. Every step after the rollback runs
   # whatever the rollback did, so what is knowable is still recorded (AC5).
-  # The job always ends red. Re-runs are safe: rollback.yml is keyed on the
+  # The job always ends red. Retry it with a re-run of this job alone: "Re-run
+  # failed jobs" would re-run a failed smoke against the restored prod, and a
+  # pass there skips this job (docs/RELEASE-TRAIN.md "Re-runs").
+  # Re-runs are safe: rollback.yml is keyed on the
   # rollback run key, the incident on the deploy run key, the Release move and
   # ticket comments check before writing.
   rollback:

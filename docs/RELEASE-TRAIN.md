@@ -589,12 +589,18 @@ rollback
   critical (`<!channel>`) and names each service and the reason.
 - **AC5: still records what it can.** Every step after the rollback runs
   whatever the rollback did, and a failure in one does not stop the next.
-- **Re-runs** ("Re-run failed jobs"): a rollback that already succeeded with
-  the key is reused, one still running is waited on, a failed one is
-  dispatched again with the same key (rollback.yml never rolls back twice for
-  one key). The incident is not duplicated (idempotency key), the Release
-  move and ticket comments check first. The Slack alert is posted again,
-  marked with the attempt number.
+- **Re-runs.** To retry a failed rollback step (incident, Release, tickets,
+  Slack), re-run **the "Roll back prod" job alone** (the job's re-run
+  button), not "Re-run failed jobs". A single-job re-run reuses this
+  attempt's smoke and verdict outputs, so the job runs again. "Re-run failed
+  jobs" also re-runs a failed smoke, which now tests the restored prod: it
+  can pass, and then the rollback job is skipped and its failed steps are
+  never retried. In the re-run, a rollback that already succeeded with the
+  key is reused, one still running is waited on, and a failed one is
+  dispatched again with the same key (rollback.yml never rolls back twice
+  for one key). The incident is not duplicated (idempotency key), and the
+  Release move and ticket comments check first. The Slack alert is posted
+  again, marked with the attempt number.
 - **On Prod guard.** A re-run can re-run the smoke against the rolled-back
   prod. Before moving tickets to On Prod, the verdict job now checks that prod
   still runs the release tag on every service.
