@@ -8,19 +8,24 @@
 # Two modes:
 #   fresh   RELEASE_TAG is set: staging just passed for it in this train run
 #           (the caller only calls with staging_passed == 'true').
-#   resume  RELEASE_TAG is empty: the train run promoted nothing new (outcome
-#           none or already_promoted). Take the newest release tag on the
-#           branch and deploy it if prod does not run it yet and its staging
-#           pass is still on record: every ticket in it carries Staging
-#           Passed, none carries Staging Failed and none is in QA Failed.
+#   resume  RELEASE_TAG is empty: staging was not attempted in this train run
+#           (nothing new promoted, deferred, or the train failed). Take
+#           RESUME_TAG (the train's staged_tag) or else the newest release tag
+#           on the branch, and deploy it if prod does not run it yet.
+# Both modes check the staging pass of every ticket in the range (review fix,
+# SIG-2769): every ticket carries Staging Passed, none carries Staging Failed
+# and none is in QA Failed. Fresh refuses otherwise (red run); resume reports
+# nothing. Staging Passed is cleared at each Promotion (SIG-2764), so it
+# always belongs to the newest tag's staging run.
 #           This is how a staging pass outside the deploy window reaches prod
 #           in the next window with no stored state (AC6): the hourly train
 #           run (and the 09:01 schedule) calls prod in resume mode.
 #
-# Tickets: TICKETS (the Release Candidate's) plus every ticket ref in the
-# commits since the tag prod runs now, so a Release Candidate that passed
-# staging but was overtaken before reaching prod still gets its tickets
-# moved to On Prod.
+# Tickets: TICKETS (the train's rc_tickets or staged_tickets) plus every
+# ticket ref in the commits since the tag prod runs now, so a Release
+# Candidate that passed staging but was overtaken before reaching prod is
+# checked and moved too. Commits reverted later in that range, and revert
+# commits, add no tickets (lib/revert.sh, the same rule as the selection).
 #
 # decision:
 #   deploy            inside the deploy window
@@ -30,11 +35,12 @@
 #                     after the deploy step). Skip the dispatch, finish the rest.
 #   nothing           resume only: no candidate, prod already runs it, or its
 #                     staging pass is not on record (see reason)
-#   refused           fresh only: the tag was rolled back from in prod before;
-#                     the train never re-deploys it by itself
+#   refused           fresh only: the tag was rolled back from in prod before
+#                     (the train never re-deploys it by itself), or a ticket
+#                     in the range has no staging pass on record
 #
 # Env:
-#   RELEASE_TAG, TICKETS (comma-separated), PROD_SERVICES (JSON array),
+#   RELEASE_TAG, RESUME_TAG, TICKETS (comma-separated), PROD_SERVICES (JSON array),
 #   RELEASE_TAG_PATTERN (default ^v?[0-9]+\.[0-9]+\.[0-9]+$),
 #   HOTFIX_LABEL, NOW (see deploy-window.sh),
 #   STAGING_PASSED_LABEL, STAGING_FAILED_LABEL, QA_FAILED_STATE,
@@ -48,6 +54,8 @@
 
 # shellcheck source=SCRIPTDIR/../lib/common.sh
 source "$(dirname "$0")/../lib/common.sh"
+# shellcheck source=SCRIPTDIR/../lib/revert.sh
+source "$(dirname "$0")/../lib/revert.sh"
 
 need git
 need jq
@@ -77,7 +85,12 @@ emit() {
 }
 
 if [ "$mode" = resume ]; then
-  tag=$(git tag --merged HEAD --sort=-v:refname | { grep -E "$RELEASE_TAG_PATTERN" || true; } | head -1)
+  if [ -n "${RESUME_TAG:-}" ]; then
+    printf '%s\n' "$RESUME_TAG" | grep -qE "$RELEASE_TAG_PATTERN" || die "resume tag '$RESUME_TAG' is not a release tag"
+    tag="$RESUME_TAG"
+  else
+    tag=$(git tag --merged HEAD --sort=-v:refname | { grep -E "$RELEASE_TAG_PATTERN" || true; } | head -1)
+  fi
   [ -n "$tag" ] || emit nothing "no release tag on the branch yet"
 fi
 sha=$(git rev-parse --verify -q "${tag}^{commit}") || die "release tag '$tag' is not in this repo"
@@ -121,7 +134,13 @@ fi
 
 ranged='[]'
 if [ -n "$base" ]; then
-  ranged=$("$HERE/ticket-extractor.sh" "$base" "$sha" < /dev/null)
+  units=$(revert_units "$base" "$sha")
+  while IFS= read -r u; do
+    [ -n "$u" ] || continue
+    [ "$(jq -r --arg u "$u" '.[$u].kind // "normal"' <<< "$units")" = normal ] || continue
+    r=$("$HERE/ticket-extractor.sh" "${u}^1" "$u" < /dev/null)
+    ranged=$(jq -c --argjson r "$r" '. + $r | unique' <<< "$ranged")
+  done < <(git rev-list --first-parent "${base}..${sha}")
 fi
 ids=$(jq -c --arg t "${TICKETS:-}" '. + ($t | split(",") | map(gsub("^\\s+|\\s+$"; "") | ascii_upcase) | map(select(. != ""))) | unique' <<< "$ranged")
 details='[]'
@@ -133,12 +152,18 @@ plan=$(jq -c --arg base "$base" --argjson d "$details" \
 if [ "$mode" = resume ]; then
   [ "$(jq '.tickets | length' <<< "$plan")" -gt 0 ] \
     || emit nothing "$tag carries no Linear tickets, so its staging pass cannot be verified from Linear; it reaches prod with the next Release Candidate, or deploy it by hand"
-  # shellcheck disable=SC2016 # jq bindings, not shell expansion.
-  bad=$(jq -r --arg sp "$STAGING_PASSED_LABEL" --arg sf "$STAGING_FAILED_LABEL" --arg qf "$QA_FAILED_STATE" '
-    [.ticket_details[] | select(.found)
-     | select((.labels | index($sp) | not) or (.labels | index($sf)) or .state == $qf)
-     | "\(.id) (\(.state // "?"); \(.labels | join(", ")))"] | join("; ")' <<< "$plan")
-  [ -z "$bad" ] || emit nothing "staging pass of $tag is not on record for every ticket: $bad"
+fi
+# Every ticket in the range, in both modes: a ticket that failed staging in
+# an earlier tag, or was rolled back, is still in QA Failed, and its code is
+# in this tag too.
+# shellcheck disable=SC2016 # jq bindings, not shell expansion.
+bad=$(jq -r --arg sp "$STAGING_PASSED_LABEL" --arg sf "$STAGING_FAILED_LABEL" --arg qf "$QA_FAILED_STATE" '
+  [.ticket_details[] | select(.found)
+   | select((.labels | index($sp) | not) or (.labels | index($sf)) or .state == $qf)
+   | "\(.id) (\(.state // "?"); \(.labels | join(", ")))"] | join("; ")' <<< "$plan")
+if [ -n "$bad" ]; then
+  [ "$mode" = fresh ] && emit refused "staging pass of $tag is not on record for every ticket since the tag prod runs: $bad. A ticket in QA Failed stops the line (ADR 0001)"
+  emit nothing "staging pass of $tag is not on record for every ticket: $bad"
 fi
 
 if [ "$all_on" = true ]; then
