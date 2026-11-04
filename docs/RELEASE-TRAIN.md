@@ -218,28 +218,37 @@ the revert. It is stateless; callers run it hourly.
 How it decides (details in `actions/release-train/scripts/qa-failed-revert.sh`):
 
 - **Which tickets.** Tickets referenced by first-parent commits on
-  `release_branch` since the last Promotion tag, found the way Release
-  Candidate selection finds them (commit messages, PR title, PR branch). Only
+  `release_branch` since the tag prod runs (`selection-base.sh`, the same
+  base as Release Candidate selection; `selection_base` overrides it), found
+  the way selection finds them (commit messages, PR title, PR branch). A
+  ticket that failed staging sits in an already-tagged build, so walking only
+  from the last Promotion tag would never revert it. Only
   tickets *currently* in QA Failed count. A ticket that QA re-passes leaves
   the column and is never reverted.
 - **When.** The clock starts at the newest Linear history entry that moved
   the ticket into QA Failed, so re-entering the column restarts it.
 - **What.** The ticket's commits since the tag, newest first. Merge commits
   are reverted against their first parent. Revert commits are never
-  reverted. A commit that something since the tag already reverts ("This
-  reverts commit …") or whose revert changes nothing is skipped and listed.
+  reverted. A commit that a live revert since the tag already undoes ("This
+  reverts commit …", `lib/revert.sh`; a revert that was itself reverted does
+  not count) or whose revert changes nothing is skipped and listed. Once the
+  revert PR merges, selection treats the reverted commits as gone and the
+  revert itself as untracked, so the line moves again.
   If every commit is already reverted, no PR is opened.
 - **PR.** Branch `prodzilla/revert-<ticket>`, title
   `Revert <ticket>: <ticket title>`. The body explains why, lists the
   reverted and skipped commits, and warns when a commit also carries another
   ticket. The PR link is commented on the ticket.
 - **Once per ticket.** No PR is opened while an open PR from
-  `prodzilla/revert-<ticket>` exists, or while that branch exists. If the branch
+  `prodzilla/revert-<ticket>` exists, or while that branch exists. With an open
+  PR, the run still posts the PR link on the ticket if an earlier run failed
+  to. If the branch
   is left without an open PR, the run summary warns; reopen the PR or delete the
   branch.
 - **Conflict.** The revert stops at the conflicting commit. The newer commits
   that did revert stay on the branch (or an empty marker commit if none did).
-  A **draft** PR says which commit and files conflict and how to finish. A
+  A **draft** PR says which commit and files conflict, lists the older
+  commits not attempted, and how to finish. A
   comment goes on the ticket, and a Slack alert goes to `slack_channel` if it
   is set. The branch dedupes later runs, so each of those is sent once.
 - **Failures are loud.** Linear or GitHub read errors fail the run before
@@ -264,22 +273,28 @@ jobs:
     uses: signapse/reusable-workflows/.github/workflows/qa-failed-revert.yml@main
     with:
       prodzilla_app_id: ${{ vars.PRODZILLA_APP_ID }}
+      prod_services: '["signstream-api","signstream-websocket"]'   # as the release train
+      read_app_id: ${{ vars.PIPELINE_READ_APP_ID }}
       # threshold_hours: '0.1'     # quoted string; QA testing only (6 minutes)
       # slack_channel: '#releases' # conflict alerts
     secrets:
       PRODZILLA_APP_PRIVATE_KEY: ${{ secrets.PRODZILLA_APP_PRIVATE_KEY }}
+      READ_APP_PRIVATE_KEY: ${{ secrets.READ_APP_PRIVATE_KEY }}
       LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
       # SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}   # with slack_channel
 ```
 
 Optional inputs: `threshold_hours`, `slack_channel`, `qa_failed_state`,
-`linear_team_key`, `release_branch`, `release_tag_pattern`.
+`linear_team_key`, `release_branch`, `release_tag_pattern`, `gitops_repo`,
+`gitops_ref`, `selection_base` (instead of `prod_services` and
+`read_app_id`).
 
 ### Credentials
 
 The PR must be opened by the Prodzilla GitHub App. PRs opened with
 `GITHUB_TOKEN` do not trigger CI (ADR 0005). The workflow mints a token for
-the calling repo only, with `contents: write` and `pull_requests: write`.
+the calling repo only, with `contents: write`, `pull_requests: write` and
+`workflows: write`.
 Without `prodzilla_app_id` or `PRODZILLA_APP_PRIVATE_KEY`, it fails with an
 error and never falls back to `GITHUB_TOKEN`. Prerequisites:
 
@@ -287,5 +302,7 @@ error and never falls back to `GITHUB_TOKEN`. Prerequisites:
   in Terraform).
 - `PRODZILLA_APP_ID` (variable) and `PRODZILLA_APP_PRIVATE_KEY` (secret) are
   available to the repo.
-- A revert that touches `.github/workflows/` needs the app's `workflows`
-  permission. Without it the push fails, and the run says so.
+- The app's installation grants `Workflows: write` (manual step in the app
+  settings): the token asks for it so a revert that touches
+  `.github/workflows/` can be pushed. Without the grant, minting the token
+  fails.
