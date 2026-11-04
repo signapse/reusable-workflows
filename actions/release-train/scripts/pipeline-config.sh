@@ -1,25 +1,47 @@
 #!/usr/bin/env bash
-# pipeline-config.sh <key> [file]
+# pipeline-config.sh <key> [--required] [file]
 #
 # Prints a top-level scalar from a product repo's .signapse/pipeline.yml
-# (default file), e.g. `pipeline-config.sh product` -> Signstream. Quotes and
-# trailing comments are stripped. Exits 1 with a clear message when the file
-# or the key is missing or empty: every caller needs the value to go on.
+# (default file: $PIPELINE_CONFIG, else .signapse/pipeline.yml), e.g.
+# `pipeline-config.sh product` -> Signstream.
 #
-# Deliberately not yq: the file is a flat key: value list (see the contract in
-# docs/RELEASE-TRAIN.md), and the tests then need nothing beyond bash.
+# Without --required, a missing file or key prints nothing and exits 0
+# (optional keys such as sentry_project). With --required it exits 1 with a
+# clear message instead (keys every caller needs, such as product).
+#
+# A trailing comment is stripped; a quoted value is taken verbatim between its
+# quotes, so it may contain '#'. Deliberately not yq: the file is a flat
+# key: value list, and the tests then need nothing beyond bash.
 
 # shellcheck source=SCRIPTDIR/../lib/common.sh
 source "$(dirname "$0")/../lib/common.sh"
 
-[ $# -ge 1 ] && [ $# -le 2 ] || die "usage: pipeline-config.sh <key> [file]"
+usage="usage: pipeline-config.sh <key> [--required] [file]"
+[ $# -ge 1 ] || die "$usage"
 key="$1"
-file="${2:-.signapse/pipeline.yml}"
+shift
+required=false
+file="${PIPELINE_CONFIG:-.signapse/pipeline.yml}"
+for arg in "$@"; do
+  case "$arg" in
+    --required) required=true ;;
+    -*) die "$usage" ;;
+    *) file="$arg" ;;
+  esac
+done
 
-[ -f "$file" ] || die "$file not found: the repo must declare its product there (product: <terragrunt/products dir in signapse-core-terraform>)"
+missing() {
+  [ "$required" = true ] && die "$1"
+  exit 0
+}
 
-line=$(grep -E "^${key}:" "$file" | head -1 || true)
-value=$(printf '%s' "${line#*:}" \
-  | sed -E 's/[[:space:]]+#.*$//; s/^[[:space:]]+//; s/[[:space:]]+$//; s/^"(.*)"$/\1/; s/^'"'"'(.*)'"'"'$/\1/')
-[ -n "$value" ] || die "$file has no '${key}:' value"
+[ -f "$file" ] || missing "$file not found: the repo must declare its pipeline config there (see docs)"
+
+line=$(sed -n "s/^${key}:[[:space:]]*//p" "$file" | head -1)
+case "$line" in
+  \"*) line="${line#\"}"; value="${line%%\"*}" ;;
+  \'*) line="${line#\'}"; value="${line%%\'*}" ;;
+  *) value=$(printf '%s\n' "$line" | sed -e 's/^#.*$//' -e 's/[[:space:]]#.*$//' -e 's/[[:space:]]*$//') ;;
+esac
+[ -n "$value" ] || missing "$file has no '${key}:' value"
 printf '%s\n' "$value"

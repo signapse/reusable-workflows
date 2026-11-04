@@ -177,7 +177,9 @@ Terraform must pass before every Promotion (ADR 0002). The composite action
 `actions/terraform-gate` does it in four steps, all stateless:
 
 1. **Product.** Read `product:` from the repo's `.signapse/pipeline.yml`
-   (`pipeline-config.sh`); it names the directory under
+   (`pipeline-config.sh product --required`: a missing file or key fails the
+   gate; without `--required` the script prints nothing, which SIG-2760 uses
+   for optional keys such as `sentry_project`); it names the directory under
    `terragrunt/products/` in signapse-core-terraform.
 2. **Token.** Mint a Prodzilla installation token narrowed to
    signapse-core-terraform with `actions: write` (dispatch, and read runs,
@@ -241,14 +243,18 @@ Call the same action with `environment: prod` before the prod tag commit:
 ```
 
 The job must have checked out the product repo (for `.signapse/pipeline.yml`).
-The `prod` GitHub environment in signapse-core-terraform requires 2 reviewers
-(per its README), so a dispatched prod run waits for approval and the gate
-times out. That protection rule has to change before prod runs unattended
-(manual step for SIG-2769).
+The `prod` GitHub environment in signapse-core-terraform has no required
+reviewers (checked with the API on 2026-11-04: its only protection rule is a
+branch policy, deployments from protected branches only). A prod run
+dispatched on `main` therefore starts without approval. Its README still
+mentions 2 reviewers; if that rule is ever added, the gate times out waiting
+and the prod Deployment stops (it fails safe), so keep the environment
+reviewer-free for unattended Deployments.
 
-### Dev
+### Dev (deviation from SIG-2765, for Alex to confirm)
 
-The gate does not run on dev merges. Dev is not a Promotion: `main-push`
+SIG-2765's summary says Terraform runs before dev, staging and prod. This
+implementation gates staging and prod only. The gate does not run on dev merges. Dev is not a Promotion: `main-push`
 pushes the image and Flux deploys it with no step in between to gate, and
 signapse-core-terraform's `orchestration.yml` already plans and applies the
 changed products in dev when a Terraform PR merges. The spec has Terraform

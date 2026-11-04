@@ -286,14 +286,28 @@ field() { tail -n1 <<< "$output" | jq -r "$1"; }
   [ "$output" = Signstream ]
 }
 
-@test "pipeline-config fails clearly without the file or the key" {
-  run "$S/pipeline-config.sh" product "$TMP/nope.yml"
+@test "pipeline-config --required fails clearly without the file or the key" {
+  run "$S/pipeline-config.sh" product --required "$TMP/nope.yml"
   [ "$status" -ne 0 ]
   [[ "$output" == *"not found"* ]]
   printf 'linear_pipeline: SignStream\n' > "$TMP/p.yml"
-  run "$S/pipeline-config.sh" product "$TMP/p.yml"
+  run "$S/pipeline-config.sh" product --required "$TMP/p.yml"
   [ "$status" -ne 0 ]
   [[ "$output" == *"no 'product:' value"* ]]
+}
+
+@test "pipeline-config without --required prints nothing for a missing key (SIG-2760's optional keys)" {
+  printf 'product: Signstream\n' > "$TMP/p.yml"
+  run "$S/pipeline-config.sh" sentry_project "$TMP/p.yml"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  run "$S/pipeline-config.sh" product "$TMP/nope.yml"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "the gate action reads product with --required" {
+  grep -q 'pipeline-config.sh" product --required' "$BATS_TEST_DIRNAME/../../terraform-gate/action.yml"
 }
 
 # --- terraform-gate-alert.sh ----------------------------------------------
