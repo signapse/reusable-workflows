@@ -53,12 +53,23 @@ if [ -z "$src_digest" ]; then
   exit 1
 fi
 
+# The digest dest names, or nothing when the tag does not exist. Only
+# ImageNotFoundException means "does not exist": any other failure
+# (throttling, a missing permission, the network) stops the script, so a
+# put-image never runs without a confirmed lookup (review fix, SIG-2764).
 dest_digest_of() {
-  aws ecr describe-images \
+  local out
+  if out=$(aws ecr describe-images \
     --repository-name "$REPO" \
     --image-ids imageTag="$DEST" \
-    --output json 2>/dev/null \
-    | jq -r '.imageDetails[0].imageDigest // empty' || true
+    --output json 2> "$tmp/describe.err"); then
+    printf '%s' "$out" | jq -r '.imageDetails[0].imageDigest // empty'
+  elif grep -q ImageNotFoundException "$tmp/describe.err"; then
+    return 0
+  else
+    echo "cannot read $REPO:$DEST: $(cat "$tmp/describe.err")" >&2
+    return 1
+  fi
 }
 
 result() {
@@ -66,22 +77,38 @@ result() {
     '{repository: $r, source_tag: $s, tag: $t, source_digest: $sd, tag_digest: $td}'
 }
 
-dest_digest=$(dest_digest_of)
+dest_digest=$(dest_digest_of) || exit 1
 if [ "$src_digest" = "$dest_digest" ]; then
   echo "no-op: $REPO:$DEST already points at $src_digest"
   result "$dest_digest"
   exit 0
 fi
-if [ -n "$dest_digest" ]; then
-  echo "refusing to move $REPO:$DEST: it points at $dest_digest, not $REPO:$SRC ($src_digest)" >&2
+refuse() {
+  echo "refusing to move $REPO:$DEST: it points at $1, not $REPO:$SRC ($src_digest)." \
+    "If git has no $DEST tag, an earlier Promotion stopped between ECR and git and left it behind;" \
+    "delete that ECR tag (aws ecr batch-delete-image --repository-name $REPO --image-ids imageTag=$DEST) and re-run." >&2
   exit 1
-fi
+}
+[ -z "$dest_digest" ] || refuse "$dest_digest"
 
+# On an IMMUTABLE repository (recommended for release repos) a writer that
+# created the tag after the lookup makes put-image fail with
+# ImageTagAlreadyExistsException; read it back instead of failing blind. A
+# mutable repository cannot close that window: see docs/RELEASE-TRAIN.md.
 put_args=(--repository-name "$REPO" --image-tag "$DEST" --image-manifest "file://$tmp/manifest")
 [ -z "$media_type" ] || put_args+=(--image-manifest-media-type "$media_type")
-aws ecr put-image "${put_args[@]}" > /dev/null
+if ! aws ecr put-image "${put_args[@]}" > /dev/null 2> "$tmp/put.err"; then
+  grep -q ImageTagAlreadyExistsException "$tmp/put.err" || { cat "$tmp/put.err" >&2; exit 1; }
+  dest_digest=$(dest_digest_of) || exit 1
+  if [ "$dest_digest" = "$src_digest" ]; then
+    echo "no-op: $REPO:$DEST was created on $src_digest meanwhile"
+    result "$dest_digest"
+    exit 0
+  fi
+  refuse "${dest_digest:-an unreadable digest}"
+fi
 
-dest_digest=$(dest_digest_of)
+dest_digest=$(dest_digest_of) || exit 1
 if [ "$dest_digest" != "$src_digest" ]; then
   echo "digest mismatch after retag: $REPO:$SRC is $src_digest but $REPO:$DEST is ${dest_digest:-missing}" >&2
   exit 1

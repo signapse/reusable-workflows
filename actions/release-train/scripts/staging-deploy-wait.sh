@@ -9,8 +9,10 @@
 # (signapse-core-k8s workloads/stg/<service>/helmrelease-patch.yaml, the line
 # carrying the {"$imagepolicy": ...} setter). That commit is the only
 # cluster-side fact readable from GitHub without cluster credentials. Then:
-#   * poll VERSION_URL until the value VERSION_JQ picks from its JSON body is
-#     TAG (with or without a leading v) or higher.
+#   * poll every VERSION_URL until the value VERSION_JQ picks from each JSON
+#     body is TAG (with or without a leading v) or higher. One URL per
+#     promoted service that serves one (review fix): one service reporting
+#     the tag says nothing about another's rollout.
 # VERSION_URL is required (review fix, SIG-2764): a Flux commit only says the
 # tag was chosen, not that pods run it, and a fixed sleep let staging tests
 # run against the old pods. No URL fails before any wait.
@@ -22,7 +24,8 @@
 #   GITOPS_REF       branch Flux writes to (default main)
 #   WATCH_PATHS      newline- or comma-separated files in GITOPS_REPO (required)
 #   TAG              release tag to wait for, e.g. 1.2.45 or v1.2.45 (required)
-#   VERSION_URL      URL whose JSON body names the running version (required)
+#   VERSION_URL      newline- or comma-separated URLs whose JSON body names the
+#                    running version, one per service that has one (required)
 #   VERSION_JQ       jq path to that value (default .version)
 #   TIMEOUT_SECONDS  total budget (default 1200)
 #   POLL_SECONDS     poll interval (default 20)
@@ -113,18 +116,26 @@ while :; do
   tick "Flux did not commit ${TAG} (or newer) to: $(printf '%s' "$pending" | paste -sd, -). Check the staging ImagePolicy accepts ${TAG} and no higher semver tag exists in ECR."
 done
 
-# Phase 2: the cluster has applied it.
+# Phase 2: the cluster has applied it, on every service with a version URL.
 need curl
+pending=$(printf '%s\n' "$VERSION_URL" | tr ',' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | grep -v '^$' || true)
 while :; do
-  body=$(curl -fsS --max-time 10 "$VERSION_URL" 2>/dev/null || true)
-  running=$(printf '%s' "$body" | jq -r "($VERSION_JQ) // empty | strings" 2>/dev/null || true)
-  if [[ "$running" != *$'\n'* ]] && at_least "$running"; then
-    log "staging runs ${running} at ${VERSION_URL}"
-    summary "Staging deploy confirmed: ${VERSION_URL} reports \`${running}\` (wanted ${TAG} or newer)."
-    break
-  fi
-  log "waiting for ${VERSION_URL} to report ${TAG} or newer (now '${running}')"
-  tick "${VERSION_URL} never reported ${TAG} (or newer)"
+  still=""
+  while IFS= read -r u; do
+    [ -n "$u" ] || continue
+    body=$(curl -fsS --max-time 10 "$u" 2>/dev/null || true)
+    running=$(printf '%s' "$body" | jq -r "($VERSION_JQ) // empty | strings" 2>/dev/null || true)
+    if [[ "$running" != *$'\n'* ]] && at_least "$running"; then
+      log "staging runs ${running} at ${u}"
+      summary "Staging deploy confirmed: ${u} reports \`${running}\` (wanted ${TAG} or newer)."
+    else
+      log "waiting for ${u} to report ${TAG} or newer (now '${running}')"
+      still+="$u"$'\n'
+    fi
+  done <<< "$pending"
+  pending="$still"
+  [ -n "$pending" ] || break
+  tick "never reported ${TAG} (or newer): $(printf '%s' "$pending" | paste -sd, -)"
 done
 
 log "staging is running ${TAG} or newer"
