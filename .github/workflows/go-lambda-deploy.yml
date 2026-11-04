@@ -59,7 +59,7 @@ on:
         default: 'github.com/signapse/*'
 
       enable_private_repos:
-        description: 'Enable access to private repos using PAT'
+        description: 'Enable access to private signapse/* modules (GitHub App token, or github_pat fallback)'
         required: false
         type: boolean
         default: false
@@ -108,8 +108,12 @@ on:
         default: ''
 
     secrets:
+      CI_GITHUB_APP_PRIVATE_KEY:
+        description: 'Private key of the read-only CI GitHub App (SIG-2792). With the org variable CI_GITHUB_APP_ID it mints a per-run token for private signapse/* modules. Preferred over github_pat.'
+        required: false
+
       github_pat:
-        description: 'GitHub PAT for accessing private repositories'
+        description: 'DEPRECATED fallback: GitHub PAT for private repositories, used only when the App credentials are absent. Remove once every caller passes CI_GITHUB_APP_PRIVATE_KEY.'
         required: false
 
       lambda_function_name_secret:
@@ -133,12 +137,37 @@ jobs:
         with:
           go-version: ${{ inputs.go_version }}
 
+      # Private-module access: mint a read-only GitHub App token when the org
+      # variable CI_GITHUB_APP_ID and the CI_GITHUB_APP_PRIVATE_KEY secret are
+      # both present (secrets go through env because `if:` cannot read them);
+      # otherwise fall back to the PAT secret so unmigrated callers keep working.
+      - name: Check for GitHub App credentials
+        id: app
+        if: ${{ inputs.enable_private_repos }}
+        env:
+          APP_ID: ${{ vars.CI_GITHUB_APP_ID }}
+          APP_KEY: ${{ secrets.CI_GITHUB_APP_PRIVATE_KEY }}
+        run: |
+          if [ -n "$APP_ID" ] && [ -n "$(printf '%s' "$APP_KEY" | tr -d '[:space:]')" ]; then
+            echo "use_app=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Mint read-only GitHub App token
+        id: deps
+        if: ${{ steps.app.outputs.use_app == 'true' }}
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349  # v2.2.2
+        with:
+          app-id: ${{ vars.CI_GITHUB_APP_ID }}
+          private-key: ${{ secrets.CI_GITHUB_APP_PRIVATE_KEY }}
+          owner: signapse
+          permission-contents: read
+
       - name: Configure access to private repos
         if: ${{ inputs.enable_private_repos }}
-        run: |
-          git config --global url."https://${{ secrets.github_pat }}@github.com/".insteadOf "https://github.com/"
         env:
-          GOPRIVATE: ${{ inputs.goprivate }}
+          DEPS_TOKEN: ${{ steps.deps.outputs.token || secrets.github_pat }}
+        run: |
+          git config --global url."https://x-access-token:${DEPS_TOKEN}@github.com/signapse/".insteadOf "https://github.com/signapse/"
 
       - name: Build Lambda function
         run: |
