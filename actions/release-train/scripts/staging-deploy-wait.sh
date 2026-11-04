@@ -10,8 +10,10 @@
 # carrying the {"$imagepolicy": ...} setter). That commit is the only
 # cluster-side fact readable from GitHub without cluster credentials. Then:
 #   * poll VERSION_URL until the value VERSION_JQ picks from its JSON body is
-#     TAG (with or without a leading v) or higher, when set; otherwise
-#   * wait SETTLE_SECONDS for Flux to apply it and roll the pods.
+#     TAG (with or without a leading v) or higher.
+# VERSION_URL is required (review fix, SIG-2764): a Flux commit only says the
+# tag was chosen, not that pods run it, and a fixed sleep let staging tests
+# run against the old pods. No URL fails before any wait.
 # Follow-up: once #39 lands, fold both into one script with an environment
 # parameter (dev matches main-<n>, staging and prod match semver).
 #
@@ -20,9 +22,8 @@
 #   GITOPS_REF       branch Flux writes to (default main)
 #   WATCH_PATHS      newline- or comma-separated files in GITOPS_REPO (required)
 #   TAG              release tag to wait for, e.g. 1.2.45 or v1.2.45 (required)
-#   VERSION_URL      optional URL whose JSON body names the running version
+#   VERSION_URL      URL whose JSON body names the running version (required)
 #   VERSION_JQ       jq path to that value (default .version)
-#   SETTLE_SECONDS   wait after the Flux commit when VERSION_URL is unset (default 420)
 #   TIMEOUT_SECONDS  total budget (default 1200)
 #   POLL_SECONDS     poll interval (default 20)
 # Needs GH_TOKEN with contents:read on GITOPS_REPO.
@@ -37,13 +38,13 @@ need jq
 GITOPS_REPO="${GITOPS_REPO:-signapse/signapse-core-k8s}"
 GITOPS_REF="${GITOPS_REF:-main}"
 : "${TAG:?TAG not set}"
-SETTLE_SECONDS="${SETTLE_SECONDS:-420}"
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-1200}"
 POLL_SECONDS="${POLL_SECONDS:-20}"
 VERSION_URL="${VERSION_URL:-}"
 VERSION_JQ="${VERSION_JQ:-.version}"
 
-for n in "$SETTLE_SECONDS" "$TIMEOUT_SECONDS" "$POLL_SECONDS"; do
+[ -n "$VERSION_URL" ] || die "VERSION_URL (staging_version_url) is required: without it nothing confirms staging runs ${TAG:-the tag}"
+for n in "$TIMEOUT_SECONDS" "$POLL_SECONDS"; do
   case "$n" in "" | *[!0-9]*) die "numeric env expected, got '$n'" ;; esac
 done
 [ "$POLL_SECONDS" -gt 0 ] || die "POLL_SECONDS must be > 0"
@@ -113,26 +114,17 @@ while :; do
 done
 
 # Phase 2: the cluster has applied it.
-if [ -n "$VERSION_URL" ]; then
-  need curl
-  while :; do
-    body=$(curl -fsS --max-time 10 "$VERSION_URL" 2>/dev/null || true)
-    running=$(printf '%s' "$body" | jq -r "($VERSION_JQ) // empty | strings" 2>/dev/null || true)
-    if [[ "$running" != *$'\n'* ]] && at_least "$running"; then
-      log "staging runs ${running} at ${VERSION_URL}"
-      summary "Staging deploy confirmed: ${VERSION_URL} reports \`${running}\` (wanted ${TAG} or newer)."
-      break
-    fi
-    log "waiting for ${VERSION_URL} to report ${TAG} or newer (now '${running}')"
-    tick "${VERSION_URL} never reported ${TAG} (or newer)"
-  done
-else
-  remaining=$((TIMEOUT_SECONDS - elapsed))
-  settle=$SETTLE_SECONDS
-  [ "$settle" -le "$remaining" ] || settle=$remaining
-  log "no VERSION_URL; allowing ${settle}s for Flux to apply the commit and roll pods"
-  summary "**Staging rollout not confirmed by the service: fixed wait used.** Flux committed \`${TAG}\` (or newer); with no \`staging_version_url\` set, waited ${settle}s for the rollout."
-  sleep "$settle"
-fi
+need curl
+while :; do
+  body=$(curl -fsS --max-time 10 "$VERSION_URL" 2>/dev/null || true)
+  running=$(printf '%s' "$body" | jq -r "($VERSION_JQ) // empty | strings" 2>/dev/null || true)
+  if [[ "$running" != *$'\n'* ]] && at_least "$running"; then
+    log "staging runs ${running} at ${VERSION_URL}"
+    summary "Staging deploy confirmed: ${VERSION_URL} reports \`${running}\` (wanted ${TAG} or newer)."
+    break
+  fi
+  log "waiting for ${VERSION_URL} to report ${TAG} or newer (now '${running}')"
+  tick "${VERSION_URL} never reported ${TAG} (or newer)"
+done
 
 log "staging is running ${TAG} or newer"

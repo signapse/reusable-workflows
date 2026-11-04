@@ -136,8 +136,9 @@ on:
         default: ''
       staging_version_url:
         description: >-
-          qa-passed: optional URL whose JSON body names the version staging
-          runs. Unset: a fixed staging_settle_seconds wait after the Flux commit.
+          qa-passed, required for a Promotion: URL whose JSON body names the
+          version staging runs. The Promotion waits until it reports the
+          release tag (or newer); there is no fixed-sleep fallback.
         required: false
         type: string
         default: ''
@@ -146,11 +147,6 @@ on:
         required: false
         type: string
         default: '.version'
-      staging_settle_seconds:
-        description: 'qa-passed: wait after the Flux commit when staging_version_url is unset.'
-        required: false
-        type: number
-        default: 420
       staging_deploy_timeout_minutes:
         description: 'qa-passed: limit on waiting for staging to run the new tag.'
         required: false
@@ -170,6 +166,24 @@ on:
         required: false
         type: string
         default: 'On Staging'
+      on_staging_from:
+        description: >-
+          qa-passed: comma-separated columns a ticket may move to
+          on_staging_state from. A ticket anywhere else (already On Prod,
+          Rolling Out, Done or QA Failed) is not moved back.
+        required: false
+        type: string
+        default: 'On Dev · Ready for QA,Ready for QA,QA in Progress,Ready for Prod'
+      staging_passed_label:
+        description: 'qa-passed: label cleared from the tickets at each Promotion (set again by the staging tests).'
+        required: false
+        type: string
+        default: 'Staging Passed'
+      staging_failed_label:
+        description: 'qa-passed: label cleared from the tickets at each Promotion.'
+        required: false
+        type: string
+        default: 'Staging Failed'
       hotfix_label:
         description: 'qa-passed: Linear label that lets a Promotion run outside the deploy window.'
         required: false
@@ -472,6 +486,7 @@ jobs:
           SERVICES: ${{ inputs.services }}
           IAM_ROLE_ARN: ${{ inputs.iam_role_arn }}
           WATCH_PATHS: ${{ inputs.staging_watch_paths }}
+          VERSION_URL: ${{ inputs.staging_version_url }}
           READ_APP_ID: ${{ inputs.read_app_id }}
         run: |
           set -euo pipefail
@@ -479,6 +494,7 @@ jobs:
           jq -e 'type == "array" and length > 0' <<< "$SERVICES" > /dev/null 2>&1 || missing+=(services)
           [ -n "$IAM_ROLE_ARN" ] || missing+=(iam_role_arn)
           [ -n "$WATCH_PATHS" ] || missing+=(staging_watch_paths)
+          [ -n "$VERSION_URL" ] || missing+=(staging_version_url)
           [ -n "$READ_APP_ID" ] || missing+=(read_app_id)
           if [ "${#missing[@]}" -gt 0 ]; then
             echo "::error::qa-passed Promotion needs these inputs: ${missing[*]} (see docs/RELEASE-TRAIN.md)"
@@ -525,6 +541,21 @@ jobs:
         with:
           role-to-assume: ${{ inputs.iam_role_arn }}
           aws-region: ${{ inputs.aws_region }}
+
+      # A staging verdict belongs to one tag. Clear the tickets' Staging
+      # Passed / Staging Failed before the new tag exists, so an earlier
+      # tag's pass can never vouch for this one if its staging tests never
+      # finish (prod resume checks these labels). Before the tag: a failure
+      # here leaves nothing promoted.
+      - name: Clear earlier staging verdicts
+        if: steps.plan.outputs.deferred == 'false'
+        env:
+          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+          RC_TICKETS: ${{ needs.select.outputs.rc_tickets }}
+          LABELS: ${{ inputs.staging_passed_label }},${{ inputs.staging_failed_label }}
+        run: |
+          set -euo pipefail
+          "$GITHUB_WORKSPACE/_rw/actions/release-train/scripts/ticket-labels-remove.sh" "$LABELS" "$RC_TICKETS"
 
       - name: Tag the Release Candidate (ECR re-put, then git)
         id: tag
@@ -584,7 +615,6 @@ jobs:
           TAG: ${{ steps.plan.outputs.tag }}
           VERSION_URL: ${{ inputs.staging_version_url }}
           VERSION_JQ: ${{ inputs.staging_version_jq }}
-          SETTLE_SECONDS: ${{ inputs.staging_settle_seconds }}
           TIMEOUT_MINUTES: ${{ inputs.staging_deploy_timeout_minutes }}
         run: |
           set -euo pipefail
@@ -597,6 +627,9 @@ jobs:
           LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
           STATE: ${{ inputs.on_staging_state }}
           RC_TICKETS: ${{ needs.select.outputs.rc_tickets }}
+          ALLOWED_FROM: ${{ inputs.on_staging_from }}
+          LINEAR_TEAM_KEY: ${{ inputs.linear_team_key }}
+          QA_FAILED_STATE: ${{ inputs.qa_failed_state }}
         run: |
           set -euo pipefail
           "$GITHUB_WORKSPACE/_rw/actions/release-train/scripts/promotion-tickets.sh" "$STATE" "$RC_TICKETS"
