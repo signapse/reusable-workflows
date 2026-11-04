@@ -69,8 +69,9 @@ from_json=$(printf '%s' "$FROM_STATES" | jq -Rc 'split(",") | map(gsub("^\\s+|\\
 #          superseded by a later passing PR in the same repo
 pr_verdict() {
   local repo="$1" num="$2" pr merged="" state sha runs jobs matched
-  v() { jq -nc --arg ref "${repo}#${num}" --arg repo "$repo" --arg k "$1" --arg m "$merged" --arg t "$2" \
-    '{ref:$ref, repo:$repo, kind:$k, merged:$m, text:$t}'; }
+  sha=""
+  v() { jq -nc --arg ref "${repo}#${num}" --arg repo "$repo" --arg k "$1" --arg m "$merged" --arg sha "$sha" --arg t "$2" \
+    '{ref:$ref, repo:$repo, kind:$k, merged:$m, sha:$sha, text:$t}'; }
   if ! pr=$(gh api "repos/${repo}/pulls/${num}" 2>/dev/null); then
     v block "cannot read ${repo}#${num} (token lacks access?)"
     return
@@ -172,12 +173,15 @@ while IFS= read -r id; do
   # failed PR in the same repo might be superseded, so fetch it only then.
   for ref in $(jq -rn --argjson l "$linked" --argjson c "$CURRENT_PRS" '$l[] | select(. as $x | $c | index($x))'); do
     repo="${ref%#*}"
-    merged=""
+    merged=""; msha=""
     if jq -e --arg r "$repo" 'any(.[]; .kind == "fail" and .repo == $r)' > /dev/null <<<"$verdicts"; then
-      merged=$(gh api "repos/${repo}/pulls/${ref##*#}" --jq '.merged_at // ""' 2>/dev/null || true)
+      if pj=$(gh api "repos/${repo}/pulls/${ref##*#}" 2>/dev/null); then
+        merged=$(jq -r '.merged_at // ""' <<<"$pj")
+        msha=$(jq -r '.merge_commit_sha // ""' <<<"$pj")
+      fi
     fi
-    verdicts=$(jq -c --arg ref "$ref" --arg r "$repo" --arg m "$merged" \
-      '. + [{ref:$ref, repo:$r, kind:"pass", merged:$m, text:"\($ref) is in this build"}]' <<<"$verdicts")
+    verdicts=$(jq -c --arg ref "$ref" --arg r "$repo" --arg m "$merged" --arg sha "$msha" \
+      '. + [{ref:$ref, repo:$r, kind:"pass", merged:$m, sha:$sha, text:"\($ref) is in this build"}]' <<<"$verdicts")
   done
   # A fail is superseded by a pass in the same repo merged strictly after it
   # (ISO-8601 UTC timestamps compare correctly as strings).
@@ -190,6 +194,22 @@ while IFS= read -r id; do
         | if $by then .kind = "superseded" | .text = "\($f.text), superseded by \($by.ref) merged later and passing"
           else . end
       else . end)' <<<"$verdicts")
+  # Same-second merges cannot be ordered by timestamp: order them by
+  # ancestry instead (the pass supersedes only if its merge commit contains
+  # the failed one's).
+  # shellcheck disable=SC2016 # jq bindings, not shell expansion.
+  ties=$(jq -r '. as $all | .[] | select(.kind == "fail" and .sha != "") as $f
+      | $all[] | select(.kind == "pass" and .repo == $f.repo and .merged == $f.merged and .sha != "")
+      | [$f.ref, $f.repo, $f.sha, .ref, .sha] | @tsv' <<<"$decided")
+  while IFS=$'\t' read -r fref frepo fsha pref psha; do
+    [ -n "$fref" ] || continue
+    if [ "$(jq -r --arg r "$fref" '.[] | select(.ref == $r) | .kind' <<<"$decided")" != "fail" ]; then continue; fi
+    st=$(gh api "repos/${frepo}/compare/${fsha}...${psha}" --jq '.status' 2>/dev/null || true)
+    if [ "$st" = "ahead" ]; then
+      decided=$(jq -c --arg r "$fref" --arg by "$pref" 'map(if .ref == $r
+        then .kind = "superseded" | .text = "\(.text), superseded by \($by) merged later and passing" else . end)' <<<"$decided")
+    fi
+  done <<< "$ties"
   blocked=$(jq -r '[.[] | select(.kind == "block" or .kind == "fail") | .text] | join("; ")' <<<"$decided")
   notes=$(jq -r '[.[] | select(.kind != "block" and .kind != "fail" and (.text | endswith("is in this build") | not)) | .text] | join("; ")' <<<"$decided")
   if [ -n "$blocked" ]; then
