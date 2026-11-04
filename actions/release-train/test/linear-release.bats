@@ -302,3 +302,12 @@ EOF
   [ "$status" -ne 0 ]
   [[ "$output" == *"not found"* ]]
 }
+
+@test "since: overlapping literal prefixes (api- vs api-service-) do not mix repos" {
+  jq -nc --arg s0 "$(git rev-parse v0.0.0)" \
+    '{data:{releases:{nodes:[{version:"api-v0.0.0", commitSha:$s0, createdAt:"2020-10-01T00:00:00Z"},
+                             {version:"api-service-v5.0.0", commitSha:"deadbeef", createdAt:"2020-11-02T00:00:00Z"}]}}}' > "$STATE/prev.json"
+  RELEASE_PREFIX="api-" run --separate-stderr "$SCRIPT" v0.0.1 v0.0.1
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.since' <<<"$output")" = "$(git rev-parse v0.0.0)" ]
+}

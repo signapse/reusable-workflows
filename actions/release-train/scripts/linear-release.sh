@@ -98,7 +98,11 @@ if [ -z "$SINCE" ]; then
   # Only this repo's Releases (same prefix): another repo's commit is not here.
   prev=$(gql 'query($pid:ID!,$v:String!,$p:String!,$before:DateTimeOrDuration!){ releases(first:50, orderBy:createdAt, filter:{pipeline:{id:{eq:$pid}}, and:[{version:{neq:$v}}, {version:{startsWith:$p}}], stage:{type:{neq:canceled}}, createdAt:{lt:$before}}){ nodes{ version commitSha createdAt } } }' \
     "$(jq -nc --arg pid "$pipeline_id" --arg v "$VERSION" --arg p "$RELEASE_PREFIX" --arg b "$before" '{pid:$pid, v:$v, p:$p, before:$b}')")
-  latest=$(jq -c '[.releases.nodes[] | select(.commitSha != null and .commitSha != "")] | max_by(.createdAt) // empty' <<<"$prev")
+  # startsWith alone is not proof of the same repo when literal prefixes
+  # overlap (api- vs api-service-): what follows the prefix must be a version.
+  latest=$(jq -c --arg p "$RELEASE_PREFIX" '[.releases.nodes[]
+      | select(.commitSha != null and .commitSha != "")
+      | select(.version | ltrimstr($p) | test("^v?[0-9]"))] | max_by(.createdAt) // empty' <<<"$prev")
   [ -n "$latest" ] || die "pipeline '$pipeline_name' has no earlier Release with a commit; pass 'since' (the last commit deployed to prod) for the first Deployment"
   SINCE=$(jq -r '.commitSha' <<<"$latest")
   git rev-parse --verify -q "${SINCE}^{commit}" > /dev/null \
