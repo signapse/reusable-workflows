@@ -46,13 +46,42 @@ on:
         required: false
         default: 'main'
       release_tag_pattern:
-        description: ERE for Promotion tags; only commits since the last one are reverted.
+        description: ERE for release tags.
         type: string
         required: false
         default: '^v?[0-9]+\.[0-9]+\.[0-9]+$'
+      # Walk base: the tag prod runs, the same base as the release train's
+      # Release Candidate walk (selection-base.sh). A ticket that failed
+      # staging sits in an already-tagged build and must still be reverted.
+      prod_services:
+        description: JSON array of signapse-core-k8s deploy-prod.yml service names (as the release train).
+        type: string
+        required: false
+        default: ''
+      gitops_repo:
+        type: string
+        required: false
+        default: 'signapse/signapse-core-k8s'
+      gitops_ref:
+        type: string
+        required: false
+        default: 'main'
+      read_app_id:
+        description: Read-only pipeline app (contents:read on gitops_repo), as the release train.
+        type: string
+        required: false
+        default: ''
+      selection_base:
+        description: Explicit walk base (tag or sha) instead of the tag prod runs; as the release train.
+        type: string
+        required: false
+        default: ''
     secrets:
       PRODZILLA_APP_PRIVATE_KEY:
         description: Prodzilla GitHub App private key. Required; the run fails without it.
+        required: false
+      READ_APP_PRIVATE_KEY:
+        description: Key of read_app_id; not needed with selection_base.
         required: false
       LINEAR_API_KEY:
         required: true
@@ -103,6 +132,9 @@ jobs:
           repositories: ${{ steps.repo.outputs.name }}
           permission-contents: write
           permission-pull-requests: write
+          # A revert that touches .github/workflows/ cannot be pushed without
+          # it (the app installation must grant Workflows: write too).
+          permission-workflows: write
 
       # The app token is persisted so the script's `git push` is the app's.
       - uses: actions/checkout@v4
@@ -120,6 +152,51 @@ jobs:
           ref: main
           path: _rw
           persist-credentials: false
+
+      - name: Split GitOps repo
+        id: gitops
+        if: inputs.selection_base == ''
+        env:
+          GITOPS_REPO: ${{ inputs.gitops_repo }}
+          READ_APP_ID: ${{ inputs.read_app_id }}
+          PROD_SERVICES: ${{ inputs.prod_services }}
+        run: |
+          set -euo pipefail
+          missing=()
+          jq -e 'type == "array" and length > 0' <<< "$PROD_SERVICES" > /dev/null 2>&1 || missing+=(prod_services)
+          [ -n "$READ_APP_ID" ] || missing+=(read_app_id)
+          [[ "$GITOPS_REPO" == */* ]] || missing+=("gitops_repo as owner/name")
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::The revert walk starts at the tag prod runs and needs: ${missing[*]} (or selection_base). See docs/RELEASE-TRAIN.md"
+            exit 1
+          fi
+          echo "owner=${GITOPS_REPO%%/*}" >> "$GITHUB_OUTPUT"
+          echo "name=${GITOPS_REPO#*/}" >> "$GITHUB_OUTPUT"
+
+      - name: Mint read-only app token
+        id: read
+        if: inputs.selection_base == ''
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ inputs.read_app_id }}
+          private-key: ${{ secrets.READ_APP_PRIVATE_KEY }}
+          owner: ${{ steps.gitops.outputs.owner }}
+          repositories: ${{ steps.gitops.outputs.name }}
+          permission-contents: read
+
+      - name: Find where prod is
+        id: base
+        env:
+          GH_TOKEN: ${{ steps.read.outputs.token }}
+          SELECTION_BASE: ${{ inputs.selection_base }}
+          PROD_SERVICES: ${{ inputs.prod_services }}
+          GITOPS_REPO: ${{ inputs.gitops_repo }}
+          GITOPS_REF: ${{ inputs.gitops_ref }}
+          RELEASE_TAG_PATTERN: ${{ inputs.release_tag_pattern }}
+        run: |
+          set -euo pipefail
+          b=$("$GITHUB_WORKSPACE/_rw/actions/release-train/scripts/selection-base.sh")
+          echo "base=$(jq -r .base <<< "$b")" >> "$GITHUB_OUTPUT"
 
       - name: Commit as the Prodzilla app
         env:
@@ -146,10 +223,11 @@ jobs:
           SLACK_CHANNEL: ${{ inputs.slack_channel }}
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          BASE: ${{ steps.base.outputs.base }}
         run: |
           set -euo pipefail
           status=0
-          res=$("$GITHUB_WORKSPACE/_rw/actions/release-train/scripts/qa-failed-revert.sh" "" HEAD) || status=$?
+          res=$("$GITHUB_WORKSPACE/_rw/actions/release-train/scripts/qa-failed-revert.sh" "$BASE" HEAD) || status=$?
           if [ -z "$res" ]; then
             echo "::error::qa-failed-revert.sh failed before producing a result (exit $status); see the log above."
             exit "$status"
@@ -158,10 +236,10 @@ jobs:
           {
             echo "## QA Failed revert PRs"
             echo
-            echo "Threshold: $(jq -r .threshold_hours <<< "$res")h. Commits since \`$(jq -r .last_tag <<< "$res")\`."
+            echo "Threshold: $(jq -r .threshold_hours <<< "$res")h. Commits since \`$(jq -r .last_tag <<< "$res")\` (the tag prod runs)."
             echo
             if [ "$(jq '.tickets | length' <<< "$res")" -eq 0 ]; then
-              echo "No ticket with commits since the last Promotion is in QA Failed."
+              echo "No ticket with commits since the tag prod runs is in QA Failed."
             else
               echo "| Ticket | In QA Failed | Action | PR | Notes |"
               echo "|---|---|---|---|---|"
