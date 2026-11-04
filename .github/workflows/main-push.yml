@@ -42,6 +42,8 @@ on:
         type: boolean
         default: true
     secrets:
+      CI_GITHUB_APP_PRIVATE_KEY:
+        required: false
       private_modules_token:
         required: false
 
@@ -75,4 +77,5 @@ jobs:
       use_buildx: ${{ inputs.use_buildx }}
       enable_trivy_scan: ${{ inputs.enable_trivy_scan }}
     secrets:
+      CI_GITHUB_APP_PRIVATE_KEY: ${{ secrets.CI_GITHUB_APP_PRIVATE_KEY }}
       private_modules_token: ${{ secrets.private_modules_token }}
