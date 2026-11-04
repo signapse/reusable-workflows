@@ -108,7 +108,7 @@ runs:
         [[ "$TF_REPO" == */* ]] || { echo "::error::terraform_repo must be owner/name (got '$TF_REPO')"; exit 1; }
         product="$PRODUCT_IN"
         if [ -z "$product" ]; then
-          product=$("$GITHUB_ACTION_PATH/../release-train/scripts/pipeline-config.sh" product "$PIPELINE_FILE") \
+          product=$("$GITHUB_ACTION_PATH/../release-train/scripts/pipeline-config.sh" product --required "$PIPELINE_FILE") \
             || { echo "::error::Terraform gate: cannot read product from $PIPELINE_FILE (see the log above)"; exit 1; }
         fi
         {
