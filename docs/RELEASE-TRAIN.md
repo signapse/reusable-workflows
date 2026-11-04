@@ -8,10 +8,15 @@ later tickets (SIG-2764 onwards); for now the train selects and reports.
 
 ## How the Release Candidate is chosen
 
-1. Find the last Promotion: the nearest tag matching `release_tag_pattern`
-   (bare or `v`-prefixed semver by default) on `main`'s first-parent history.
-   A tag on a merged side branch does not count.
-2. Walk `main`'s first-parent commits since that tag, oldest first.
+1. Find where prod is: the release tag prod runs (`selection-base.sh`, which
+   reads each `prod_services` entry's prod file in signapse-core-k8s with
+   `prod-tags.sh`). With several services on different tags, the oldest. After
+   a rollback, prod runs the previous tag again, so that is the base.
+   `selection_base` overrides it, only for the first Deployment through the
+   train, when prod runs a tag this repo does not have.
+2. Walk `main`'s first-parent commits since that tag, oldest first. Release
+   tags already promoted to staging are inside the walk and are checked again
+   on every run.
 3. Read each commit's tickets: `SIG-<n>` refs in the commits it brought in
    (a merge commit includes its branch) plus the title and head branch of its
    merged PR. A ref must end at a non-alphanumeric character, so `SIG-12abc`
@@ -24,17 +29,42 @@ later tickets (SIG-2764 onwards); for now the train selects and reports.
    that commit can be selected; the summary names it under **Blocked by**.
 5. Commits with no ticket (Dependabot, chores) never block. They ride along
    and are listed as untracked.
-6. A commit is a **build** when the caller's `main-push.yml` has a successful
+6. **Reverts** (ADR 0001's 24 h revert, SIG-2766), recognised by git's
+   `This reverts commit <sha>` line (`lib/revert.sh`):
+   - A commit reverted later in the walk does not block, and its tickets are
+     not in the candidate. It is listed under **Reverted**. Builds between it
+     and its revert are not selectable: they still contain its code.
+   - A revert commit, or a merged revert PR whose commits are all reverts,
+     never blocks, whatever ticket its message, PR title or branch names
+     (`prodzilla/revert-SIG-n`). It rides along as untracked.
+   - A revert that is itself reverted (a re-land) does not count: the
+     original commit and the re-land block again until QA passes the ticket.
+   - A ticket with any commit that is not reverted still blocks there.
+7. A commit is a **build** when the caller's `main-push.yml` has a successful
    run for it on `main`. Its image tag is `main-<run_number>-<sha>`, the tag
    main-push gives every service image. The Release Candidate is the last
    build before the walk stopped.
 
+Why walk from prod and not from the last Promotion tag: a tag that failed
+staging, or that prod rolled back from, leaves its tickets in `QA Failed`
+behind that tag. Walking from it would let the next Release Candidate carry
+their code to staging and prod while they are still failed (ADR 0001: only QA
+takes a ticket out of QA Failed). From prod's tag, those tickets stop the line
+until QA re-passes them or their commits are reverted.
+
 Selection reads git, Linear and GitHub afresh each run and ignores which
 ticket triggered it. So the hourly run picks the same build as the
 label-triggered run did, and picks up a QA Passed event that was missed. If
-nothing selectable has landed since the last Promotion, the outcome is `none`.
-If the Release Candidate already carries a release tag, the outcome is
-`already_promoted`. Later stages should do nothing in either case.
+nothing selectable has landed since prod's tag, the outcome is `none`. If the
+Release Candidate already carries a release tag (it was promoted and nothing
+newer is selectable), the outcome is `already_promoted`; the promote stage
+does nothing then.
+
+`rc_tickets` are all the live tickets from prod's tag to the Release
+Candidate, not only the ones new since the last Promotion. Staging tests and
+prod act on that same set. `staged_tag` and `staged_tickets` name the newest
+selectable build that already carries a release tag (and its tickets from
+prod's tag): what prod deploys when a run promotes nothing new.
 
 ### Why a successful main-push run, not an ECR lookup
 
@@ -53,9 +83,13 @@ If the Release Candidate already carries a release tag, the outcome is
 | `outcome` | `selected` | `selected`, `already_promoted` or `none` |
 | `rc_sha` | `4f1c…` | Release Candidate commit, empty when none |
 | `rc_image_tag` | `main-212-4f1c…` | Image tag to re-tag (no rebuild) |
-| `rc_tickets` | `SIG-1,SIG-2` | Tickets in the Release Candidate (signapse-e2e `tickets` format) |
+| `rc_tickets` | `SIG-1,SIG-2` | Every live ticket from prod's tag to the Release Candidate (signapse-e2e `tickets` format) |
 | `untracked_commits` | `[{"sha":"…","subject":"chore(deps): …"}]` | Ticketless commits riding along |
 | `blocked_by` | `SIG-3` | Ticket that stopped the line, empty when none |
+| `selection_base` | `1.2.40` | Where the walk started: the release tag prod runs |
+| `rc_release_tag` | `1.2.44` | Release tag already on the Release Candidate (`already_promoted`), else empty |
+| `staged_tag` | `1.2.44` | Newest selectable build already carrying a release tag, empty when none |
+| `staged_tickets` | `SIG-1,SIG-2` | Tickets from `selection_base` to `staged_tag` |
 | `selection` | JSON | Everything above plus every walked commit, its tickets and build, and the blocking commit (`blocked_by.sha`) |
 
 The job summary shows the same data with links.
@@ -111,12 +145,16 @@ jobs:
       ticket: ${{ inputs.ticket }}
       trigger_id: ${{ inputs.trigger_id }}
       # build_workflow: main-push.yml   # if the build workflow has another file name
+      prod_services: '["signstream-api","signstream-websocket"]'   # deploy-prod.yml service names
+      read_app_id: ${{ vars.PIPELINE_READ_APP_ID }}
     secrets:
       LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+      READ_APP_PRIVATE_KEY: ${{ secrets.READ_APP_PRIVATE_KEY }}
 ```
 
 Optional inputs: `qa_passed_label`, `qa_failed_state`, `build_workflow`,
-`release_branch`, `release_tag_pattern`, `linear_team_key`. The Linear defaults
+`release_branch`, `release_tag_pattern`, `linear_team_key`, `gitops_repo`,
+`gitops_ref`, `selection_base`. The Linear defaults
 match the board after SIG-2747.
 
 ### Note for stages that dispatch other workflows (SIG-2765)
@@ -137,8 +175,9 @@ verdict. Do not report a Terraform failure or block the Promotion on it.
 - The image is environment-agnostic: config comes at runtime, not baked in at
   build time. Later stages re-tag the selected image for staging and prod with
   no rebuild, so a dev-configured image would ship dev config.
-- A release tag on `main` to start from. Seed one with
-  `git tag 0.0.0 <sha> && git push origin 0.0.0` if there is none.
+- Prod runs a release tag of this repo on every `prod_services` entry, or
+  `selection_base` is set for the first Deployment through the train.
+- The read-only pipeline app (ADR 0005) is installed on signapse-core-k8s.
 
 Repos that do not meet these yet stay on `ready-for-prod`:
 

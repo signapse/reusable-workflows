@@ -366,3 +366,133 @@ a_then_b() {
   [ "$status" -ne 0 ]
   grep -q "no tag matching" "$TMP/stderr"
 }
+
+# --- Walk from the tag prod runs (finding: failed-staging tag then N+1) ---
+
+@test "a tag that failed staging keeps stopping the line for the next candidate" {
+  # Prod runs 1.0.0. 1.0.1 (SIG-1) was promoted, failed staging: SIG-1 is in
+  # QA Failed. SIG-2 then passes QA on dev.
+  commit "feat(SIG-1): A"; built "feat(SIG-1): A" 11
+  git tag 1.0.1
+  commit "feat(SIG-2): B"; built "feat(SIG-2): B" 12
+  ticket SIG-1 "QA Failed" "QA Passed" "Staging Failed"
+  ticket SIG-2 "On Dev · Ready for QA" "QA Passed"
+  # Walking from the last Promotion (old behaviour) would select B:
+  run select_rc
+  echo "$output" | jq -e --arg b "$(sha_of "feat(SIG-2): B")" '.base == "1.0.1" and .rc.sha == $b' > /dev/null
+  # From the tag prod runs, SIG-1 stops the line: nothing is selectable.
+  run select_rc 1.0.0
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.base == "1.0.0" and .last_release_tag == "1.0.1"' > /dev/null
+  echo "$output" | jq -e '.outcome == "none" and .rc == null and .blocked_by.id == "SIG-1"' > /dev/null
+}
+
+@test "from the prod tag, tickets cover every commit not in prod yet" {
+  commit "feat(SIG-1): A"; built "feat(SIG-1): A" 11
+  git tag 1.0.1
+  commit "feat(SIG-2): B"; built "feat(SIG-2): B" 12
+  ticket SIG-1 "On Staging" "QA Passed" "Staging Passed"
+  ticket SIG-2 "On Dev · Ready for QA" "QA Passed"
+  run select_rc 1.0.0
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.outcome == "selected" and [.tickets[].id] == ["SIG-1","SIG-2"]' > /dev/null
+  # The newest build that already carries a release tag is what prod may resume.
+  echo "$output" | jq -e --arg a "$(sha_of "feat(SIG-1): A")" \
+    '.staged == {sha: $a, image_tag: "main-11-\($a)", release_tag: "1.0.1", tickets: ["SIG-1"]}' > /dev/null
+}
+
+@test "already_promoted: the newest selectable build is the tag on staging" {
+  commit "feat(SIG-1): A"; built "feat(SIG-1): A" 11
+  git tag 1.0.1
+  commit "feat(SIG-2): B"; built "feat(SIG-2): B" 12
+  ticket SIG-1 "On Staging" "QA Passed"
+  ticket SIG-2 "On Dev · Ready for QA"
+  run select_rc 1.0.0
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.outcome == "already_promoted" and .rc.release_tag == "1.0.1"' > /dev/null
+  echo "$output" | jq -e '.staged.release_tag == "1.0.1" and .blocked_by.id == "SIG-2"' > /dev/null
+}
+
+@test "a base that is not on the branch is an error" {
+  git checkout -q -b side; commit "side"; git tag 5.0.0; git checkout -q main
+  run select_rc 5.0.0
+  [ "$status" -ne 0 ]
+  grep -q "not in HEAD's history" "$TMP/stderr"
+}
+
+# --- Reverts (ADR 0001 24 h revert, SIG-2766) ---
+
+# revert_of <subject-of-target> <message>: an empty commit carrying git's trailer.
+revert_of() {
+  git commit -q --allow-empty -m "$2" -m "This reverts commit $(sha_of "$1")."
+}
+
+@test "a QA Failed ticket whose commit is reverted no longer blocks" {
+  commit "feat(SIG-1): A"; built "feat(SIG-1): A" 11
+  commit "feat(SIG-2): B"; built "feat(SIG-2): B" 12
+  revert_of "feat(SIG-1): A" 'Revert "feat(SIG-1): A"'; built 'Revert "feat(SIG-1): A"' 13
+  ticket SIG-1 "QA Failed" "QA Passed"
+  ticket SIG-2 "On Dev · Ready for QA" "QA Passed"
+  run select_rc
+  [ "$status" -eq 0 ]
+  r=$(sha_of 'Revert "feat(SIG-1): A"')
+  echo "$output" | jq -e --arg r "$r" '.outcome == "selected" and .rc.sha == $r and .blocked_by == null' > /dev/null
+  echo "$output" | jq -e '[.tickets[].id] == ["SIG-2"]' > /dev/null
+  echo "$output" | jq -e --arg r "$r" '.reverted == [{sha: .reverted[0].sha, subject: "feat(SIG-1): A", tickets: ["SIG-1"], reverted_by: [$r]}]' > /dev/null
+  echo "$output" | jq -e '[.untracked_commits[] | select(.revert)] | length == 1' > /dev/null
+  # Linear is never asked about SIG-1: neither the reverted commit nor the revert block.
+  ! grep -qx SIG-1 "$TMP/linear-calls"
+}
+
+@test "builds between a reverted commit and its revert are not selectable" {
+  commit "feat(SIG-1): A"; built "feat(SIG-1): A" 11
+  commit "feat(SIG-2): B"; built "feat(SIG-2): B" 12
+  ticket SIG-1 "QA Failed"
+  ticket SIG-2 "On Dev · Ready for QA" "QA Passed"
+  revert_of "feat(SIG-1): A" 'Revert "feat(SIG-1): A"'
+  # The revert has no build yet: B's build still contains A, so nothing.
+  run select_rc
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.outcome == "none" and .rc == null and .blocked_by == null' > /dev/null
+}
+
+@test "a merged revert PR naming the ticket in its title and branch does not block" {
+  git checkout -q -b prodzilla/revert-SIG-1
+  commit "feat(SIG-1): A"
+  git checkout -q main
+  git merge -q --no-ff prodzilla/revert-SIG-1 -m "Merge pull request #7 from o/feature-sig-1"
+  built "Merge pull request #7 from o/feature-sig-1" 11
+  git checkout -q -b revert-branch
+  git revert -m 1 --no-edit HEAD > /dev/null 2>&1 || git commit -q --allow-empty -m 'Revert "Merge pull request #7"' -m "This reverts commit $(git rev-parse main)."
+  git checkout -q main
+  git merge -q --no-ff revert-branch -m "Merge pull request #8 from o/prodzilla/revert-SIG-1"
+  built "Merge pull request #8 from o/prodzilla/revert-SIG-1" 12
+  pr "Merge pull request #8 from o/prodzilla/revert-SIG-1" "Revert SIG-1: A" "prodzilla/revert-SIG-1"
+  ticket SIG-1 "QA Failed"
+  run select_rc
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.outcome == "selected" and .tickets == [] and .blocked_by == null' > /dev/null
+  echo "$output" | jq -e --arg m "$(sha_of "Merge pull request #8 from o/prodzilla/revert-SIG-1")" '.rc.sha == $m' > /dev/null
+}
+
+@test "a ticket with a live commit next to a reverted one still blocks" {
+  commit "feat(SIG-1): A"; built "feat(SIG-1): A" 11
+  revert_of "feat(SIG-1): A" 'Revert "feat(SIG-1): A"'; built 'Revert "feat(SIG-1): A"' 12
+  commit "fix(SIG-1): A again"; built "fix(SIG-1): A again" 13
+  ticket SIG-1 "QA Failed"
+  run select_rc
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e --arg r "$(sha_of 'Revert "feat(SIG-1): A"')" '.rc.sha == $r and .blocked_by.id == "SIG-1"' > /dev/null
+}
+
+@test "a re-land (revert of the revert) brings the code back and blocks again" {
+  commit "feat(SIG-1): A"; built "feat(SIG-1): A" 11
+  revert_of "feat(SIG-1): A" 'Revert "feat(SIG-1): A"'; built 'Revert "feat(SIG-1): A"' 12
+  revert_of 'Revert "feat(SIG-1): A"' 'Revert "Revert "feat(SIG-1): A""'; built 'Revert "Revert "feat(SIG-1): A""' 13
+  ticket SIG-1 "QA Failed"
+  run select_rc
+  [ "$status" -eq 0 ]
+  # A is live again, so it blocks at A itself: nothing is selectable.
+  echo "$output" | jq -e '.rc == null and .blocked_by.id == "SIG-1"' > /dev/null
+  echo "$output" | jq -e --arg a "$(sha_of "feat(SIG-1): A")" '.blocked_by.sha == $a' > /dev/null
+}
