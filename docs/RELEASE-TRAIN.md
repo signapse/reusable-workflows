@@ -327,9 +327,13 @@ re-selects.
 `'true'` (see the template below).
 
 1. **Suite.** It calls signapse-e2e (`playwright.yml@main`, ADR 0002) with
-   `environment: staging` and `tickets` = the Release Candidate's tickets. On
-   staging the suite runs those tickets' tests, `@smoke`, and the product
-   suites the tickets' Linear labels point at, not the whole suite.
+   `environment: staging` and `tickets` = the train's `rc_tickets`: every
+   live ticket from the tag prod runs to the Release Candidate, not only the
+   ones new since the last Promotion. A tag that passed staging but has not
+   reached prod is tested again with the new one, and the verdict lands on
+   the same set prod deploys. On staging the suite runs those tickets' tests,
+   `@smoke`, and the product suites the tickets' Linear labels point at, not
+   the whole suite.
 2. **Verdict** (job "Staging verdict", runs whatever the suite did,
    `scripts/staging-verdict.sh`). Pass means the suite job succeeded *and*
    reported `passed`. A failure, an error, a cancelled run (the suite reports
@@ -337,9 +341,13 @@ re-selects.
    - Pass: every ticket gets `Staging Passed`, loses `Staging Failed`, and
      gets a comment with the run and report links. The column stays On
      Staging.
-   - Fail: every ticket gets `Staging Failed`, loses `Staging Passed`, gets
-     the comment and moves to `QA Failed` (ADR 0001: the pipeline cannot
-     blame one ticket). A Slack alert goes to `slack_channel`. The run fails.
+   - Fail: every ticket gets `Staging Failed`, loses `Staging Passed` and
+     `QA Passed`, gets the comment and moves to `QA Failed` (ADR 0001: the
+     pipeline cannot blame one ticket). QA approval does not survive QA
+     Failed (spec "Board and labels"): without this, a fix merged later
+     would be selectable on the old approval. A ticket in `Done` (a
+     follow-up commit) stays in Done. A Slack alert goes to `slack_channel`.
+     The run fails.
 3. **Outputs.** `staging_passed` is `'true'` only on a pass that was recorded
    on every ticket; `report_url` links the Playwright report. Production
    (SIG-2769) runs only when `staging_passed == 'true'`.
@@ -362,7 +370,8 @@ that will be skipped. Referencing signapse-e2e from `release-train.yml` would
 make every legacy `ready-for-prod` caller depend on it.
 
 Inputs: `tickets` (required), `slack_channel` (required), `release_tag`,
-`staging_passed_label`, `staging_failed_label`, `qa_failed_state`. Secrets:
+`staging_passed_label`, `staging_failed_label`, `qa_failed_state`,
+`qa_passed_label`, `linear_team_key`. Secrets:
 `LINEAR_API_KEY`, `SLACK_BOT_TOKEN`, and the four forwarded to the suite
 (`E2E_STAGING_SIGNSTUDIO_ADMIN_API_TOKEN`, `E2E_STAGING_SIGNSTUDIO_USER_EMAIL`,
 `E2E_STAGING_SIGNSTUDIO_USER_PASSWORD`, `E2E_LINEAR_API_KEY`).
@@ -453,6 +462,8 @@ jobs:
     needs: train
     if: needs.train.outputs.promoted == 'true'
     uses: signapse/reusable-workflows/.github/workflows/release-train-staging.yml@main
+    permissions:
+      contents: read     # every job inside needs only this; do not hand it the train's writes
     with:
       tickets: ${{ needs.train.outputs.rc_tickets }}
       release_tag: ${{ needs.train.outputs.release_tag }}

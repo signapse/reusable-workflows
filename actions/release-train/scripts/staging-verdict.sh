@@ -11,8 +11,11 @@
 #   passed  every ticket gets STAGING_PASSED_LABEL, loses STAGING_FAILED_LABEL,
 #           and gets a comment with the run and report links. The column is
 #           not touched (tickets stay On Staging).
-#   failed  every ticket gets STAGING_FAILED_LABEL, loses STAGING_PASSED_LABEL,
-#           gets the comment and moves to QA_FAILED_STATE (Ticket Transitioner).
+#   failed  every ticket gets STAGING_FAILED_LABEL, loses STAGING_PASSED_LABEL
+#           and QA_PASSED_LABEL (QA approval does not survive QA Failed:
+#           ADR 0001, spec "Board and labels"; otherwise a fix merged later
+#           would ride on the old approval), gets the comment and moves to
+#           QA_FAILED_STATE (Ticket Transitioner, never out of Done).
 #           A Slack alert goes to SLACK_CHANNEL.
 #
 # Labels are added and removed one at a time (issueAddLabel/issueRemoveLabel),
@@ -36,7 +39,7 @@
 #   RC_TICKETS         comma-separated tickets (SIG-1,SIG-2); empty = none
 #   REPOSITORY, RELEASE_TAG   shown in the comment and alert
 #   STAGING_PASSED_LABEL (Staging Passed), STAGING_FAILED_LABEL (Staging Failed),
-#   QA_FAILED_STATE (QA Failed)
+#   QA_FAILED_STATE (QA Failed), QA_PASSED_LABEL (QA Passed), LINEAR_TEAM_KEY
 #   SLACK_CHANNEL, SLACK_BOT_TOKEN   required when the verdict is failed
 #   LINEAR_API_KEY     required when there are tickets
 
@@ -54,16 +57,17 @@ need curl
 PASSED_LABEL="${STAGING_PASSED_LABEL:-Staging Passed}"
 FAILED_LABEL="${STAGING_FAILED_LABEL:-Staging Failed}"
 QA_FAILED="${QA_FAILED_STATE:-QA Failed}"
+QA_PASSED="${QA_PASSED_LABEL:-QA Passed}"
 JOB="${SUITE_JOB_RESULT:-}"
 SUITE="${SUITE_RESULT:-}"
 REPORT="${REPORT_URL:-}"
 WHAT="${REPOSITORY:-this repo}${RELEASE_TAG:+ \`$RELEASE_TAG\`}"
 
 if [ "$JOB" = success ] && [ "$SUITE" = passed ]; then
-  verdict=passed; add="$PASSED_LABEL"; drop="$FAILED_LABEL"
+  verdict=passed; add="$PASSED_LABEL"; drop=$(jq -nc --arg a "$FAILED_LABEL" '[$a]')
   reason="signapse-e2e passed on staging"
 else
-  verdict=failed; add="$FAILED_LABEL"; drop="$PASSED_LABEL"
+  verdict=failed; add="$FAILED_LABEL"; drop=$(jq -nc --arg a "$PASSED_LABEL" --arg b "$QA_PASSED" '[$a, $b]')
   case "$JOB" in
     success|failure)
       if [ "$SUITE" = failed ]; then reason="signapse-e2e failed on staging (tests failed or the suite could not run)"
@@ -137,13 +141,15 @@ record_ticket() {
     log "$id: added '$add'"
   fi
 
-  drop_ids=$(jq -r --arg n "$drop" '.issue.labels.nodes[] | select((.name | ascii_downcase) == ($n | ascii_downcase)) | .id' <<< "$data")
-  for lid in $drop_ids; do
+  drop_ids=$(jq -r --argjson n "$drop" '($n | map(ascii_downcase)) as $d
+    | .issue.labels.nodes[] | select((.name | ascii_downcase) as $x | $d | index($x)) | "\(.id)\t\(.name)"' <<< "$data")
+  while IFS=$'\t' read -r lid lname; do
+    [ -n "$lid" ] || continue
     # shellcheck disable=SC2016 # GraphQL variables, not shell expansion.
     mutate issueRemoveLabel 'mutation($id:String!,$l:String!){issueRemoveLabel(id:$id,labelId:$l){success}}' \
       "$(jq -nc --arg id "$uuid" --arg l "$lid" '{id:$id, l:$l}')" || return 1
-    log "$id: removed '$drop'"
-  done
+    log "$id: removed '$lname'"
+  done <<< "$drop_ids"
 
   # Same run, same verdict: already commented (re-run). A re-run with another
   # verdict comments again, because the labels changed.
