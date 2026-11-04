@@ -11,6 +11,8 @@
 # Verdict -> gate:
 #   no_changes            pass     nothing to apply
 #   safe + applied        pass     creates/updates only, applied by the run
+#                                  (both only when the run concluded success:
+#                                  a passing artifact from a failed run fails)
 #   blocked               blocked  destroy, replace or unrecognised action;
 #                                  nothing applied, a human must review
 #   failed                failed   plan or apply error
@@ -35,7 +37,9 @@
 #   TF_WORKFLOW      default terraform-deploy.yml
 #   TF_REF           ref to dispatch on, default main
 #   TF_REGION        eu | us, default eu
-#   TIMEOUT_SECONDS  budget for finding + waiting, all dispatches (default 2700)
+#   TIMEOUT_SECONDS  budget for finding + waiting, all dispatches (default 2700).
+#                    Wall clock, API calls included, so the caller can keep it
+#                    inside the GitHub App token's hour.
 #   FIND_TIMEOUT_SECONDS  per dispatch, until the run shows up (default 300)
 #   POLL_SECONDS     default 30
 #   MAX_DISPATCHES   default 4 (first dispatch + 3 re-dispatches)
@@ -86,6 +90,7 @@ run_url=""
 conclusion=""
 verdict_json='{}'
 elapsed=0
+started=$SECONDS
 
 # result <gate> <reason>: print the result object and stop.
 result() {
@@ -102,9 +107,11 @@ result() {
   exit 0
 }
 
-# tick: one poll interval, or false when the overall budget is spent.
+# tick: one poll interval, or false when the overall budget is spent. The
+# budget counts both the sleeps and the wall clock (gh calls, downloads).
 tick() {
   [ "$elapsed" -lt "$TIMEOUT_SECONDS" ] || return 1
+  [ $((SECONDS - started)) -lt "$TIMEOUT_SECONDS" ] || return 1
   sleep "$POLL_SECONDS"
   elapsed=$((elapsed + POLL_SECONDS))
 }
@@ -198,6 +205,9 @@ while :; do
     || result failed "verdict is for ${got}, not ${PRODUCT}/${ENVIRONMENT}"
 
   verdict=$(jq -r '.verdict // ""' <<< "$verdict_json")
+  if { [ "$verdict" = no_changes ] || [ "$verdict" = safe ]; } && [ "$conclusion" != success ]; then
+    result failed "the verdict says ${verdict}, but the Terraform run concluded ${conclusion:-?}; check the run"
+  fi
   case "$verdict" in
     no_changes) result pass "no infrastructure changes" ;;
     safe)
@@ -208,7 +218,8 @@ while :; do
     failed)
       if [ "$stale_retried" = false ] \
         && [ "$(jq -r '.apply_attempted == true and .applied != true' <<< "$verdict_json")" = true ] \
-        && gh run view "$run_id" -R "$TF_REPO" --log-failed 2> /dev/null | grep -qi 'saved plan is stale'; then
+        && gh run view "$run_id" -R "$TF_REPO" --log-failed > "$work/log" 2> /dev/null \
+        && grep -qi 'saved plan is stale' "$work/log"; then
         log "run ${run_id}: saved plan went stale (another apply ran in between); re-dispatching once"
         stale_retried=true
         continue

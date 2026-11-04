@@ -66,11 +66,12 @@ repo_re=$(printf '%s' "$TF_REPO" | sed 's/\./\\./g')
 # applied <product> <merged_at> <merge_sha>: exit 0 when applied (see 3.).
 applied() {
   local p="$1" merged_at="$2" sha="$3" runs
-  runs=$(gh api "repos/${TF_REPO}/actions/workflows/${TF_WORKFLOW}/runs?branch=main&status=success&created=>=${merged_at}&per_page=100") \
+  # Every page: runs for other products can push P's apply past the first.
+  runs=$(gh api --paginate "repos/${TF_REPO}/actions/workflows/${TF_WORKFLOW}/runs?branch=main&status=success&created=>=${merged_at}&per_page=100") \
     || die "cannot list ${TF_WORKFLOW} runs on ${TF_REPO}"
   # shellcheck disable=SC2016 # jq bindings, not shell expansion.
-  if jq -e --arg p "$p" --arg env "$ENVIRONMENT" --arg region "$TF_REGION" --arg since "$merged_at" '
-      [.workflow_runs[]?
+  if jq -se --arg p "$p" --arg env "$ENVIRONMENT" --arg region "$TF_REGION" --arg since "$merged_at" '
+      [.[].workflow_runs[]?
        | select(.head_branch == "main" and .conclusion == "success" and .created_at >= $since)
        | .display_title
        | select(test("^Terraform (plan\\+apply|apply) (" + $p + "|all) \\(" + $env + "/" + $region + "\\)"))]
@@ -91,12 +92,15 @@ checked='[]'
 while IFS= read -r t; do
   [ -n "$t" ] || continue
   # shellcheck disable=SC2016 # GraphQL variable, not shell expansion.
-  resp=$(linear_query 'query($id:String!){issue(id:$id){identifier attachments{nodes{url}}}}' \
+  resp=$(linear_query 'query($id:String!){issue(id:$id){identifier attachments(first:250){nodes{url} pageInfo{hasNextPage}}}}' \
     "$(jq -nc --arg id "$t" '{id:$id}')") || die "Linear query for $t failed"
   urls=$(jq -r '
     if ((.errors // []) | length > 0) or .data.issue == null then error("no issue")
     else .data.issue.attachments.nodes[]?.url end' <<< "$resp" 2> /dev/null) \
     || die "Linear returned no issue for $t: $resp"
+  # Fail closed rather than miss a Terraform PR on a later page.
+  [ "$(jq -r '.data.issue.attachments.pageInfo.hasNextPage // false' <<< "$resp")" != true ] \
+    || die "$t has more than 250 attachments; cannot check them all for Terraform PRs"
 
   prs=$(printf '%s\n' "$urls" | grep -ioE "^https://github\.com/${repo_re}/pull/[0-9]+" | sed -E 's#.*/##' | sort -un || true)
   for n in $prs; do

@@ -184,7 +184,12 @@ Terraform must pass before every Promotion (ADR 0002). The composite action
    (`pipeline-config.sh product --required`: a missing file or key fails the
    gate; without `--required` the script prints nothing, which SIG-2760 uses
    for optional keys such as `sentry_project`); it names the directory under
-   `terragrunt/products/` in signapse-core-terraform.
+   `terragrunt/products/` in signapse-core-terraform. Nothing on this side
+   binds a repo to its product: a repo whose file names another product
+   would plan and apply that product's stack (creates and updates only).
+   Binding repo to product belongs in signapse-core-terraform's dispatch
+   entry point (an allow-list per caller repo); until it exists, review
+   changes to `.signapse/pipeline.yml` like workflow changes.
 2. **Token.** Mint a Prodzilla installation token narrowed to
    signapse-core-terraform with `actions: write` (dispatch, and read runs,
    logs and the artifact) and `pull-requests: read` (step 4). The train never
@@ -193,14 +198,17 @@ Terraform must pass before every Promotion (ADR 0002). The composite action
    `terraform-deploy.yml` on `main` with `product`, `environment`,
    `region: eu`, `action: plan`, `apply: true` and a unique `run_key`
    (`<repo>-<run_id>-<attempt>-<env>-<n>`). Find the run whose title carries
-   `[run_key]`, wait for it (`terraform_timeout_minutes`, default 45) and read
-   `verdict.json` from its `terraform-verdict` artifact:
+   `[run_key]`, wait for it (`terraform_timeout_minutes`, default 45, at most
+   50: wall clock including API calls, so the hour-long Prodzilla token
+   outlives the wait and step 4) and read `verdict.json` from its
+   `terraform-verdict` artifact:
 
    | Verdict | Gate |
    |---|---|
-   | `no_changes` | pass, nothing applied |
-   | `safe` and `applied` | pass, the run applied the creates and updates |
-   | `blocked` | stop; Slack names the product, environment and every destroyed, replaced or unclassified resource |
+   | `no_changes`, run concluded `success` | pass, nothing applied |
+   | `safe` and `applied`, run concluded `success` | pass, the run applied the creates and updates |
+   | `no_changes` or `safe` from a run that did not conclude `success` | stop; Slack names the conclusion |
+   | `blocked` | stop; Slack names the product, environment and the destroyed, replaced or unclassified resources (25 of each, then a count); the job summary lists them all |
    | `failed`, missing artifact, wrong product/environment, timeout | stop; Slack names the reason |
 
    A run that concludes `cancelled` was superseded in its concurrency group
@@ -211,10 +219,12 @@ Terraform must pass before every Promotion (ADR 0002). The composite action
 4. **Unapplied Terraform PRs** (`terraform-pending.sh`, AC4). For each ticket
    in the Release Candidate, its Linear attachments that link a
    signapse-core-terraform PR. A merged PR is applied in the environment if,
-   for every product it changes (`terragrunt/products/<P>/`; other
+   for every product it changes (every attachment is read; a ticket with more
+   than 250 fails the gate rather than skip any) (`terragrunt/products/<P>/`; other
    `terraform/` or `terragrunt/` paths count as the promoted product), a
    successful `terraform-deploy.yml` apply run on `main` for that product (or
-   `all`) and environment was created after the PR merged. A dispatch on
+   `all`) and environment was created after the PR merged (every page of runs
+   since the merge is read). A dispatch on
    `main` runs main's tip, so it contains every PR merged before it. In `dev`,
    orchestration's merge-apply run on the PR's merge commit also counts. This
    runs after step 3, so the gate's own run covers the promoted product; what
@@ -223,6 +233,9 @@ Terraform must pass before every Promotion (ADR 0002). The composite action
    orchestration.yml are not counted (their runs do not record which PR or
    environment they applied); dispatch `terraform-deploy.yml` for that
    product to clear the block.
+
+Any stop posts the Slack alert, including one before the gate had a verdict
+(missing inputs, product lookup, token mint).
 
 The gate runs on every Promotion inside the window. Applying a safe plan
 before a later check stops the Promotion is fine: infrastructure may run

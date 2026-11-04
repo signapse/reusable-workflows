@@ -5,7 +5,8 @@
 # payload that stops the Promotion. The result is terraform-gate.sh's object,
 # with `gate` one of:
 #   blocked    names the product, environment and every destroyed, replaced
-#              or unclassified resource (first 25 of each)
+#              or unclassified resource (first 25 of each, then a count; the
+#              job summary lists them all)
 #   failed     names the product, environment and the reason
 #   unapplied  terraform-pending.sh's `pending` list is merged in: names each
 #              ticket, its unapplied Terraform PR and the products
