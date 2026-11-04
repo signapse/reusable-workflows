@@ -23,9 +23,12 @@ later tickets (SIG-2764 onwards); for now the train selects and reports.
    is not a ticket. PR bodies are ignored, because they often mention related
    tickets.
 4. Stop at the first commit with a ticket that is in the `QA Failed` column,
-   lacks the `QA Passed` label, or is missing from Linear. If Linear fails or
-   returns errors or incomplete data, the run fails; it never selects past a
-   ticket it could not read. Nothing at or past
+   lacks the `QA Passed` label, or is missing from Linear. Missing means
+   Linear answered `issue: null` (how it reports an unknown identifier, with
+   or without GraphQL errors): that ticket blocks, and the run succeeds. A
+   failed call, an unparsable reply, GraphQL errors next to issue data, or an
+   issue lacking its state or labels fail the run instead; it never selects
+   past a ticket it could not read. Nothing at or past
    that commit can be selected; the summary names it under **Blocked by**.
 5. Commits with no ticket (Dependabot, chores) never block. They ride along
    and are listed as untracked.

@@ -18,8 +18,10 @@ last_release_tag() {
     | { grep -E "$pattern" || true; } \
     | while IFS= read -r t; do printf '%s %s\n' "$(git rev-parse "${t}^{commit}")" "$t"; done)
   [ -n "$tagmap" ] || return 0
+  # awk reads the whole history rather than exit at the first match: an early
+  # exit would SIGPIPE rev-list, and pipefail would turn that into a failure.
   git rev-list --first-parent "$head_sha" \
-    | awk 'NR == FNR { if (!($1 in m)) m[$1] = $2; next } ($1 in m) { print m[$1]; exit }' \
+    | awk 'NR == FNR { if (!($1 in m)) m[$1] = $2; next } !done && ($1 in m) { print m[$1]; done = 1 }' \
       <(printf '%s\n' "$tagmap") -
 }
 
