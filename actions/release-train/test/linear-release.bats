@@ -59,7 +59,7 @@ case "$q" in
     echo "prev-releases $(jq -c . <<<"$v")" >> "$STATE/calls"
     # Honour the createdAt < before filter like Linear does.
     if [ -f "$STATE/prev.json" ]; then
-      jq -c --arg b "$(jq -r '.before' <<<"$v")" '.data.releases.nodes |= map(select(.createdAt < $b))' "$STATE/prev.json"
+      jq -c --argjson v "$v" '.data.releases.nodes |= map(select(.createdAt < $v.before and .version != $v.v and (.version | startswith($v.p))))' "$STATE/prev.json"
     else
       printf '{"data":{"releases":{"nodes":[]}}}'
     fi ;;
@@ -103,7 +103,10 @@ teardown() { rm -rf "$TMP"; }
   # pipeline name came from .signapse/pipeline.yml (comment stripped)
   [ "$(jq -r '.input.pipelineId' "$STATE/create-vars.json")" = "pipe-1" ]
   [ "$(jq -r '.input.stageId' "$STATE/create-vars.json")" = "st-dep" ]
-  [ "$(jq -r '.input.version' "$STATE/create-vars.json")" = "v0.0.1" ]
+  # repo-prefixed: several repos share one product pipeline
+  [ "$(jq -r '.input.version' "$STATE/create-vars.json")" = "test-repo@v0.0.1" ]
+  [ "$(jq -r '.input.name' "$STATE/create-vars.json")" = "test-repo@v0.0.1" ]
+  [ "$(jq -r '.version' <<<"$output")" = "test-repo@v0.0.1" ]
   # commitSha is set only after tickets are attached, not on create
   [ "$(jq -r '.input.commitSha // "none"' "$STATE/create-vars.json")" = "none" ]
   [ "$(jq -r '.input.commitSha' "$STATE/update-vars.json")" = "$(git rev-parse v0.0.1)" ]
@@ -199,8 +202,8 @@ EOF
   # v0.0.1 was deployed. v0.0.2 was tagged but failed staging (never a
   # Release). v0.0.3 is deployed: its range must start at v0.0.1, not v0.0.2.
   jq -nc --arg sha "$(git rev-parse v0.0.1)" \
-    '{data:{releases:{nodes:[{version:"v0.0.1", commitSha:$sha, createdAt:"2020-11-01T00:00:00Z"},
-                             {version:"v0.0.0", commitSha:null, createdAt:"2020-10-01T00:00:00Z"}]}}}' > "$STATE/prev.json"
+    '{data:{releases:{nodes:[{version:"test-repo@v0.0.1", commitSha:$sha, createdAt:"2020-11-01T00:00:00Z"},
+                             {version:"test-repo@v0.0.0", commitSha:null, createdAt:"2020-10-01T00:00:00Z"}]}}}' > "$STATE/prev.json"
   git commit -q --allow-empty -m "feat(SIG-103): in the skipped RC"
   git tag v0.0.2
   git commit -q --allow-empty -m "feat(SIG-104): in the deployed RC"
@@ -210,7 +213,7 @@ EOF
   [ "$(jq -c '.tickets' <<<"$output")" = '["SIG-103","SIG-104"]' ]
   [ "$(jq -r '.since' <<<"$output")" = "$(git rev-parse v0.0.1)" ]
   # lookup excludes this version (re-runs) and canceled stages (Rolled back)
-  grep -q '^prev-releases .*"v":"v0.0.3"' "$STATE/calls"
+  grep -q '^prev-releases .*"v":"test-repo@v0.0.3".*"p":"test-repo@"' "$STATE/calls"
 }
 
 @test "since: no earlier Release and no explicit since → clear error" {
@@ -220,24 +223,15 @@ EOF
   ! grep -q releaseCreate "$STATE/calls"
 }
 
-@test "pipeline-config.sh reads keys, strips comments and quotes, empty when absent" {
-  printf 'product: Signstream\nlinear_pipeline: "SignStream"  # prod\nsentry_project: signstream\n' > .signapse/pipeline.yml
-  CFG="$BATS_TEST_DIRNAME/../scripts/pipeline-config.sh"
-  [ "$("$CFG" linear_pipeline)" = "SignStream" ]
-  [ "$("$CFG" sentry_project)" = "signstream" ]
-  [ "$("$CFG" missing_key)" = "" ]
-  [ "$("$CFG" sentry_project /nonexistent.yml)" = "" ]
-}
-
 @test "re-run of an older version: range ends at its own predecessor, not at a newer Release" {
   # v0.0.1 (deployed 1 Nov) then v0.0.2 (deployed 2 Nov). Re-running v0.0.2's
   # predecessor v0.0.1 must not scan from v0.0.2 (empty / wrong range).
   git commit -q --allow-empty -m "feat(SIG-105): later"
   git tag v0.0.2
   jq -nc --arg s0 "$(git rev-parse v0.0.0)" --arg s2 "$(git rev-parse v0.0.2)" \
-    '{data:{releases:{nodes:[{version:"v0.0.0", commitSha:$s0, createdAt:"2020-10-01T00:00:00Z"},
-                             {version:"v0.0.2", commitSha:$s2, createdAt:"2020-11-02T00:00:00Z"}]}}}' > "$STATE/prev.json"
-  jq -nc '{id:"rel-1", url:"https://linear.app/signapse/release/rel-1", version:"v0.0.1", stage:{name:"Rolling Out"}, createdAt:"2020-11-01T00:00:00Z"}' > "$STATE/release.json"
+    '{data:{releases:{nodes:[{version:"test-repo@v0.0.0", commitSha:$s0, createdAt:"2020-10-01T00:00:00Z"},
+                             {version:"test-repo@v0.0.2", commitSha:$s2, createdAt:"2020-11-02T00:00:00Z"}]}}}' > "$STATE/prev.json"
+  jq -nc '{id:"rel-1", url:"https://linear.app/signapse/release/rel-1", version:"test-repo@v0.0.1", stage:{name:"Rolling Out"}, createdAt:"2020-11-01T00:00:00Z"}' > "$STATE/release.json"
   run --separate-stderr "$SCRIPT" v0.0.1 v0.0.1
   [ "$status" -eq 0 ]
   [ "$(jq -r '.since' <<<"$output")" = "$(git rev-parse v0.0.0)" ]
@@ -253,13 +247,6 @@ EOF
   ! grep -q releaseCreate "$STATE/calls"
 }
 
-@test "pipeline-config.sh keeps '#' inside a quoted value" {
-  printf 'linear_pipeline: "Production #1"  # comment\nsentry_project: '"'"'a #b'"'"'\n' > .signapse/pipeline.yml
-  CFG="$BATS_TEST_DIRNAME/../scripts/pipeline-config.sh"
-  [ "$("$CFG" linear_pipeline)" = "Production #1" ]
-  [ "$("$CFG" sentry_project)" = "a #b" ]
-}
-
 @test "attach fails half-way: Release left without commitSha, so it is not a default predecessor" {
   touch "$STATE/deny"
   run "$SCRIPT" v0.0.1 v0.0.1 v0.0.0
@@ -267,4 +254,51 @@ EOF
   grep -q '^releaseCreate$' "$STATE/calls"
   ! grep -q '^releaseUpdate$' "$STATE/calls"
   [ "$(jq -r '.input.commitSha // "none"' "$STATE/create-vars.json")" = "none" ]
+}
+
+@test "since ignores another repo's Releases in the shared product pipeline" {
+  # other-repo deployed later into the same pipeline; its commit is not here.
+  jq -nc --arg s0 "$(git rev-parse v0.0.0)" \
+    '{data:{releases:{nodes:[{version:"test-repo@v0.0.0", commitSha:$s0, createdAt:"2020-10-01T00:00:00Z"},
+                             {version:"other-repo@v9.9.9", commitSha:"deadbeef", createdAt:"2020-11-02T00:00:00Z"}]}}}' > "$STATE/prev.json"
+  run --separate-stderr "$SCRIPT" v0.0.1 v0.0.1
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.since' <<<"$output")" = "$(git rev-parse v0.0.0)" ]
+}
+
+@test "RELEASE_PREFIX: empty gives the bare tag, a literal is used as is" {
+  RELEASE_PREFIX="" run --separate-stderr "$SCRIPT" v0.0.1 v0.0.1 v0.0.0
+  [ "$(jq -r '.version' <<<"$output")" = "v0.0.1" ]
+  rm "$STATE/release.json"
+  RELEASE_PREFIX="api-" run --separate-stderr "$SCRIPT" v0.0.1 v0.0.1 v0.0.0
+  [ "$(jq -r '.version' <<<"$output")" = "api-v0.0.1" ]
+}
+
+# --- pipeline-config.sh <key> [--required] [file] ----------------------------
+
+@test "pipeline-config: reads keys, strips comments, keeps '#' inside quotes" {
+  printf 'product: Signstream # dir\nlinear_pipeline: "Production #1"  # c\nsentry_project: '"'"'a #b'"'"'\n' > .signapse/pipeline.yml
+  CFG="$BATS_TEST_DIRNAME/../scripts/pipeline-config.sh"
+  [ "$("$CFG" product)" = "Signstream" ]
+  [ "$("$CFG" linear_pipeline)" = "Production #1" ]
+  [ "$("$CFG" sentry_project --required)" = "a #b" ]
+  [ "$("$CFG" product .signapse/pipeline.yml)" = "Signstream" ]
+}
+
+@test "pipeline-config: optional key/file absent → empty, exit 0" {
+  CFG="$BATS_TEST_DIRNAME/../scripts/pipeline-config.sh"
+  run "$CFG" sentry_project
+  [ "$status" -eq 0 ] && [ "$output" = "" ]
+  run "$CFG" product "$TMP/nope.yml"
+  [ "$status" -eq 0 ] && [ "$output" = "" ]
+}
+
+@test "pipeline-config: --required fails clearly without the file or the key" {
+  CFG="$BATS_TEST_DIRNAME/../scripts/pipeline-config.sh"
+  run "$CFG" sentry_project --required
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"has no 'sentry_project:' value"* ]]
+  run "$CFG" product --required "$TMP/nope.yml"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"not found"* ]]
 }

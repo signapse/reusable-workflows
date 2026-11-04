@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # linear-release.sh <version> <until-ref> [since-ref]
 #
+# <version> is the Release Candidate's tag; the Release version is
+# "${RELEASE_PREFIX}<version>" (default prefix "<repo name>@", see below).
+#
 # Records one Deployment as one Release in the product's Linear release
 # pipeline. Idempotent on <version>: if the pipeline already has a Release
 # with that version it is reused (its stage is left alone, so a re-run never
@@ -9,8 +12,9 @@
 #   1. Resolve the pipeline by exact name (LINEAR_PIPELINE, else
 #      `linear_pipeline` in $PIPELINE_CONFIG, default .signapse/pipeline.yml).
 #   2. Commit range <since>..<until>. <since> defaults to the commitSha of the
-#      pipeline's latest Release that is not this version and not in a
-#      canceled stage (Rolled back): the last thing that actually reached prod.
+#      pipeline's latest Release from this repo (same prefix) that is not
+#      this version and not in a canceled stage (Rolled back): the last thing
+#      from this repo that actually reached prod.
 #      Not the previous git tag: a Release Candidate that failed staging is
 #      tagged but never deployed, and its tickets must land in the next Release.
 #   3. Look up a Release with that version in the pipeline; create it in stage
@@ -39,6 +43,10 @@ VERSION="$1"
 UNTIL="$2"
 SINCE="${3:-}"
 [ -n "$VERSION" ] || die "version is empty"
+TAG="$VERSION"
+VERSION=$("$(dirname "$0")/release-version.sh" "$TAG")
+# Prefix alone, to find this repo's earlier Releases in a shared pipeline.
+RELEASE_PREFIX="${VERSION%"$TAG"}"
 
 need git
 need jq
@@ -87,8 +95,9 @@ git rev-parse --verify -q "${UNTIL}^{commit}" > /dev/null || die "unknown ref: $
 if [ -z "$SINCE" ]; then
   before=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   [ -z "$release" ] || before=$(jq -r '.createdAt' <<<"$release")
-  prev=$(gql 'query($pid:ID!,$v:String!,$before:DateTimeOrDuration!){ releases(first:50, orderBy:createdAt, filter:{pipeline:{id:{eq:$pid}}, version:{neq:$v}, stage:{type:{neq:canceled}}, createdAt:{lt:$before}}){ nodes{ version commitSha createdAt } } }' \
-    "$(jq -nc --arg pid "$pipeline_id" --arg v "$VERSION" --arg b "$before" '{pid:$pid, v:$v, before:$b}')")
+  # Only this repo's Releases (same prefix): another repo's commit is not here.
+  prev=$(gql 'query($pid:ID!,$v:String!,$p:String!,$before:DateTimeOrDuration!){ releases(first:50, orderBy:createdAt, filter:{pipeline:{id:{eq:$pid}}, and:[{version:{neq:$v}}, {version:{startsWith:$p}}], stage:{type:{neq:canceled}}, createdAt:{lt:$before}}){ nodes{ version commitSha createdAt } } }' \
+    "$(jq -nc --arg pid "$pipeline_id" --arg v "$VERSION" --arg p "$RELEASE_PREFIX" --arg b "$before" '{pid:$pid, v:$v, p:$p, before:$b}')")
   latest=$(jq -c '[.releases.nodes[] | select(.commitSha != null and .commitSha != "")] | max_by(.createdAt) // empty' <<<"$prev")
   [ -n "$latest" ] || die "pipeline '$pipeline_name' has no earlier Release with a commit; pass 'since' (the last commit deployed to prod) for the first Deployment"
   SINCE=$(jq -r '.commitSha' <<<"$latest")
