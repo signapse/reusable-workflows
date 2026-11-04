@@ -33,7 +33,8 @@ EOS
   chmod +x "$TMP/stub/"*
 
   export GH_TOKEN=x TAG=1.2.45 WATCH_PATHS=workloads/stg/signstream-api/helmrelease-patch.yaml
-  export POLL_SECONDS=20 TIMEOUT_SECONDS=100 SETTLE_SECONDS=30
+  export POLL_SECONDS=20 TIMEOUT_SECONDS=100 VERSION_URL=https://stg.example/version
+  echo '{"version":"1.2.45"}' > "$TMP/version.json"
 }
 
 teardown() { rm -rf "$TMP"; }
@@ -47,25 +48,35 @@ file() {
 EOF
 }
 
-@test "AC2: returns once Flux has committed the tag, then waits the settle time" {
+@test "AC2: returns once Flux has committed the tag and the service reports it" {
   file 0 1.2.44
   file 1 1.2.44
   file 2 1.2.45
   run "$SCRIPT"
   [ "$status" -eq 0 ]
   [ "$(cat "$TMP/polls")" -eq 3 ]
-  # two polls of 20s, then the 30s settle
-  [ "$(paste -sd, "$TMP/slept")" = "20,20,30" ]
+  # two polls of 20s; no fixed settle sleep
+  [ "$(paste -sd, "$TMP/slept")" = "20,20" ]
+}
+
+@test "no version URL fails before waiting: no blind sleep" {
+  file 0 1.2.45
+  VERSION_URL="" run "$SCRIPT"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"staging_version_url"* ]]
+  [ ! -f "$TMP/slept" ]
 }
 
 @test "a higher semver counts (it contains this build)" {
   file 0 1.3.0
+  echo '{"version":"1.3.0"}' > "$TMP/version.json"
   run "$SCRIPT"
   [ "$status" -eq 0 ]
 }
 
 @test "v-prefixed tags compare as semver" {
   file 0 v1.2.45
+  echo '{"version":"v1.2.45"}' > "$TMP/version.json"
   TAG=v1.2.45 run "$SCRIPT"
   [ "$status" -eq 0 ]
 }

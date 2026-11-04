@@ -127,20 +127,35 @@ The `promote` job runs after `select` when `outcome` is `selected`:
      keeps the repo's prefix: bare (`1.2.45`) for every Signapse repo today,
      which some staging ImagePolicies require.
 2. **Terraform gate** (SIG-2765, not yet): slots in here, before any tag.
-3. **Tag** (`promotion-tag.sh`): for each repository in `services`,
+3. **Clear staging verdicts** (`ticket-labels-remove.sh`): every ticket in
+   `rc_tickets` loses `Staging Passed` and `Staging Failed`. A staging
+   verdict belongs to one tag; without this, a ticket that passed staging in
+   an earlier tag would still look passed if this tag's staging tests never
+   finished, and prod's resume mode would deploy an untested build. Runs
+   before the tag, so a Linear failure here leaves nothing promoted.
+4. **Tag** (`promotion-tag.sh`): for each repository in `services`,
    `ecr-retag.sh` re-puts the Release Candidate's manifest
    (`main-<n>-<sha>`) under the release tag. No rebuild: the bytes are the
    same, and the script reads both digests back and fails if they differ. It
    never moves an existing release tag to other bytes. Then the commit gets
    the same tag in git through the GitHub API. The summary lists both digests
    per repository.
-4. **Wait for staging** (`staging-deploy-wait.sh`, bounded by
+5. **Wait for staging** (`staging-deploy-wait.sh`, bounded by
    `staging_deploy_timeout_minutes`): Flux image automation commits the new
    tag into each `staging_watch_paths` file in signapse-core-k8s (the
    `{"$imagepolicy": …}` setter line). Then it polls `staging_version_url`
-   if set, otherwise waits `staging_settle_seconds` for the rollout.
-5. **Tickets**: every ticket in `rc_tickets` moves to `On Staging`
-   (`on_staging_state`) with the Ticket Transitioner.
+   until the service reports the tag (or newer). **`staging_version_url` is
+   required**: a Flux commit only says the tag was chosen, and the old fixed
+   sleep let staging tests run against the old pods. A repo without a version
+   endpoint cannot switch to `qa-passed` until it has one.
+6. **Tickets**: every ticket in `rc_tickets` moves to `On Staging`
+   (`on_staging_state`) with the Ticket Transitioner, forward only: only from
+   the columns in `on_staging_from` (default `On Dev · Ready for QA`, plus
+   today's `Ready for QA`, `QA in Progress`, `Ready for Prod`). A ticket that
+   is already further on (On Prod, Rolling Out) because of a follow-up commit
+   stays where it is. The Ticket Transitioner never moves a ticket out of
+   `QA Failed` or `Done` (ADR 0001: only QA takes a ticket out of QA Failed),
+   and works on the team `linear_team_key`.
 
 ### "Waits for the next window"
 
@@ -255,6 +270,7 @@ jobs:
         workloads/stg/signstream-api/helmrelease-patch.yaml
         workloads/stg/signstream-websocket/helmrelease-patch.yaml
         workloads/stg/signstream-pip-worker/helmrelease-patch.yaml
+      staging_version_url: https://api.stg.signstream.example/version   # required; JSON body with .version
       read_app_id: ${{ vars.PIPELINE_READ_APP_ID }}
     secrets:
       LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
@@ -267,7 +283,8 @@ runs, read from `gitops_repo` with the read-only app.
 
 Optional inputs: `qa_passed_label`, `qa_failed_state`, `build_workflow`,
 `release_branch`, `release_tag_pattern`, `linear_team_key`, `aws_region`
-(default `eu-west-2`), `staging_version_jq`,
+(default `eu-west-2`), `staging_version_jq`, `on_staging_from`,
+`staging_passed_label`, `staging_failed_label`,
 `staging_deploy_timeout_minutes`, `gitops_repo`, `gitops_ref`,
 `selection_base`, `on_staging_state`, `hotfix_label`. The Linear defaults
 match the board after SIG-2747. `deploy_window_now` fakes the clock for the

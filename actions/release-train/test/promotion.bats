@@ -99,6 +99,13 @@ case "$q" in
     fi
     echo "move $id $(echo "$body" | jq -r .variables.state)" >> "$TMP/calls"
     printf '{"data":{"issueUpdate":{"success":true}}}\n200' ;;
+  *issueRemoveLabel*)
+    echo "unlabel $(echo "$body" | jq -r .variables.id) $(echo "$body" | jq -r .variables.l)" >> "$TMP/calls"
+    printf '{"data":{"issueRemoveLabel":{"success":true}}}\n200' ;;
+  *"state{name}"*)
+    id=$(echo "$body" | jq -r .variables.id)
+    st="On Dev · Ready for QA"; [ -f "$TMP/state-$id" ] && st=$(cat "$TMP/state-$id")
+    jq -nc --arg s "$st" '{data: {issue: {state: {name: $s}}}}'; printf '\n200' ;;
   *labels*)
     [ -f "$TMP/linear-down" ] && { printf 'boom\n500'; exit 0; }
     id=$(echo "$body" | jq -r .variables.id)
@@ -310,6 +317,14 @@ digest() { cat "$TMP/ecr/$1/$2"; }
   run "$S/promotion-tickets.sh" "On Staging" "SIG-1,SIG-2"
   [ "$status" -ne 0 ]
   [[ "$output" == *"SIG-1 (nope)"* ]]
+  grep -qx "move SIG-2 state-On_Staging" "$TMP/calls"
+}
+
+@test "a ticket already On Prod with a follow-up commit is not moved back to On Staging" {
+  echo "On Prod" > "$TMP/state-SIG-1"
+  ALLOWED_FROM="On Dev · Ready for QA" run "$S/promotion-tickets.sh" "On Staging" "SIG-1,SIG-2"
+  [ "$status" -eq 0 ]
+  [ "$(grep -c "move SIG-1" "$TMP/calls")" -eq 0 ]
   grep -qx "move SIG-2 state-On_Staging" "$TMP/calls"
 }
 
