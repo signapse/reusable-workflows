@@ -247,3 +247,51 @@ field() { tail -n1 <<< "$output" | jq -r "$@"; }
   [ "$status" -eq 0 ]
   [ "$(field .decision)" = nothing ]
 }
+
+# --- Review fix: fresh mode checks every ticket since the tag prod runs ----
+
+@test "fresh: refuses when a ticket since prod's tag is in QA Failed (failed staging earlier)" {
+  jq '."SIG-1".state = "QA Failed" | ."SIG-1".labels = ["Feature", "Staging Failed"]' "$TMP/linear.json" > "$TMP/l"
+  mv "$TMP/l" "$TMP/linear.json"
+  export RELEASE_TAG=1.1.0 TICKETS=SIG-2
+  plan
+  [ "$status" -eq 0 ]
+  [ "$(field .decision)" = refused ]
+  [[ "$(field .reason)" == *"SIG-1 (QA Failed"* ]]
+}
+
+@test "fresh: refuses when a ticket in range has no Staging Pass on record" {
+  jq '."SIG-2".labels = ["Bug", "QA Passed"]' "$TMP/linear.json" > "$TMP/l" && mv "$TMP/l" "$TMP/linear.json"
+  export RELEASE_TAG=1.1.0 TICKETS=SIG-1
+  plan
+  [ "$(field .decision)" = refused ]
+}
+
+@test "resume: RESUME_TAG (the train's staged_tag) is the candidate, not the newest tag" {
+  cd "$TMP/repo" || return 1
+  git commit -q --allow-empty -m "SIG-3 newer, failed staging"
+  git tag 1.2.0
+  jq '."SIG-3" = {state: "QA Failed", labels: ["Staging Failed"]}' "$TMP/linear.json" > "$TMP/l" && mv "$TMP/l" "$TMP/linear.json"
+  export RESUME_TAG=1.1.0
+  plan
+  [ "$(field .release_tag)" = 1.1.0 ]
+  [ "$(field .decision)" = deploy ]
+  unset RESUME_TAG
+  plan
+  [ "$(field .release_tag)" = 1.2.0 ]
+  [ "$(field .decision)" = nothing ]
+}
+
+@test "a reverted commit's ticket in range does not refuse the Deployment" {
+  cd "$TMP/repo" || return 1
+  git commit -q --allow-empty -m "SIG-4 broke staging"
+  bad=$(git rev-parse HEAD)
+  git commit -q --allow-empty -m 'Revert "SIG-4 broke staging"' -m "This reverts commit $bad."
+  git tag 1.2.0
+  jq '."SIG-4" = {state: "QA Failed", labels: ["Staging Failed"]}' "$TMP/linear.json" > "$TMP/l" && mv "$TMP/l" "$TMP/linear.json"
+  export RELEASE_TAG=1.2.0
+  plan
+  [ "$status" -eq 0 ]
+  [ "$(field .decision)" = deploy ]
+  [ "$(field -c .tickets)" = '["SIG-1","SIG-2"]' ]
+}

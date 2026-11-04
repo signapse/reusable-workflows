@@ -25,7 +25,7 @@ n=$(sed -E 's/.*search=sig-([0-9]+)-.*/\1/' <<< "$url")
 if [ -f "$TMP/flags/$n.json" ]; then cat "$TMP/flags/$n.json"; else echo '{"results":[]}'; fi
 EOS
   chmod +x "$TMP/stub/"*
-  export POSTHOG_API_KEY=phx_read
+  export POSTHOG_API_KEY=phx_read QA_COHORT_ID=42
 }
 
 teardown() { rm -rf "$TMP"; }
@@ -83,6 +83,20 @@ field() { tail -n1 <<< "$output" | jq -r "$@"; }
   guard
   [ "$status" -ne 0 ]
   [[ "$(field '.errors[0]')" == *"condition 3 at 5%"* ]]
+}
+
+@test "a cohort condition for another cohort (not the QA Cohort) fails" {
+  flag 1 sig-1-new-thing 0 '{"properties": [{"key": "id", "type": "cohort", "operator": "in", "value": 7}], "rollout_percentage": 100}'
+  guard
+  [ "$status" -ne 0 ]
+  [ "$(field -c '.checked[0].offending')" = '[{"index":3,"rollout_percentage":100}]' ]
+}
+
+@test "no QA Cohort id with a Feature ticket to check fails instead of trusting any cohort" {
+  flag 1 sig-1-new-thing 0
+  QA_COHORT_ID="" guard
+  [ "$status" -ne 0 ]
+  [[ "$(field '.errors[0]')" == *qa_cohort_id* ]]
 }
 
 @test "a Feature ticket without a flag fails (ADR 0004)" {

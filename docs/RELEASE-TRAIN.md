@@ -400,31 +400,60 @@ prod (caller job, needs: [train, staging])
             prod-tags.sh          prod now runs the tag on every service
   release   deployment-release.yml@main   AC3: Linear Release (Deployed), Sentry release + production deploy
   smoke     signapse-e2e playwright.yml@main, environment prod, grep @prod-safe   AC4
-  verdict   pass: flag guard again, tickets -> On Prod
+  verdict   pass: flag guard again, tickets -> On Prod (only from on_prod_from)
             fail: prod_smoke_passed=false, run red (SIG-2771 rolls back)
 ```
+
+### Every ticket since prod's tag must have passed staging (both modes)
+
+`prod-plan.sh` takes the tickets of every commit from the tag prod runs to
+the tag it deploys (plus the `tickets` input), and checks each one in
+Linear: it carries `Staging Passed`, does not carry `Staging Failed`, and is
+not in `QA Failed`. Commits reverted later in that range, and revert commits,
+add no tickets (`lib/revert.sh`, the same rule as the selection).
+
+- **Fresh** (`release_tag` set, staging just passed): any ticket without a
+  staging pass on record makes the decision `refused` and the run red. This
+  is what stops a tag that failed staging (or was rolled back) from reaching
+  prod inside a newer tag: its tickets are still in `QA Failed`.
+- **Resume**: the same check gives `nothing`.
+
+`Staging Passed` is cleared at every Promotion (SIG-2764), so it always
+belongs to the newest tag's staging run.
 
 ### Deferral and resume (AC6)
 
 Nothing is stored. A staging pass outside the deploy window ends with
 `decision=deferred` and nothing done. The caller calls the prod workflow on
-every train run that promoted nothing new (outcome `none` or
-`already_promoted`, or a deferred Promotion), with `release_tag` empty. That
-is **resume mode**: take the newest release tag on the branch, and deploy it
-when, read fresh from Linear and signapse-core-k8s:
+every run where staging was not attempted (`needs.staging.result ==
+'skipped'`: nothing new promoted, a deferred Promotion, or a train that
+failed), with `release_tag` empty. That is **resume mode**: take
+`resume_tag` (the train's `staged_tag`: the newest selectable build that
+already carries a release tag), or else the newest release tag on the
+branch, and deploy it when, read fresh from Linear and signapse-core-k8s:
 
 - prod does not run it yet on every service,
 - rollback.yml never replaced it (no `Rolled-back-from: <tag>` trailer on the
   service's prod file),
-- it has at least one ticket, and every ticket carries `Staging Passed`, none
-  carries `Staging Failed` and none is in `QA Failed`,
+- it has at least one ticket, and every ticket since prod's tag has its
+  staging pass on record (above),
 - the deploy window is open (or a ticket carries `hotfix`).
 
 The template's hourly and 09:01 schedules are the resume trigger. A
 ticketless tag cannot prove its staging pass from Linear, so it waits for the
-next Release Candidate (or a manual deploy). Tickets are those of the Release
-Candidate plus every ticket ref in the commits since the tag prod runs, so a
-candidate that passed staging but was overtaken still gets its tickets moved.
+next Release Candidate (or a manual deploy). A train run that fails (a
+blocked Terraform gate, a staging wait that timed out) no longer stops prod
+from deploying an earlier tag that already passed staging.
+
+### Ticket moves and the flag guard
+
+- On a pass, tickets move to `On Prod` only from `on_prod_from` (default
+  `On Staging`). A ticket already Rolling Out or Done (a follow-up commit)
+  stays; nothing leaves `QA Failed`.
+- The AC5 flag guard accepts a Feature flag's non-environment condition only
+  when every property is the QA Cohort, `qa_cohort_id` (PostHog cohort id,
+  created by SIG-2749). Another cohort, or no `qa_cohort_id` with Feature
+  tickets to check, fails the guard.
 
 ### Idempotency and concurrency
 
@@ -570,19 +599,24 @@ jobs:
       E2E_LINEAR_API_KEY: ${{ secrets.E2E_LINEAR_API_KEY }}
 
   # Dark Deployment to prod (SIG-2769). Fresh after a staging pass; resume
-  # (release_tag empty) on runs that promoted nothing new, which is how a
-  # deferred Deployment reaches prod in the next window.
+  # (release_tag empty) on runs where staging was not attempted, which is how
+  # a deferred Deployment reaches prod in the next window.
   prod:
     needs: [train, staging]
+    # Fresh after a staging pass; resume whenever staging was not attempted
+    # (nothing new, deferred, or the train failed), never after a staging
+    # failure or a cancelled run.
     if: >-
-      always() && needs.train.result == 'success' &&
-      (needs.staging.outputs.staging_passed == 'true' || needs.train.outputs.promoted != 'true')
+      !cancelled() &&
+      (needs.staging.outputs.staging_passed == 'true' || needs.staging.result == 'skipped')
     uses: signapse/reusable-workflows/.github/workflows/release-train-prod.yml@main
     permissions:
       contents: read
     with:
       release_tag: ${{ needs.staging.outputs.staging_passed == 'true' && needs.train.outputs.release_tag || '' }}
-      tickets: ${{ needs.staging.outputs.staging_passed == 'true' && needs.train.outputs.rc_tickets || '' }}
+      resume_tag: ${{ needs.train.outputs.staged_tag }}
+      tickets: ${{ needs.staging.outputs.staging_passed == 'true' && needs.train.outputs.rc_tickets || needs.train.outputs.staged_tickets }}
+      qa_cohort_id: ${{ vars.POSTHOG_QA_COHORT_ID }}   # AC5 guard
       prod_services: '["signstream-api","signstream-websocket"]'   # deploy-prod.yml service names
       slack_channel: '#signstream-releases'
       read_app_id: ${{ vars.PIPELINE_READ_APP_ID }}

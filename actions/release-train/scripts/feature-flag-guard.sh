@@ -7,7 +7,9 @@
 # finds the ticket's flags (key prefix sig-<n>-, docs/POSTHOG-FLAGS.md
 # "Naming") and fails if any condition other than these has a rollout
 # percentage above 0:
-#   - the QA Cohort condition (cohort properties only)
+#   - the QA Cohort condition: every property is the cohort QA_COHORT_ID
+#     (review fix: any other cohort, e.g. one holding every user, is not the
+#     QA Cohort and fails)
 #   - the dev/staging condition (an `environment` property whose values are
 #     all dev, development or staging)
 # That covers the template's prod condition (groups[2]) and any hand-added
@@ -18,6 +20,8 @@
 # Env:
 #   POSTHOG_API_KEY     personal API key with feature_flag:read only (required
 #                       when there is a Feature ticket to check)
+#   QA_COHORT_ID        PostHog id of the QA Cohort (required when there is a
+#                       Feature ticket to check; SIG-2749 creates it)
 #   POSTHOG_PROJECT_ID  default 256388
 #   POSTHOG_HOST        default https://eu.posthog.com
 #   FEATURE_LABEL       default Feature
@@ -53,8 +57,12 @@ errors='[]'
 err() { errors=$(jq -c --arg e "$1" '. + [$e]' <<< "$errors"); }
 
 ids=$(jq -r '.check[]' <<< "$split")
+QA_COHORT_ID="${QA_COHORT_ID:-}"
 if [ -n "$ids" ] && [ -z "${POSTHOG_API_KEY:-}" ]; then
   err "POSTHOG_API_KEY is not set, so the Feature flags of $(jq -r '.check | join(", ")' <<< "$split") cannot be checked"
+  ids=""
+elif [ -n "$ids" ] && ! [[ "$QA_COHORT_ID" =~ ^[0-9]+$ ]]; then
+  err "qa_cohort_id (QA_COHORT_ID) is not set to a PostHog cohort id, so the Feature flags of $(jq -r '.check | join(", ")' <<< "$split") cannot be checked against the QA Cohort"
   ids=""
 fi
 
@@ -69,14 +77,14 @@ while IFS= read -r id; do
     continue
   fi
   # shellcheck disable=SC2016 # jq bindings, not shell expansion.
-  if ! flags=$(jq -c --arg p "$prefix" --arg t "$id" '
+  if ! flags=$(jq -c --arg p "$prefix" --arg t "$id" --arg qc "$QA_COHORT_ID" '
     [.results[] | select((.key | startswith($p)) and (.deleted | not))
      | {ticket: $t, flag: .key, active: (.active // false),
         offending: [.filters.groups // [] | to_entries[]
           | .value as $g
           | ($g.properties // []) as $props
           | select(
-              (($props | length) > 0 and ($props | all(.type == "cohort"))) as $cohort_only
+              (($props | length) > 0 and ($props | all(.type == "cohort" and ((.value | tostring) == $qc)))) as $cohort_only
               | ($props | any(.key == "environment" and .type == "person"
                   and ((.value | if type == "array" then . else [.] end) as $v
                        | ($v | length) > 0

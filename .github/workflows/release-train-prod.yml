@@ -23,23 +23,28 @@ name: Release Train prod (reusable)
 #
 # Two ways in (see scripts/prod-plan.sh):
 #   fresh   release_tag set: staging just passed for it in this run.
-#   resume  release_tag empty: the train promoted nothing new this run. The
-#           newest release tag goes to prod if prod does not run it yet and
-#           every ticket in it still carries Staging Passed (and none is in QA
-#           Failed). This is how a staging pass outside the deploy window
-#           reaches prod in the next window, with no stored state.
+#   resume  release_tag empty: staging was not attempted this run (nothing
+#           new promoted, deferred, or the train failed). resume_tag (the
+#           train's staged_tag), else the newest release tag, goes to prod if
+#           prod does not run it yet. This is how a staging pass outside the
+#           deploy window reaches prod in the next window, with no stored
+#           state.
+# Both modes check every ticket since the tag prod runs: Staging Passed, no
+# Staging Failed, not in QA Failed. Fresh refuses (red) otherwise; resume
+# does nothing.
 #
 # Caller jobs (docs/RELEASE-TRAIN.md "Dark Deployment to prod"):
 #
 #   prod:
 #     needs: [train, staging]
 #     if: >-
-#       always() && needs.train.result == 'success' &&
-#       (needs.staging.outputs.staging_passed == 'true' || needs.train.outputs.promoted != 'true')
+#       !cancelled() &&
+#       (needs.staging.outputs.staging_passed == 'true' || needs.staging.result == 'skipped')
 #     uses: signapse/reusable-workflows/.github/workflows/release-train-prod.yml@main
 #     with:
 #       release_tag: ${{ needs.staging.outputs.staging_passed == 'true' && needs.train.outputs.release_tag || '' }}
-#       tickets: ${{ needs.staging.outputs.staging_passed == 'true' && needs.train.outputs.rc_tickets || '' }}
+#       resume_tag: ${{ needs.train.outputs.staged_tag }}
+#       tickets: ${{ needs.staging.outputs.staging_passed == 'true' && needs.train.outputs.rc_tickets || needs.train.outputs.staged_tickets }}
 #       prod_services: '["signstream-api","signstream-websocket"]'
 #       ...
 #
@@ -58,8 +63,19 @@ on:
         required: false
         type: string
         default: ''
+      resume_tag:
+        description: >-
+          Resume mode only: the release tag to resume (the train's staged_tag,
+          the newest selectable build already promoted). Empty: the newest
+          release tag on the branch.
+        required: false
+        type: string
+        default: ''
       tickets:
-        description: 'Comma-separated Release Candidate tickets (the train''s rc_tickets). Commits since the tag prod runs add theirs.'
+        description: >-
+          Comma-separated tickets (the train's rc_tickets when fresh,
+          staged_tickets when resuming). Commits since the tag prod runs add
+          theirs; every one must have its staging pass on record.
         required: false
         type: string
         default: ''
@@ -108,6 +124,21 @@ on:
         required: false
         type: string
         default: 'On Prod'
+      on_prod_from:
+        description: >-
+          Comma-separated columns a ticket may move to on_prod_state from. A
+          ticket anywhere else (Rolling Out, Done, QA Failed) is not moved back.
+        required: false
+        type: string
+        default: 'On Staging'
+      qa_cohort_id:
+        description: >-
+          PostHog id of the QA Cohort (SIG-2749). The AC5 guard accepts a
+          Feature flag condition only when it targets this cohort. Required
+          when a Deployment has Feature tickets; empty fails the guard.
+        required: false
+        type: string
+        default: ''
       rollout_states:
         description: 'Comma-separated columns where a Rollout has started; the AC5 flag guard skips those tickets.'
         required: false
@@ -249,7 +280,10 @@ on:
       linear_release_url:
         value: ${{ jobs.release.outputs.linear_release_url }}
       prod_smoke_passed:
-        description: "'true' | 'false' once deployed; empty when nothing was deployed. SIG-2771 rolls back on 'false'."
+        description: >-
+          'true' | 'false' once deployed. Empty when nothing was deployed, or
+          when the verdict job died before reading the smoke result (unknown:
+          SIG-2771 never rolls back on unknown, only on 'false').
         value: ${{ jobs.verdict.outputs.prod_smoke_passed }}
       smoke_report_url:
         value: ${{ jobs.smoke.outputs.report_url }}
@@ -337,6 +371,7 @@ jobs:
         id: plan
         env:
           RELEASE_TAG: ${{ inputs.release_tag }}
+          RESUME_TAG: ${{ inputs.resume_tag }}
           TICKETS: ${{ inputs.tickets }}
           PROD_SERVICES: ${{ inputs.prod_services }}
           RELEASE_TAG_PATTERN: ${{ inputs.release_tag_pattern }}
@@ -399,6 +434,7 @@ jobs:
           POSTHOG_PROJECT_ID: ${{ inputs.posthog_project_id }}
           POSTHOG_HOST: ${{ inputs.posthog_host }}
           FEATURE_LABEL: ${{ inputs.feature_label }}
+          QA_COHORT_ID: ${{ inputs.qa_cohort_id }}
           ROLLOUT_STATES: ${{ inputs.rollout_states }}
         run: |
           set -euo pipefail
@@ -573,17 +609,12 @@ jobs:
     permissions:
       contents: read
     outputs:
-      prod_smoke_passed: ${{ steps.smoke.outputs.passed || 'false' }}
+      # No default: empty means unknown (this job died before reading the
+      # smoke), which must not roll back a Deployment that may be healthy.
+      prod_smoke_passed: ${{ steps.smoke.outputs.passed }}
     steps:
-      - name: Fetch release-train scripts
-        uses: actions/checkout@v4
-        with:
-          repository: signapse/reusable-workflows
-          ref: main
-          path: _rw
-          persist-credentials: false
-
-      # Outputs first, so SIG-2771 reads prod_smoke_passed whatever happens below.
+      # First step, with no dependency, so SIG-2771 reads prod_smoke_passed
+      # whatever happens below.
       - name: Smoke result
         id: smoke
         env:
@@ -603,6 +634,14 @@ jobs:
             [ -z "$REPORT_URL" ] || echo "[Playwright report]($REPORT_URL)"
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Fetch release-train scripts
+        uses: actions/checkout@v4
+        with:
+          repository: signapse/reusable-workflows
+          ref: main
+          path: _rw
+          persist-credentials: false
+
       - name: Feature flags still QA Cohort only (AC5)
         if: steps.smoke.outputs.passed == 'true'
         env:
@@ -611,6 +650,7 @@ jobs:
           POSTHOG_PROJECT_ID: ${{ inputs.posthog_project_id }}
           POSTHOG_HOST: ${{ inputs.posthog_host }}
           FEATURE_LABEL: ${{ inputs.feature_label }}
+          QA_COHORT_ID: ${{ inputs.qa_cohort_id }}
           ROLLOUT_STATES: ${{ inputs.rollout_states }}
         run: |
           set -euo pipefail
@@ -626,6 +666,9 @@ jobs:
           LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
           STATE: ${{ inputs.on_prod_state }}
           TICKETS: ${{ needs.deploy.outputs.tickets }}
+          ALLOWED_FROM: ${{ inputs.on_prod_from }}
+          LINEAR_TEAM_KEY: ${{ inputs.linear_team_key }}
+          QA_FAILED_STATE: ${{ inputs.qa_failed_state }}
         run: |
           set -euo pipefail
           "$GITHUB_WORKSPACE/_rw/actions/release-train/scripts/promotion-tickets.sh" "$STATE" "$TICKETS"
