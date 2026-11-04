@@ -81,7 +81,7 @@ on:
 
     secrets:
       CI_GITHUB_APP_PRIVATE_KEY:
-        description: 'Private key of the read-only CI GitHub App (SIG-2792). With the org variable CI_GITHUB_APP_ID it mints a per-run token for private signapse/* modules, exposed ONLY as BuildKit secrets id=gh_token (and id=github_token, same value, for Dockerfiles not yet renamed); never as a build-arg. Requires use_buildx: true. Preferred over private_modules_token.'
+        description: 'Private key of the read-only CI GitHub App (SIG-2792). With the org variable CI_GITHUB_APP_ID it mints a per-run token for private signapse/* modules, exposed ONLY as BuildKit secrets id=gh_token (and id=github_token, same value, for Dockerfiles not yet renamed); never as a build-arg. Used only with use_buildx: true and when private_modules_token is not passed; a caller that still passes the PAT keeps the PAT path.'
         required: false
       private_modules_token:
         description: 'DEPRECATED fallback: PAT for private Go/npm modules, used only when the App credentials are absent. On the buildx path it is exposed as build-arg GITHUB_TOKEN and as BuildKit secrets id=gh_token and id=github_token. On the legacy path it is only passed as --build-arg GITHUB_TOKEN. Non-Go callers (npm) still use this.'
@@ -154,18 +154,33 @@ jobs:
             echo "ARGS_EOF"
           } >> "${GITHUB_OUTPUT}"
 
-      # Private-module access: mint a read-only GitHub App token when the org
-      # variable CI_GITHUB_APP_ID and the CI_GITHUB_APP_PRIVATE_KEY secret are
-      # both present (secrets go through env because `if:` cannot read them);
-      # otherwise fall back to the PAT secret so unmigrated callers keep working.
+      # Private-module access: mint a read-only GitHub App token only when ALL of
+      #   * the org variable CI_GITHUB_APP_ID and the CI_GITHUB_APP_PRIVATE_KEY
+      #     secret are present (secrets go through env because `if:` cannot read
+      #     them),
+      #   * the caller passed no private_modules_token, and
+      #   * use_buildx is true (the App token only ever travels as a BuildKit
+      #     secret, which the legacy docker build path cannot take).
+      # Otherwise behaviour is exactly as before this change. In particular a
+      # caller that still passes its PAT keeps the PAT and the GITHUB_TOKEN
+      # build-arg even if the org App key reaches it (e.g. via `secrets: inherit`),
+      # so passing the key and dropping the PAT is the opt-in.
       - name: Check for GitHub App credentials
         id: app
         env:
           APP_ID: ${{ vars.CI_GITHUB_APP_ID }}
           APP_KEY: ${{ secrets.CI_GITHUB_APP_PRIVATE_KEY }}
+          PAT: ${{ secrets.private_modules_token }}
+          USE_BUILDX: ${{ inputs.use_buildx }}
         run: |
           if [ -n "$APP_ID" ] && [ -n "$(printf '%s' "$APP_KEY" | tr -d '[:space:]')" ]; then
-            echo "use_app=true" >> "$GITHUB_OUTPUT"
+            if [ -n "$(printf '%s' "$PAT" | tr -d '[:space:]')" ]; then
+              echo "::notice title=GitHub App token not used::private_modules_token was passed, so the PAT path is kept. Stop passing it to move this build to the App token."
+            elif [ "$USE_BUILDX" != "true" ]; then
+              echo "::warning title=GitHub App token not used::use_buildx is false. The App token is only passed as a BuildKit secret, so set use_buildx: true to use it. Private-module downloads in this build get no credentials."
+            else
+              echo "use_app=true" >> "$GITHUB_OUTPUT"
+            fi
           fi
 
       - name: Mint read-only GitHub App token
@@ -177,12 +192,6 @@ jobs:
           private-key: ${{ secrets.CI_GITHUB_APP_PRIVATE_KEY }}
           owner: signapse
           permission-contents: read
-
-      - name: Require buildx for the GitHub App token
-        if: ${{ steps.app.outputs.use_app == 'true' && !inputs.use_buildx }}
-        run: |
-          echo "::error title=use_buildx required::The GitHub App token is only passed as a BuildKit secret, never a build-arg, and the legacy docker build path cannot take BuildKit secrets. Set use_buildx: true in the caller (and read the token with RUN --mount=type=secret,id=gh_token), or stop passing CI_GITHUB_APP_PRIVATE_KEY."
-          exit 1
 
       # --- Buildx path (when use_buildx is true) ---
 
