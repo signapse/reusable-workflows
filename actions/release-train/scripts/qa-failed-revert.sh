@@ -9,28 +9,34 @@
 # Stateless; everything is re-read from git, GitHub and Linear on every run, so
 # the caller runs it hourly.
 #
-#   1. Walk main's first-parent commits in <last-tag>..<head-ref> (the commits
-#      a Release Candidate would carry). A commit's tickets are found the way
-#      release-candidate.sh finds them: <TEAM>-<n> refs in the commits it
-#      brought in plus the title and head branch of its merged PR(s). Revert
-#      commits (subject "Revert ...", or a PR from a revert-* or
-#      prodzilla/revert-* branch) are not ticket work and are never reverted.
+#   1. Walk main's first-parent commits in <last-tag>..<head-ref>. The caller
+#      passes the tag prod runs (selection-base.sh), the same base the
+#      Release Candidate walk uses: a ticket that failed staging sits in an
+#      already-tagged commit, and must still be reverted (review fix). A
+#      commit's tickets are found the way release-candidate.sh finds them:
+#      <TEAM>-<n> refs in the commits it brought in plus the title and head
+#      branch of its merged PR(s). Revert commits (lib/revert.sh, subject
+#      "Revert ...", or a PR from a revert-* or prodzilla/revert-* branch)
+#      are not ticket work and are never reverted.
 #   2. Read each ticket from Linear. Only tickets currently in QA_FAILED_STATE
 #      count; one that left the state (QA re-passed it) is never acted on. The
 #      time it entered the state is the newest issue-history entry moving it
 #      there. It is due once that is at least THRESHOLD_HOURS ago.
-#   3. Dedupe: skip when an open PR from prodzilla/revert-<ticket> exists, or
-#      the branch exists on the remote.
+#   3. Dedupe: skip when an open PR from prodzilla/revert-<ticket> exists (and
+#      post the PR link on the ticket if an earlier run failed to), or the
+#      branch exists on the remote.
 #   4. On branch prodzilla/revert-<ticket> from <head-ref>, git revert the
 #      ticket's commits newest first (merge commits with -m 1). A commit is
-#      skipped as already reverted when a later commit says "This reverts
-#      commit <sha>" or the revert stages nothing.
+#      skipped as already reverted when a later revert of it is still live
+#      (lib/revert.sh: a revert that was itself reverted does not count), or
+#      when the revert stages nothing.
 #   5. Push and open "Revert <ticket>: <title>", then comment the PR link on
 #      the ticket.
 #
 # Conflict: the revert is aborted at the conflicting commit. The commits
 # reverted before it stay on the branch (an empty marker commit when there are
-# none) and a DRAFT PR explains the conflict and how to finish. The branch then
+# none) and a DRAFT PR explains the conflict, lists the older commits still to
+# revert, and how to finish. The branch then
 # dedupes later runs, so the Linear comment and the Slack alert (when
 # SLACK_CHANNEL is set) go out once.
 #
@@ -41,6 +47,7 @@
 #    tickets: [{id, title, url, entered_at, age_hours, action, branch,
 #               pr_url, reverted: [{sha, subject}], skipped: [{sha, subject,
 #               reason}], conflict: {sha, subject, files} | null,
+#               not_attempted: [{sha, subject}] (older commits after a conflict),
 #               shared_with: [ids], error}]}
 #   action: waiting | open_pr_exists | branch_exists | already_reverted |
 #           opened | opened_draft_conflict | no_history | failed
@@ -72,6 +79,8 @@ source "$(dirname "$0")/../lib/linear.sh"
 source "$(dirname "$0")/../lib/slack.sh"
 # shellcheck source=SCRIPTDIR/../lib/release-tag.sh
 source "$(dirname "$0")/../lib/release-tag.sh"
+# shellcheck source=SCRIPTDIR/../lib/revert.sh
+source "$(dirname "$0")/../lib/revert.sh"
 
 [ $# -le 2 ] || die "usage: qa-failed-revert.sh [<last-tag>] [<head-ref>]"
 LAST_TAG="${1:-}"
@@ -110,7 +119,10 @@ if [ -z "$LAST_TAG" ]; then
   [ -n "$LAST_TAG" ] || die "no tag matching $RELEASE_TAG_PATTERN on $HEAD_REF's first-parent history; seed one (git tag 0.0.0 <sha>)"
 fi
 git rev-parse --verify -q "${LAST_TAG}^{commit}" > /dev/null || die "unknown tag: $LAST_TAG"
-log "last Promotion tag: $LAST_TAG; threshold ${THRESHOLD_HOURS}h"
+git merge-base --is-ancestor "$LAST_TAG" "$head_sha" || die "walk base $LAST_TAG is not in $HEAD_REF's history"
+log "walk base: $LAST_TAG; threshold ${THRESHOLD_HOURS}h"
+# Live reverts in the range (a revert that was itself reverted does not count).
+units=$(revert_units "$LAST_TAG" "$head_sha")
 
 # merged_prs <sha>: [{title, head}] of the merged PRs GitHub associates with <sha>.
 merged_prs() {
@@ -128,7 +140,7 @@ while IFS= read -r sha; do
   prs=$(merged_prs "$sha")
   refs=$(printf '%s' "$prs" | jq -r '.[] | .title, .head' | "$HERE/ticket-extractor.sh" "${sha}^1" "$sha")
   revert=false
-  if [[ "$subject" == Revert* ]] \
+  if [ "$(jq -r --arg s "$sha" '.[$s].kind // "normal"' <<< "$units")" = revert ] || [[ "$subject" == Revert* ]] \
     || printf '%s' "$prs" | jq -e 'any(.[]; .head | test("^(prodzilla/)?revert-"))' > /dev/null; then
     revert=true
   fi
@@ -168,6 +180,15 @@ linear_issue() {
   printf '%s' "$issue" | jq -c --arg e "$entered" \
     '{uuid: .id, id: .identifier, title, url, state: .state.name,
       entered_at: (if $e == "" then null else $e end)}'
+}
+
+# linear_has_comment <uuid> <text>: prints true/false; fails on a Linear error.
+linear_has_comment() {
+  local resp
+  resp=$(linear_query 'query($id:String!,$t:String!){issue(id:$id){comments(first:50,filter:{body:{contains:$t}}){nodes{id}}}}' \
+    "$(jq -nc --arg id "$1" --arg t "$2" '{id: $id, t: $t}')") || return 1
+  printf '%s' "$resp" | jq -e '(.errors // []) | length == 0' > /dev/null 2>&1 || return 1
+  printf '%s' "$resp" | jq -r '(.data.issue.comments.nodes // []) | length > 0'
 }
 
 linear_comment() {
@@ -224,7 +245,7 @@ while IFS= read -r id <&3; do
   br="${BRANCH_PREFIX}${id}"
   r=$(printf '%s' "$t" | jq -c --arg br "$br" '{id, title, url, entered_at, age_hours: null,
     action: "", branch: $br, pr_url: null, reverted: [], skipped: [], conflict: null,
-    shared_with: [], error: null}')
+    not_attempted: [], shared_with: [], error: null}')
 
   if [ -z "$entered" ]; then
     # In QA Failed with no history entry moving it there (created in the
@@ -249,6 +270,21 @@ while IFS= read -r id <&3; do
   if [ -n "$existing" ]; then
     log "$id: revert PR already open: $existing"
     set_r --arg u "$existing" '.action = "open_pr_exists" | .pr_url = $u'
+    # An earlier run may have opened the PR and then failed to comment on the
+    # ticket: post the link now if the ticket does not carry it yet.
+    if ! has=$(linear_has_comment "$uuid" "$existing"); then
+      set_r '.action = "failed" | .error = "could not read the ticket comments"'
+      failed=1
+    elif [ "$has" != true ]; then
+      if linear_comment "$uuid" "Prodzilla opened a revert PR for this ticket's commits: $existing
+
+This ticket has been in $QA_FAILED_STATE for over ${THRESHOLD_HOURS}h, which stops the line for ${GITHUB_REPOSITORY}. Merge the revert to unblock it, or close it if the fix lands and QA re-passes the ticket."; then
+        log "$id: posted the PR link the earlier run did not"
+      else
+        set_r '.action = "failed" | .error = "Linear comment failed"'
+        failed=1
+      fi
+    fi
     finish
     continue
   fi
@@ -269,7 +305,8 @@ while IFS= read -r id <&3; do
   while IFS= read -r c <&4; do
     sha=$(printf '%s' "$c" | jq -r .sha)
     subj=$(printf '%s' "$c" | jq -r .subject)
-    by=$(git log -F --grep="This reverts commit $sha" --format=%h "${LAST_TAG}..${head_sha}" | head -n 1)
+    # Only a live revert counts: if the revert was reverted, the code is back.
+    by=$(jq -r --arg s "$sha" 'if .[$s].kind == "reverted" then (.[$s].reverted_by | map(.[0:7]) | join(", ")) else "" end' <<< "$units")
     if [ -n "$by" ]; then
       log "$id: ${sha:0:7} already reverted by $by; skipping"
       set_r --arg sha "$sha" --arg s "$subj" --arg why "already reverted by $by" \
@@ -294,8 +331,11 @@ while IFS= read -r id <&3; do
       log "$id: reverting ${sha:0:7} conflicts in $(printf '%s' "$files" | jq -r 'join(", ")')"
       git revert --abort > /dev/null 2>&1 || true
       git reset -q --hard
-      set_r --arg sha "$sha" --arg s "$subj" --argjson f "$files" \
-        '.conflict = {sha: $sha, subject: $s, files: $f}'
+      # The older commits after it are not attempted; the PR lists them.
+      set_r --arg sha "$sha" --arg s "$subj" --argjson f "$files" --argjson m "$mine" \
+        '([$m[].sha] | index($sha)) as $i
+         | .conflict = {sha: $sha, subject: $s, files: $f}
+         | .not_attempted = [$m[$i + 1:][] | {sha, subject}]'
       break
     fi
   done 4< <(printf '%s' "$mine" | jq -c '.[]')
@@ -332,8 +372,10 @@ while IFS= read -r id <&3; do
         + ([.conflict.files[] | "- `\(.)`"] | join("\n"))
         + "\n\nThis PR is a draft. To finish it, on this branch run\n\n```\n"
         + "git revert -m 1 \(.conflict.sha)   # drop -m 1 if it is not a merge commit\n```\n\n"
-        + "then resolve the conflicts, revert the ticket'"'"'s older commits listed below the same way, "
-        + "push, and mark the PR ready.\n\n"
+        + "then resolve the conflicts, revert the ticket'"'"'s older commits listed under "
+        + "**Not attempted** the same way (newest first), push, and mark the PR ready.\n\n"
+        + "## Not attempted (older, still to revert)\n\n"
+        + (if (.not_attempted | length) > 0 then ([.not_attempted[] | c] | join("\n")) else "- none" end) + "\n\n"
       else "" end)
     + "## Reverted commits (newest first)\n\n"
     + (if (.reverted | length) > 0 then ([.reverted[] | c] | join("\n")) else "- none" end) + "\n"

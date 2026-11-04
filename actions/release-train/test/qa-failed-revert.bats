@@ -1,4 +1,5 @@
 #!/usr/bin/env bats
+# shellcheck disable=SC2030,SC2031 # each @test runs in its own subshell on purpose.
 # QA Failed revert PRs (SIG-2766, ADR 0001). git is real (a scratch repo with
 # a bare "origin"); GitHub, Linear and Slack are stubbed:
 #   $TMP/linear.json   id -> issue node (state, history)
@@ -41,8 +42,14 @@ case "$url" in
   *linear.app*)
     [ -f "$TMP/linear-down" ] && { printf 'boom\n500'; exit 0; }
     if echo "$body" | jq -e '.query | test("commentCreate")' > /dev/null; then
+      [ -f "$TMP/comment-down" ] && { printf 'boom\n500'; exit 0; }
       echo "$body" | jq -c .variables >> "$TMP/comments"
       printf '{"data":{"commentCreate":{"success":true}}}\n200'
+    elif echo "$body" | jq -e '.query | test("comments\\(")' > /dev/null; then
+      # Has the ticket a comment containing variables.t? From $TMP/comments.
+      t=$(echo "$body" | jq -r .variables.t)
+      n=$(jq -s --arg t "$t" '[.[] | select(.body | contains($t))] | length' "$TMP/comments")
+      printf '{"data":{"issue":{"comments":{"nodes":%s}}}}\n200' "$(jq -nc --argjson n "$n" '[range($n)] | map({id: "c"})')"
     else
       id=$(echo "$body" | jq -r '.variables.id')
       node=$(jq -c --arg id "$id" '.[$id] // null' "$TMP/linear.json")
@@ -87,7 +94,7 @@ EOS
   chmod +x "$TMP/stub/curl" "$TMP/stub/gh"
 
   git init -q --bare -b main "$TMP/origin.git"
-  cd "$TMP/repo"
+  cd "$TMP/repo" || return 1
   git init -q -b main
   git config user.email prodzilla@test
   git config user.name prodzilla
@@ -129,7 +136,7 @@ pr_for() {
     && mv "$TMP/p" "$TMP/prs.json"
 }
 remote_log() { git --git-dir="$TMP/origin.git" log --format=%s "$1"; }
-created() { ls "$TMP" | grep -c '^pr-create-' || true; }
+created() { local f n=0; for f in "$TMP"/pr-create-*; do [ -e "$f" ] && n=$((n + 1)); done; echo "$n"; }
 
 @test "AC1: in QA Failed past the threshold -> revert PR opened and linked on the ticket" {
   change f "one-a" "feat(SIG-1): A"
@@ -263,6 +270,8 @@ EOF
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.tickets[0] | .action == "opened_draft_conflict" and ([.reverted[].subject] == ["feat(SIG-1): A2"])' > /dev/null
   [ "$(remote_log prodzilla/revert-SIG-1 | head -n 1)" = 'Revert "feat(SIG-1): A2"' ]
+  # Nothing older is left to try, so the PR lists none (A conflicted itself).
+  echo "$output" | jq -e '.tickets[0].not_attempted == []' > /dev/null
   # No Slack configured: the comment still explains it.
   [ ! -s "$TMP/slack" ]
   [ -s "$TMP/comments" ]
@@ -288,7 +297,26 @@ EOF
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.tickets[0] | .action == "open_pr_exists" and .pr_url == "https://github.com/o/r/pull/99"' > /dev/null
   [ "$(created)" -eq 0 ]
-  [ ! -s "$TMP/comments" ]
+  # The ticket did not carry the PR link (an earlier comment failed): posted
+  # once, then never again.
+  [ "$(jq -s '[.[] | select(.body | contains("pull/99"))] | length' "$TMP/comments")" -eq 1 ]
+  run run_revert
+  [ "$status" -eq 0 ]
+  [ "$(wc -l < "$TMP/comments" | tr -d ' ')" -eq 1 ]
+}
+
+@test "AC5: a failed ticket comment is retried on the next run" {
+  change f "one-a" "feat(SIG-1): A"
+  ticket SIG-1 "QA Failed" 25
+  touch "$TMP/comment-down"
+  run run_revert
+  [ "$status" -eq 1 ]
+  [ "$(created)" -eq 1 ]
+  rm "$TMP/comment-down"
+  echo "prodzilla/revert-SIG-1" > "$TMP/open-prs"
+  run run_revert
+  [ "$status" -eq 0 ]
+  [ "$(wc -l < "$TMP/comments" | tr -d ' ')" -eq 1 ]
 }
 
 @test "AC5: second run after a PR was opened -> branch exists, nothing new" {
@@ -316,6 +344,44 @@ EOF
     and ([.reverted[].subject] == ["feat(SIG-1): A2"])
     and (.skipped[0].sha == $a) and (.skipped[0].reason | test("already reverted by"))' > /dev/null
   grep -q "## Skipped" "$TMP/pr-create-1"
+}
+
+@test "AC4: older commits after a conflict are listed in the PR as not attempted" {
+  change g "g0" "feat(SIG-1): A0"
+  change f "one-a" "feat(SIG-1): A"
+  change f "one-b" "feat(SIG-2): B edits the same line"
+  ticket SIG-1 "QA Failed" 25
+  ticket SIG-2 "On Dev · Ready for QA"
+  run run_revert
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.tickets[0] | .action == "opened_draft_conflict"
+    and .conflict.subject == "feat(SIG-1): A" and ([.not_attempted[].subject] == ["feat(SIG-1): A0"])' > /dev/null
+  grep -q "## Not attempted" "$TMP/pr-create-1"
+  grep -q "feat(SIG-1): A0" "$TMP/pr-create-1"
+}
+
+@test "a revert that was itself reverted does not count: the commit is reverted again" {
+  change f "one-a" "feat(SIG-1): A"
+  git revert --no-edit HEAD > /dev/null
+  r=$(git rev-parse HEAD)
+  # Older git (and GitHub's revert button) title a re-land 'Revert "Revert ..."'.
+  git revert --no-commit HEAD > /dev/null
+  git commit -q -m 'Revert "Revert "feat(SIG-1): A""' -m "This reverts commit $r."
+  ticket SIG-1 "QA Failed" 25
+  run run_revert
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.tickets[0] | .action == "opened" and ([.reverted[].subject] == ["feat(SIG-1): A"])' > /dev/null
+}
+
+@test "the walk base the caller passes (the tag prod runs) reaches commits in already-tagged builds" {
+  change f "one-a" "feat(SIG-1): A"
+  git tag 1.1.0   # promoted to staging, failed: SIG-1 is in QA Failed
+  change g "g1" "feat(SIG-2): B"
+  ticket SIG-1 "QA Failed" 25
+  ticket SIG-2 "On Dev · Ready for QA"
+  run run_revert 1.0.0 HEAD
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.last_tag == "1.0.0" and .tickets[0].id == "SIG-1" and .tickets[0].action == "opened"' > /dev/null
 }
 
 @test "every commit already reverted -> no PR, reported" {
