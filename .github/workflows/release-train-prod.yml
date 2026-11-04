@@ -1047,6 +1047,7 @@ jobs:
           GH_TOKEN: ${{ steps.prodzilla.outputs.token }}
           SERVICES: ${{ needs.deploy.outputs.services }}
           PREVIOUS_TAGS: ${{ needs.deploy.outputs.previous_tags }}
+          RELEASE_TAG: ${{ needs.deploy.outputs.release_tag }}
           DEPLOY_RUN_KEY: ${{ steps.cfg.outputs.run_key }}
           K8S_REPO: ${{ inputs.gitops_repo }}
           K8S_REF: ${{ inputs.gitops_ref }}

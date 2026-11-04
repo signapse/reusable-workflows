@@ -188,11 +188,19 @@ field() { tail -n1 <<< "$output" | jq -r "$@"; }
   [ "$(jq -r .inputs.run_key "$TMP/dispatched" | sort -u | wc -l | tr -d ' ')" = 1 ]
 }
 
-@test "no previous tag recorded by the Deployment: restored, noted as unchecked" {
+@test "no previous tag recorded by the Deployment: ok only if prod left the failed tag" {
+  export PREVIOUS_TAGS='{}'
+  RELEASE_TAG=1.4.0 rollback
+  [ "$(field .ok)" = true ]
+  [[ "$(field '.results[0].reason')" == *"not 1.4.0; the Deployment recorded no previous tag"* ]]
+}
+
+@test "no previous tag and nothing to compare against: needs a human, not a success" {
   export PREVIOUS_TAGS='{}'
   rollback
-  [ "$(field .ok)" = true ]
-  [[ "$(field '.results[0].reason')" == *"no previous tag to check it against"* ]]
+  [ "$(field .ok)" = false ]
+  [ "$(field .needs_human)" = true ]
+  [[ "$(field '.results[0].reason')" == *"needs a human"* ]]
 }
 
 @test "bad input exits 1" {

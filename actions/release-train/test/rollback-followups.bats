@@ -43,6 +43,20 @@ field() { tail -n1 <<< "$output" | jq -r "$@"; }
   [ -z "$(linear_calls releaseUpdate)" ]
 }
 
+@test "AC2: a Rolled back stage that is not canceled-type is reported, moved or not" {
+  write_release Deployed
+  jq '(.pipeline.stages.nodes[] | select(.name == "Rolled back") | .type) = "completed"' "$TMP/release.json" > "$TMP/r" && mv "$TMP/r" "$TMP/release.json"
+  RELEASE_ID=rel-1 run "$S/release-rolled-back.sh"
+  [ "$status" -eq 1 ]
+  [ "$(field .changed)" = true ]
+  [[ "$(field .reason)" == *"not canceled"* ]]
+  jq '.stage = {name: "Rolled back"}' "$TMP/release.json" > "$TMP/r" && mv "$TMP/r" "$TMP/release.json"
+  RELEASE_ID=rel-1 run "$S/release-rolled-back.sh"
+  [ "$status" -eq 1 ]
+  [ "$(field .changed)" = false ]
+  [[ "$(field .reason)" == *"not canceled"* ]]
+}
+
 @test "AC2: the stage name is configurable; a missing stage fails naming the stages" {
   write_release Deployed
   RELEASE_ID=rel-1 STAGE_NAME="Reverted" run "$S/release-rolled-back.sh"
