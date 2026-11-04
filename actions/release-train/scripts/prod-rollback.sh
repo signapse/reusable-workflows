@@ -36,6 +36,8 @@
 # Env:
 #   SERVICES          JSON array of services to roll back (required)
 #   PREVIOUS_TAGS     JSON object service -> tag prod ran before (may be {})
+#   RELEASE_TAG       the tag being rolled back from; without a previous tag,
+#                     a rollback is ok only if it restored something else
 #   DEPLOY_RUN_KEY    the deploy job's run key; service S's deploy-prod key is
 #                     DEPLOY_RUN_KEY-S and its rollback key DEPLOY_RUN_KEY-S-rollback (required)
 #   ENVIRONMENT       rollback.yml environment (default prod)
@@ -143,7 +145,13 @@ evaluate() {
       if [ "$conclusion" != success ]; then
         finish "$svc" "$conclusion" "$result" false "rollback.json says success but the run concluded ${conclusion}"
       elif [ -z "$expected" ]; then
-        finish "$svc" "$conclusion" "$result" true "restored ${restored}; the Deployment recorded no previous tag to check it against"
+        # No previous tag to compare with (review fix): ok only when what
+        # runs now is provably not the failed tag. Otherwise a human checks.
+        if [ -n "${RELEASE_TAG:-}" ] && [ -n "$restored" ] && [ "$restored" != "$RELEASE_TAG" ]; then
+          finish "$svc" "$conclusion" "$result" true "restored ${restored}, not ${RELEASE_TAG}; the Deployment recorded no previous tag to check it against"
+        else
+          finish "$svc" "$conclusion" "$result" false "needs a human: restored ${restored:-nothing}, and the Deployment recorded no previous tag to verify it against${RELEASE_TAG:+ (failed tag ${RELEASE_TAG})}"
+        fi
       elif [ "$restored" = "$expected" ]; then
         finish "$svc" "$conclusion" "$result" true "restored ${restored}"
       else

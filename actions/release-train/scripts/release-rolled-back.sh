@@ -80,15 +80,20 @@ fi
 from=$(jq -r '.stage.name // ""' <<< "$release_json")
 
 lc() { tr '[:upper:]' '[:lower:]' <<< "$1"; }
-if [ "$(lc "$from")" = "$(lc "$STAGE_NAME")" ]; then
-  log "Release $(jq -r .version <<< "$release_json") is already in '${from}'"
-  out true false "already in ${from}"
-fi
-
 stage=$(jq -c --arg s "$(lc "$STAGE_NAME")" '[.pipeline.stages.nodes[]? | select((.name | ascii_downcase) == $s)] | first // empty' <<< "$release_json")
 [ -n "$stage" ] || out false false "pipeline $(jq -r '.pipeline.name // "?"' <<< "$release_json") has no stage '${STAGE_NAME}' (has: $(jq -r '[.pipeline.stages.nodes[]?.name] | join(", ")' <<< "$release_json"))"
-[ "$(jq -r .type <<< "$stage")" = canceled ] \
-  || log "WARNING: stage '${STAGE_NAME}' is type $(jq -r .type <<< "$stage"), not canceled; dora-metrics counts only canceled-type stages by type"
+# dora-metrics counts a failed Deployment by the stage TYPE. A misconfigured
+# stage still gets the Release (it is the closest record), but the result is
+# not ok, so the run says the failure is not counted (review fix).
+type=$(jq -r '.type // ""' <<< "$stage")
+type_note=""
+[ "$type" = canceled ] || type_note="; stage '${STAGE_NAME}' is type ${type:-unknown}, not canceled, so dora-metrics will not count this failed Deployment: fix the pipeline's stage"
+
+if [ "$(lc "$from")" = "$(lc "$STAGE_NAME")" ]; then
+  log "Release $(jq -r .version <<< "$release_json") is already in '${from}'"
+  [ -z "$type_note" ] || out false false "already in ${from}${type_note}"
+  out true false "already in ${from}"
+fi
 
 # shellcheck disable=SC2016 # GraphQL variables, not shell expansion.
 data=$(gql 'mutation($id:String!,$input:ReleaseUpdateInput!){ releaseUpdate(id:$id, input:$input){ success } }' \
@@ -96,4 +101,5 @@ data=$(gql 'mutation($id:String!,$input:ReleaseUpdateInput!){ releaseUpdate(id:$
   || out false false "could not move the Release to ${STAGE_NAME}: $(cat "$errf")"
 [ "$(jq -r '.releaseUpdate.success // false' <<< "$data")" = true ] || out false false "releaseUpdate did not succeed"
 log "Release $(jq -r .version <<< "$release_json"): ${from} -> ${STAGE_NAME}"
+[ -z "$type_note" ] || out false true "moved from ${from} to ${STAGE_NAME}${type_note}"
 out true true "moved from ${from} to ${STAGE_NAME}"
