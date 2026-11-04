@@ -39,7 +39,7 @@ teardown() { rm -rf "$TMP"; }
   [[ "$body" == *"**dev smoke**"* ]]
   [[ "$body" == *"not moved to On Dev · Ready for QA"* ]]
   [[ "$body" == *"$RUN_URL"* ]]
-  [[ "$body" == *"re-run this run's failed jobs"* ]]
+  [[ "$body" == *"merge a fix PR linked to the same ticket"* ]]
   [ "$(jq -r 'select(.n == "6") | .repo' "$TMP/comments")" = signapse/app ]
 }
 

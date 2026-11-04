@@ -42,7 +42,7 @@ while IFS= read -r pr; do
   author=$(printf '%s' "$pr" | jq -r '.author')
   body="@${author} the main build containing this PR failed at **${STAGE}**, so its tickets were not moved to On Dev · Ready for QA. ${links}
 
-Tickets linked to this PR move only once this run passes: after a fix reaches dev (or if it was a flake), re-run this run's failed jobs."
+Its tickets move once a later build passes dev smoke: merge a fix PR linked to the same ticket (it supersedes this one), or re-run this run's failed jobs if it was a flake."
   if gh pr comment "$num" --repo "$repo" --body "$body" > /dev/null; then
     notified=$((notified + 1))
   else

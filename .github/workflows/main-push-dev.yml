@@ -26,7 +26,7 @@ name: Main Push · dev smoke and QA hand-off (reusable)
 #     dev:
 #       needs: build
 #       if: ${{ !cancelled() }}
-#       uses: signapse/reusable-workflows/.github/workflows/main-push-dev.yml@main
+#       uses: signapse/reusable-workflows/.github/workflows/main-push-dev.yml@main   # pin a tag/sha once cut
 #       permissions:
 #         contents: read
 #         pull-requests: write   # failure comment on the merged PR
@@ -34,9 +34,16 @@ name: Main Push · dev smoke and QA hand-off (reusable)
 #         build_result: ${{ needs.build.result }}
 #         dev_watch_paths: workloads/dev/signstream-api/helmrelease-patch.yaml
 #         read_app_id: ${{ vars.PIPELINE_READ_APP_ID }}
-#       secrets: inherit   # or pass LINEAR_API_KEY, READ_APP_PRIVATE_KEY,
-#                          # SLACK_BOT_TOKEN and the E2E_* secrets by name.
-#                          # signapse-e2e only ever receives the 4 E2E_* ones.
+#       # Pass secrets by name, never `inherit`: this workflow, and signapse-e2e
+#       # behind it, then see only what they need.
+#       secrets:
+#         LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+#         READ_APP_PRIVATE_KEY: ${{ secrets.PIPELINE_READ_APP_PRIVATE_KEY }}
+#         SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}             # optional
+#         E2E_DEV_SIGNSTUDIO_ADMIN_API_TOKEN: ${{ secrets.E2E_DEV_SIGNSTUDIO_ADMIN_API_TOKEN }}
+#         E2E_DEV_SIGNSTUDIO_USER_EMAIL: ${{ secrets.E2E_DEV_SIGNSTUDIO_USER_EMAIL }}
+#         E2E_DEV_SIGNSTUDIO_USER_PASSWORD: ${{ secrets.E2E_DEV_SIGNSTUDIO_USER_PASSWORD }}
+#         E2E_LINEAR_API_KEY: ${{ secrets.E2E_LINEAR_API_KEY }}
 #
 # The "Dev smoke verdict" job name is what other repos' runs look for when a
 # ticket is linked to PRs in several repos. Do not rename it without changing
@@ -362,6 +369,11 @@ jobs:
           RT="$GITHUB_WORKSPACE/_rw/actions/release-train/scripts"
           CURRENT_PRS=$(echo "$PRS" | jq -c '[.[] | "\(.repo)#\(.number)"]')
           export CURRENT_PRS
+          # The allowed-from check (ticket_from_states) lives in the gate;
+          # ticket-transitioner.sh moves unconditionally and only gets tickets
+          # the gate already cleared. When the transitioner gains its own
+          # allowed-from + team options (the SIG-2764 stack, #44), converge on
+          # those and keep one copy of the rule.
           decisions=$(echo "$TICKETS" | "$RT/dev-ready-gate.sh")
           movable=$(echo "$decisions" | jq -c '[.[] | select(.move) | .id]')
           results=$(echo "$movable" | "$RT/ticket-transitioner.sh" "$TARGET_STATE")

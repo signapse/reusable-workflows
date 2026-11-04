@@ -55,7 +55,7 @@ done
 echo "$url" >> "$GH_FIX/calls.log"
 f="$GH_FIX/$(echo "$url" | tr '/?&=' '____')"
 [ -f "$f" ] || { echo "gh: HTTP 404 $url" >&2; exit 1; }
-jq -c "$filter" "$f"
+jq -rc "$filter" "$f"   # gh --jq prints strings raw
 EOS
   chmod +x "$TMP/stub/curl" "$TMP/stub/gh"
 }
@@ -74,10 +74,10 @@ issue() {
 
 gh_fix() { echo "$2" > "$GH_FIX/$(echo "$1" | tr '/?&=' '____')"; }
 
-# pr <repo> <n> <state> <merged:true|false> <merge-sha>
+# pr <repo> <n> <state> <merged:true|false> <merge-sha> [merged_at]
 pr() {
   local merged_at=null
-  [ "$4" = true ] && merged_at='"2026-11-01T00:00:00Z"'
+  [ "$4" = true ] && merged_at="\"${6:-2026-11-01T00:00:00Z}\""
   gh_fix "repos/$1/pulls/$2" "{\"state\":\"$3\",\"merged_at\":$merged_at,\"merge_commit_sha\":\"$5\"}"
 }
 
@@ -211,13 +211,73 @@ run_gate() { run bash -c "echo '$1' | '$SCRIPT' 2>/dev/null"; }
   [ "$(decision SIG-1)" = true ]
 }
 
-@test "AC3: two PRs in the same repo, earlier one's smoke failed -> stays" {
+# smoke_failed <repo> <n> <sha> <run-id> <merged_at>: a merged PR whose dev smoke failed.
+smoke_failed() {
+  pr "$1" "$2" closed true "$3" "$5"
+  runs "$1" "$3" "[{\"id\":$4,\"status\":\"completed\",\"conclusion\":\"failure\"}]"
+  jobs "$1" "$4" '[{"name":"dev / Dev smoke verdict","status":"completed","conclusion":"failure"}]'
+}
+# smoke_passed <repo> <n> <sha> <run-id> <merged_at>
+smoke_passed() {
+  pr "$1" "$2" closed true "$3" "$5"
+  runs "$1" "$3" "[{\"id\":$4,\"status\":\"completed\",\"conclusion\":\"success\"}]"
+  jobs "$1" "$4" '[{"name":"dev / Dev smoke verdict","status":"completed","conclusion":"success"}]'
+}
+
+@test "fix PR in this build, merged after the failed one in the same repo, supersedes it -> moves" {
   CURRENT_PRS='["signapse/app#11"]'
   issue SIG-1 "In Review" https://github.com/signapse/app/pull/10 https://github.com/signapse/app/pull/11
-  pr signapse/app 10 closed true sha10
-  runs signapse/app sha10 '[{"id":100,"status":"completed"}]'
-  jobs signapse/app 100 '[{"name":"build / build (web)","status":"completed","conclusion":"failure"},
-                          {"name":"dev / Dev smoke verdict","status":"completed","conclusion":"failure"}]'
+  smoke_failed signapse/app 10 sha10 100 2026-11-01T10:00:00Z
+  pr signapse/app 11 closed true sha11 2026-11-01T12:00:00Z
+  run_gate '["SIG-1"]'
+  [ "$(decision SIG-1)" = true ]
+  [[ "$(reason SIG-1)" == *"signapse/app#10 dev smoke failure, superseded by signapse/app#11"* ]]
+}
+
+@test "this build's PR merged BEFORE the failed one does not supersede it -> stays" {
+  CURRENT_PRS='["signapse/app#11"]'
+  issue SIG-1 "In Review" https://github.com/signapse/app/pull/10 https://github.com/signapse/app/pull/11
+  smoke_failed signapse/app 10 sha10 100 2026-11-01T12:00:00Z
+  pr signapse/app 11 closed true sha11 2026-11-01T10:00:00Z
+  run_gate '["SIG-1"]'
+  [ "$(decision SIG-1)" = false ]
+  [[ "$(reason SIG-1)" == *"signapse/app#10 dev smoke failure"* ]]
+}
+
+@test "an earlier passing PR elsewhere does not supersede; a later passing PR in the same repo does" {
+  # app#10 is this build. api#7 failed; api#8 merged later and passed.
+  issue SIG-1 "In Review" https://github.com/signapse/app/pull/10 https://github.com/signapse/api/pull/7 https://github.com/signapse/api/pull/8
+  smoke_failed signapse/api 7 sha7 70 2026-11-01T10:00:00Z
+  smoke_passed signapse/api 8 sha8 80 2026-11-01T11:00:00Z
+  run_gate '["SIG-1"]'
+  [ "$(decision SIG-1)" = true ]
+  [[ "$(reason SIG-1)" == *"superseded by signapse/api#8"* ]]
+}
+
+@test "a passing PR in a different repo never supersedes a failure" {
+  CURRENT_PRS='["signapse/app#10"]'
+  issue SIG-1 "In Review" https://github.com/signapse/app/pull/10 https://github.com/signapse/api/pull/7
+  smoke_failed signapse/api 7 sha7 70 2026-11-01T10:00:00Z
+  gh_fix "repos/signapse/app/pulls/10" '{"state":"closed","merged_at":"2026-11-02T00:00:00Z"}'
+  run_gate '["SIG-1"]'
+  [ "$(decision SIG-1)" = false ]
+}
+
+@test "a pending (still running) PR is not superseded by a later pass" {
+  issue SIG-1 "In Review" https://github.com/signapse/app/pull/10 https://github.com/signapse/api/pull/7 https://github.com/signapse/api/pull/8
+  pr signapse/api 7 closed true sha7 2026-11-01T10:00:00Z
+  runs signapse/api sha7 '[{"id":70,"status":"in_progress"}]'
+  jobs signapse/api 70 '[{"name":"dev / Dev smoke verdict","status":"queued","conclusion":null}]'
+  smoke_passed signapse/api 8 sha8 80 2026-11-01T11:00:00Z
+  run_gate '["SIG-1"]'
+  [ "$(decision SIG-1)" = false ]
+  [[ "$(reason SIG-1)" == *"still running"* ]]
+}
+
+@test "a later PR whose smoke also failed does not supersede -> stays" {
+  issue SIG-1 "In Review" https://github.com/signapse/app/pull/10 https://github.com/signapse/api/pull/7 https://github.com/signapse/api/pull/8
+  smoke_failed signapse/api 7 sha7 70 2026-11-01T10:00:00Z
+  smoke_failed signapse/api 8 sha8 80 2026-11-01T11:00:00Z
   run_gate '["SIG-1"]'
   [ "$(decision SIG-1)" = false ]
 }

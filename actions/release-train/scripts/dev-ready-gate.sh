@@ -10,7 +10,10 @@
 #
 # A ticket moves only when all of these hold:
 #   1. Its Linear state is one of FROM_STATES. Tickets further along, or in
-#      QA Failed, are never touched.
+#      QA Failed, are never touched. This is the allowed-from rule for the
+#      move: ticket-transitioner.sh itself moves unconditionally. Once the
+#      transitioner takes allowed-from and team options (#44), pass FROM_STATES
+#      there too and keep a single implementation.
 #   2. If Linear has GitHub PRs attached to it, at least one is a PR merged in
 #      this build (CURRENT_PRS), so a passing dev build of an unrelated change
 #      does not move it. A ticket with no PR attachments is trusted on the
@@ -21,6 +24,11 @@
 #      have no such job (a repo not on the pipeline, e.g. Terraform) counts as
 #      passed only once a push run on its merge commit succeeded and none
 #      failed (all-skipped/neutral is not enough).
+#      A linked PR whose build or dev smoke FAILED is superseded by another
+#      PR on the same ticket, in the same repo, merged after it, whose build
+#      passed (this build's PRs count as passed): main is linear, so that
+#      later passing build contains the failed PR's change. Pending, open or
+#      unreadable PRs are never superseded.
 # The caller only invokes this after this build's own smoke passed, so the
 # CURRENT_PRS are taken as passed.
 #
@@ -53,27 +61,34 @@ fi
 from_json=$(printf '%s' "$FROM_STATES" | jq -Rc 'split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(. != ""))')
 
 # pr_verdict <owner/repo> <number>
-# Prints "pass|<note>", "skip|<note>" or "block|<reason>".
+# Prints one compact JSON object {ref, repo, kind, merged, text} where kind is
+#   pass   merged and passed (merged = merged_at)
+#   skip   closed without merging (ignored)
+#   block  not decidable yet: open, still running, unreadable, no run yet
+#   fail   merged, finished, did not pass (merged = merged_at); may be
+#          superseded by a later passing PR in the same repo
 pr_verdict() {
-  local repo="$1" num="$2" pr merged state sha runs jobs matched
+  local repo="$1" num="$2" pr merged="" state sha runs jobs matched
+  v() { jq -nc --arg ref "${repo}#${num}" --arg repo "$repo" --arg k "$1" --arg m "$merged" --arg t "$2" \
+    '{ref:$ref, repo:$repo, kind:$k, merged:$m, text:$t}'; }
   if ! pr=$(gh api "repos/${repo}/pulls/${num}" 2>/dev/null); then
-    echo "block|cannot read ${repo}#${num} (token lacks access?)"
+    v block "cannot read ${repo}#${num} (token lacks access?)"
     return
   fi
   merged=$(printf '%s' "$pr" | jq -r '.merged_at // empty')
   state=$(printf '%s' "$pr" | jq -r '.state')
   if [ -z "$merged" ]; then
     if [ "$state" = "closed" ]; then
-      echo "skip|${repo}#${num} closed without merging"
+      v skip "${repo}#${num} closed without merging"
     else
-      echo "block|${repo}#${num} not merged yet"
+      v block "${repo}#${num} not merged yet"
     fi
     return
   fi
   sha=$(printf '%s' "$pr" | jq -r '.merge_commit_sha')
   if ! runs=$(gh api "repos/${repo}/actions/runs?head_sha=${sha}&event=push&per_page=100" \
     --jq '[.workflow_runs[] | {id, status, conclusion}]' 2>/dev/null); then
-    echo "block|cannot read workflow runs of ${repo}@${sha:0:7}"
+    v block "cannot read workflow runs of ${repo}@${sha:0:7}"
     return
   fi
   jobs='[]'
@@ -82,7 +97,7 @@ pr_verdict() {
     local j
     if ! j=$(gh api "repos/${repo}/actions/runs/${id}/jobs?filter=latest&per_page=100" \
       --jq '[.jobs[] | {name, status, conclusion}]' 2>/dev/null); then
-      echo "block|cannot read jobs of ${repo} run ${id}"
+      v block "cannot read jobs of ${repo} run ${id}"
       return
     fi
     jobs=$(jq -nc --argjson a "$jobs" --argjson b "$j" '$a + $b')
@@ -90,22 +105,22 @@ pr_verdict() {
   # shellcheck disable=SC2016 # jq $p binding, not shell expansion.
   matched=$(printf '%s' "$jobs" | jq -c --arg p "$SMOKE_JOB_PATTERN" '[.[] | select(.name | test($p))]')
   if printf '%s' "$matched" | jq -e 'any(.[]; .conclusion == "success")' > /dev/null; then
-    echo "pass|${repo}#${num} passed dev smoke"
+    v pass "${repo}#${num} passed dev smoke"
   elif printf '%s' "$matched" | jq -e 'length > 0' > /dev/null; then
     if printf '%s' "$matched" | jq -e 'any(.[]; .status != "completed")' > /dev/null; then
-      echo "block|${repo}#${num} dev smoke still running"
+      v block "${repo}#${num} dev smoke still running"
     else
-      echo "block|${repo}#${num} dev smoke $(printf '%s' "$matched" | jq -r '[.[].conclusion] | unique | join(",")')"
+      v fail "${repo}#${num} dev smoke $(printf '%s' "$matched" | jq -r '[.[].conclusion] | unique | join(",")')"
     fi
   elif printf '%s' "$runs" | jq -e 'any(.[]; .status != "completed")' > /dev/null; then
-    echo "block|${repo}#${num} build still running"
+    v block "${repo}#${num} build still running"
   elif printf '%s' "$runs" | jq -e 'length == 0' > /dev/null; then
-    echo "block|${repo}#${num} has no main-push run on ${sha:0:7} yet"
+    v block "${repo}#${num} has no main-push run on ${sha:0:7} yet"
   elif printf '%s' "$runs" | jq -e 'any(.[]; .conclusion == "success")
       and all(.[]; .conclusion == "success" or .conclusion == "skipped" or .conclusion == "neutral")' > /dev/null; then
-    echo "pass|${repo}#${num} merged and its runs passed; ${repo} has no dev smoke job"
+    v pass "${repo}#${num} merged and its runs passed; ${repo} has no dev smoke job"
   else
-    echo "block|${repo}#${num} has no dev smoke job and a run on ${sha:0:7} did not pass"
+    v fail "${repo}#${num} has no dev smoke job and a run on ${sha:0:7} did not pass"
   fi
 }
 
@@ -149,15 +164,34 @@ while IFS= read -r id; do
     continue
   fi
 
-  blocked=""
-  notes=""
+  verdicts='[]'
   for ref in $(jq -rn --argjson l "$linked" --argjson c "$CURRENT_PRS" '$l[] | select(. as $x | $c | index($x) | not)'); do
-    v=$(pr_verdict "${ref%#*}" "${ref##*#}")
-    case "$v" in
-      block\|*) blocked+="${blocked:+; }${v#block|}" ;;
-      *) notes+="${notes:+; }${v#*|}" ;;
-    esac
+    verdicts=$(jq -c --argjson e "$(pr_verdict "${ref%#*}" "${ref##*#}")" '. + [$e]' <<<"$verdicts")
   done
+  # This build's own linked PRs passed. Their merge time only matters when a
+  # failed PR in the same repo might be superseded, so fetch it only then.
+  for ref in $(jq -rn --argjson l "$linked" --argjson c "$CURRENT_PRS" '$l[] | select(. as $x | $c | index($x))'); do
+    repo="${ref%#*}"
+    merged=""
+    if jq -e --arg r "$repo" 'any(.[]; .kind == "fail" and .repo == $r)' > /dev/null <<<"$verdicts"; then
+      merged=$(gh api "repos/${repo}/pulls/${ref##*#}" --jq '.merged_at // ""' 2>/dev/null || true)
+    fi
+    verdicts=$(jq -c --arg ref "$ref" --arg r "$repo" --arg m "$merged" \
+      '. + [{ref:$ref, repo:$r, kind:"pass", merged:$m, text:"\($ref) is in this build"}]' <<<"$verdicts")
+  done
+  # A fail is superseded by a pass in the same repo merged strictly after it
+  # (ISO-8601 UTC timestamps compare correctly as strings).
+  # shellcheck disable=SC2016 # jq bindings, not shell expansion.
+  decided=$(jq -c '. as $all | map(
+      if .kind == "fail" then
+        . as $f
+        | ([$all[] | select(.kind == "pass" and .repo == $f.repo and .merged != "" and $f.merged != "" and .merged > $f.merged)]
+           | sort_by(.merged) | last) as $by
+        | if $by then .kind = "superseded" | .text = "\($f.text), superseded by \($by.ref) merged later and passing"
+          else . end
+      else . end)' <<<"$verdicts")
+  blocked=$(jq -r '[.[] | select(.kind == "block" or .kind == "fail") | .text] | join("; ")' <<<"$decided")
+  notes=$(jq -r '[.[] | select(.kind != "block" and .kind != "fail" and (.text | endswith("is in this build") | not)) | .text] | join("; ")' <<<"$decided")
   if [ -n "$blocked" ]; then
     add "$id" false "waiting on linked PRs: $blocked"
   else
