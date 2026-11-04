@@ -4,6 +4,7 @@
 # $TMP/builds.json (commit subject -> main-push run_number) and PRs from
 # $TMP/prs.json (commit subject -> [{title, head}]).
 load 'helpers/load'
+bats_require_minimum_version 1.5.0
 
 SCRIPT="$BATS_TEST_DIRNAME/../scripts/release-candidate.sh"
 
@@ -61,7 +62,7 @@ esac
 EOS
   chmod +x "$TMP/stub/curl" "$TMP/stub/gh"
 
-  cd "$TMP/repo"
+  cd "$TMP/repo" || return 1
   git init -q -b main
   git config user.email t@t.t
   git config user.name t
@@ -151,7 +152,7 @@ a_then_b() {
   echo "$output" | jq -e --arg a "$(sha_of "feat(SIG-1): A")" '.rc.sha == $a' > /dev/null
   echo "$output" | jq -e '[.tickets[].id] == ["SIG-1"] and .blocked_by.id == "SIG-3"' > /dev/null
   # The walk stopped: SIG-2 was never even looked up.
-  ! grep -qx SIG-2 "$TMP/linear-calls"
+  run ! grep -qx SIG-2 "$TMP/linear-calls"
 }
 
 @test "AC4: a commit with no ticket never blocks and is listed as untracked" {
@@ -272,7 +273,7 @@ a_then_b() {
   run select_rc
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.last_tag == "1.0.1" and [.tickets[].id] == ["SIG-2"]' > /dev/null
-  ! grep -qx SIG-1 "$TMP/linear-calls"
+  run ! grep -qx SIG-1 "$TMP/linear-calls"
 }
 
 @test "a higher release tag on a merged side branch does not move the boundary" {
@@ -441,7 +442,7 @@ revert_of() {
   echo "$output" | jq -e --arg r "$r" '.reverted == [{sha: .reverted[0].sha, subject: "feat(SIG-1): A", tickets: ["SIG-1"], reverted_by: [$r]}]' > /dev/null
   echo "$output" | jq -e '[.untracked_commits[] | select(.revert)] | length == 1' > /dev/null
   # Linear is never asked about SIG-1: neither the reverted commit nor the revert block.
-  ! grep -qx SIG-1 "$TMP/linear-calls"
+  run ! grep -qx SIG-1 "$TMP/linear-calls"
 }
 
 @test "builds between a reverted commit and its revert are not selectable" {

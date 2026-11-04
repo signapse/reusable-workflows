@@ -1,4 +1,5 @@
 #!/usr/bin/env bats
+# shellcheck disable=SC2016 # literal Markdown backticks in expected output.
 load 'helpers/load'
 
 SCRIPT="$BATS_TEST_DIRNAME/../scripts/release-candidate-summary.sh"
