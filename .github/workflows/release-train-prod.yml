@@ -19,6 +19,8 @@ name: Release Train prod (reusable)
 #   smoke     signapse-e2e @prod-safe against prod (AC4)
 #   verdict   pass: AC5 guard again, tickets -> On Prod.
 #             fail: prod_smoke_passed=false and a red run.
+#             unknown (no suite verdict): prod_smoke_passed empty and a red
+#             run; smoke-unknown alerts critically, nothing is rolled back.
 #   partial   a deploy-prod run or the final check fails or times out after
 #             some services already run the tag: a failed Deployment.
 #             prod_smoke_passed=false, partial_deployment=true and
@@ -233,6 +235,11 @@ on:
         required: false
         type: number
         default: 3
+      qa_passed_label:
+        description: 'Label removed from every ticket the rollback moves to QA Failed.'
+        required: false
+        type: string
+        default: 'QA Passed'
       rolled_back_stage:
         description: 'Canceled-type stage of the Linear release pipeline that marks a Release rolled back.'
         required: false
@@ -764,13 +771,28 @@ jobs:
           TAG: ${{ needs.deploy.outputs.release_tag }}
         run: |
           set -euo pipefail
-          passed=false
-          [ "$JOB_RESULT" = success ] && [ "$RESULT" = passed ] && passed=true
+          # Three answers, never a guess (SIG-2771):
+          #   true    the suite job succeeded and reported passed
+          #   false   the suite reported failed: the tests ran against prod
+          #           and failed, so the rollback runs
+          #   (empty) unknown: no result (the suite job errored, was cancelled
+          #           or skipped before reporting), or passed with a job that
+          #           did not succeed. Neither a pass nor a rollback: the
+          #           smoke-unknown job alerts and a human decides.
+          case "$RESULT" in
+            passed) if [ "$JOB_RESULT" = success ]; then passed=true; else passed=""; fi ;;
+            failed) passed=false ;;
+            *) passed="" ;;
+          esac
           echo "passed=$passed" >> "$GITHUB_OUTPUT"
           {
             echo "## Prod smoke (@prod-safe) on \`$TAG\`"
             echo
-            if [ "$passed" = true ]; then echo "**Passed.**"; else echo "**Failed** (job ${JOB_RESULT}, result ${RESULT:-none}). Rollback is SIG-2771's job."; fi
+            case "$passed" in
+              true) echo "**Passed.**" ;;
+              false) echo "**Failed** (job ${JOB_RESULT}). The rollback job restores the previous tags." ;;
+              *) echo "**Unknown** (job ${JOB_RESULT}, result ${RESULT:-none}): not rolled back, not passed; see the smoke-unknown alert." ;;
+            esac
             [ -z "$REPORT_URL" ] || echo "[Playwright report]($REPORT_URL)"
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -888,8 +910,54 @@ jobs:
           PASSED: ${{ steps.smoke.outputs.passed }}
           RELEASE_RESULT: ${{ needs.release.result }}
         run: |
-          [ "$PASSED" = true ] || echo "::error::Prod @prod-safe tests did not pass. prod_smoke_passed=false."
+          case "$PASSED" in
+            true) ;;
+            false) echo "::error::Prod @prod-safe tests failed. prod_smoke_passed=false." ;;
+            *) echo "::error::The prod @prod-safe result is unknown (no verdict from the suite). prod_smoke_passed is empty." ;;
+          esac
           [ "$RELEASE_RESULT" = success ] || echo "::error::The Linear/Sentry release was not recorded (${RELEASE_RESULT}). Re-run failed jobs: deployment-release is idempotent."
+          exit 1
+
+  # SIG-2771: the smoke result is unknown, not 'false': the suite gave no
+  # verdict, or the verdict job died before reading it. Rolling back a
+  # Deployment that may be healthy is worse than asking a human: alert
+  # critically and end red, change nothing.
+  smoke-unknown:
+    name: Prod smoke result unknown
+    needs: [deploy, smoke, verdict]
+    if: >-
+      !cancelled() && needs.deploy.outputs.deployed == 'true' &&
+      needs.verdict.outputs.prod_smoke_passed != 'true' && needs.verdict.outputs.prod_smoke_passed != 'false'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Fetch release-train scripts
+        uses: actions/checkout@v4
+        with:
+          repository: signapse/reusable-workflows
+          ref: main
+          path: _rw
+          persist-credentials: false
+      - name: Alert Slack and end red
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL: ${{ inputs.slack_channel || inputs.slack_releases_channel || vars.SLACK_RELEASES_CHANNEL || '#releases' }}
+          TAG: ${{ needs.deploy.outputs.release_tag }}
+          SMOKE_JOB: ${{ needs.smoke.result }}
+          SMOKE_RESULT: ${{ needs.smoke.outputs.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          msg="Prod runs \`${TAG}\` but the verdict job did not record the @prod-safe result (smoke job ${SMOKE_JOB}, result ${SMOKE_RESULT:-none}). Nothing was rolled back and no ticket moved. Check prod, then re-run failed jobs or roll back by hand."
+          echo "::error::${msg}"
+          if [ -n "$SLACK_BOT_TOKEN" ]; then
+            # shellcheck source=/dev/null
+            source "$GITHUB_WORKSPACE/_rw/actions/release-train/lib/slack.sh"
+            resp=$(jq -nc --arg c "$SLACK_CHANNEL" --arg t ":rotating_light: <!channel> ${GITHUB_REPOSITORY}: ${msg} <${RUN_URL}|Run>" '{channel: $c, text: $t}' | slack_post) || resp='{"ok":false}'
+            [ "$(jq -r .ok <<< "$resp")" = true ] || echo "::error::Slack alert failed: $resp"
+          fi
           exit 1
 
   # SIG-2771: a failed @prod-safe smoke rolls back by itself (spec step 6
@@ -1053,6 +1121,8 @@ jobs:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_CHANNEL: ${{ inputs.slack_channel || inputs.slack_releases_channel || vars.SLACK_RELEASES_CHANNEL || '#releases' }}
           QA_FAILED_STATE: ${{ inputs.qa_failed_state }}
+          QA_PASSED_LABEL: ${{ inputs.qa_passed_label }}
+          LINEAR_TEAM_KEY: ${{ inputs.linear_team_key }}
           TICKETS: ${{ needs.deploy.outputs.tickets }}
           ROLLBACK_OK: ${{ steps.rollback.outputs.ok }}
           ROLLBACK_RESULTS: ${{ steps.rollback.outputs.results }}
