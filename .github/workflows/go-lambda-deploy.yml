@@ -166,8 +166,17 @@ jobs:
         if: ${{ inputs.enable_private_repos }}
         env:
           DEPS_TOKEN: ${{ steps.deps.outputs.token || secrets.github_pat }}
+          USE_APP: ${{ steps.app.outputs.use_app }}
         run: |
-          git config --global url."https://x-access-token:${DEPS_TOKEN}@github.com/signapse/".insteadOf "https://github.com/signapse/"
+          if [ "$USE_APP" = "true" ]; then
+            # An installation token only reaches the repos the App is installed on,
+            # all under signapse, so scope the rewrite to that owner.
+            git config --global url."https://x-access-token:${DEPS_TOKEN}@github.com/signapse/".insteadOf "https://github.com/signapse/"
+          else
+            # PAT fallback: unchanged behaviour. A PAT can also read private modules
+            # in other orgs listed in goprivate, so keep the github.com-wide rewrite.
+            git config --global url."https://${DEPS_TOKEN}@github.com/".insteadOf "https://github.com/"
+          fi
 
       - name: Build Lambda function
         run: |
