@@ -341,20 +341,26 @@ re-selects.
    - Pass: every ticket gets `Staging Passed`, loses `Staging Failed`, and
      gets a comment with the run and report links. The column stays On
      Staging.
-   - Fail: every ticket gets `Staging Failed`, loses `Staging Passed` and
-     `QA Passed`, gets the comment and moves to `QA Failed` (ADR 0001: the
-     pipeline cannot blame one ticket). QA approval does not survive QA
-     Failed (spec "Board and labels"): without this, a fix merged later
-     would be selectable on the old approval. A ticket in `Done` (a
-     follow-up commit) stays in Done. A Slack alert goes to `slack_channel`.
-     The run fails.
+   - Fail: every ticket gets `Staging Failed`, loses `Staging Passed`, gets
+     the comment and moves to `QA Failed` (ADR 0001: the pipeline cannot
+     blame one ticket), losing `QA Passed` (`scripts/qa-failed-tickets.sh`).
+     QA approval does not survive QA Failed (spec "Board and labels"):
+     without this, a fix merged later would be selectable on the old
+     approval. A ticket in `Done` (a follow-up commit) stays in Done and
+     keeps `QA Passed`, since it never went back to QA. A ticket whose move
+     failed loses `QA Passed` anyway, so it still blocks the line. A Slack
+     alert goes to `slack_channel`, naming which tickets are in QA Failed,
+     which stayed where they were, and which Linear could not move. The run
+     fails.
 3. **Outputs.** `staging_passed` is `'true'` only on a pass that was recorded
    on every ticket; `report_url` links the Playwright report. Production
    (SIG-2769) runs only when `staging_passed == 'true'`.
 
 Labels are added and removed one at a time (`issueAddLabel` /
 `issueRemoveLabel`), so a ticket's other labels stay. The label to add is
-looked up by name in the ticket's team, then in the workspace. Any Linear or
+looked up by name in the ticket's team, then in the workspace, once per team
+and label. The comment is not repeated when the ticket already has one with
+the same verdict and the same `Run:` line (exact match). Any Linear or
 Slack error fails the job (and leaves `staging_passed` false) after every
 ticket was attempted.
 

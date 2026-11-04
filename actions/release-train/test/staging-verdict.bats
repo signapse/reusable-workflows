@@ -73,6 +73,7 @@ case "$op" in
       | {data: {issue: {id: $i.id, identifier: $k, team: {id: $i.team}, state: {name: $i.state}, labels: {nodes: $i.labels},
                         comments: {nodes: [$i.comments[] | select(contains($v.run // "")) | {body: .}]}}}}' "$st" ;;
   labels)
+    echo labels >> "$TMP/calls"
     jq -c --argjson v "$v" '{data: {issueLabels: {nodes: [.labels[]
       | select((.name | ascii_downcase) == ($v.n | ascii_downcase))
       | {id, name, team: (if .team then {id: .team} else null end)}]}}}' "$st" ;;
@@ -186,6 +187,48 @@ fail() { export SUITE_JOB_RESULT=failure SUITE_RESULT=failed; }
   [ "$status" -eq 0 ]
   [ "$(state SIG-2)" = "Done" ]
   [ "$(state SIG-1)" = "QA Failed" ]
+  # The alert says it stayed.
+  [[ "$(grep '^slack' "$TMP/calls" | sed 's/^slack //' | jq -r .text)" == *"In QA Failed: SIG-1"*"Left where they are: SIG-2 (Done)"* ]]
+}
+
+@test "a fail keeps QA Passed on a Done ticket and removes it from the moved ones" {
+  jq '.issues["SIG-2"].state = "Done" | .issues["SIG-2"].labels += [{id: "lab-qa2", name: "QA Passed"}]' \
+    "$TMP/linear.json" > "$TMP/l" && mv "$TMP/l" "$TMP/linear.json"
+  fail
+  run verdict
+  [ "$status" -eq 0 ]
+  [ "$(labels SIG-2)" = '["Bug","QA Passed","Staging Failed"]' ]
+  [ "$(labels SIG-1)" = '["Feature","Staging Failed"]' ]
+}
+
+@test "the label lookup is cached across tickets of the same team" {
+  jq '.issues["SIG-3"] = {id: "u3", team: "t1", state: "On Staging", labels: [], comments: []}' \
+    "$TMP/linear.json" > "$TMP/l" && mv "$TMP/l" "$TMP/linear.json"
+  pass
+  RC_TICKETS='SIG-1,SIG-3' run verdict
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '^add ' "$TMP/calls")" -eq 2 ]
+  [ "$(grep -c '^labels$' "$TMP/calls")" -eq 1 ]
+}
+
+@test "a comment for a run whose URL extends this one's (run 421 vs 42) does not count" {
+  jq --arg r "Run: ${RUN}1" '.issues["SIG-1"].comments += ["**Staging Passed**: ...\n\n" + $r]' \
+    "$TMP/linear.json" > "$TMP/l" && mv "$TMP/l" "$TMP/linear.json"
+  pass
+  run verdict
+  [ "$(comments SIG-1)" -eq 2 ]
+}
+
+@test "the alert does not claim tickets moved when the move failed" {
+  fail
+  touch "$TMP/fail-move"
+  run verdict
+  [ "$status" -eq 1 ]
+  text=$(grep '^slack' "$TMP/calls" | sed 's/^slack //' | jq -r .text)
+  [[ "$text" == *"NOT moved to QA Failed (Linear failed): SIG-1, SIG-2"* ]]
+  [[ "$text" != *"In QA Failed"* ]]
+  # Fail closed: a ticket that should block does not stay selectable.
+  [ "$(labels SIG-1)" = '["Feature","Staging Failed"]' ]
 }
 
 @test "AC2: fail replaces Staging Passed and keeps the other labels" {

@@ -11,12 +11,12 @@
 #   passed  every ticket gets STAGING_PASSED_LABEL, loses STAGING_FAILED_LABEL,
 #           and gets a comment with the run and report links. The column is
 #           not touched (tickets stay On Staging).
-#   failed  every ticket gets STAGING_FAILED_LABEL, loses STAGING_PASSED_LABEL
-#           and QA_PASSED_LABEL (QA approval does not survive QA Failed:
-#           ADR 0001, spec "Board and labels"; otherwise a fix merged later
-#           would ride on the old approval), gets the comment and moves to
-#           QA_FAILED_STATE (Ticket Transitioner, never out of Done).
-#           A Slack alert goes to SLACK_CHANNEL.
+#   failed  every ticket gets STAGING_FAILED_LABEL, loses STAGING_PASSED_LABEL,
+#           gets the comment and moves to QA_FAILED_STATE, losing
+#           QA_PASSED_LABEL (qa-failed-tickets.sh: QA approval does not
+#           survive QA Failed, ADR 0001; a Done ticket is never moved and
+#           keeps it). A Slack alert goes to SLACK_CHANNEL and says which
+#           tickets actually moved.
 #
 # Labels are added and removed one at a time (issueAddLabel/issueRemoveLabel),
 # so the ticket's other labels stay. The label to add is resolved by name per
@@ -24,7 +24,8 @@
 #
 # Idempotent: a label already present is not re-added, an absent one is not
 # removed, and the comment is skipped when the ticket already has one with the
-# same run URL and verdict, so "Re-run failed jobs" gives the same end state.
+# verdict and a "Run: <RUN_URL>" line equal to this run's (not a prefix: run
+# 42 is not run 421), so "Re-run failed jobs" gives the same end state.
 #
 # Every ticket is attempted; any Linear or Slack error fails the script at the
 # end (exit 1), naming the tickets. Stdout: one JSON object
@@ -67,7 +68,7 @@ if [ "$JOB" = success ] && [ "$SUITE" = passed ]; then
   verdict=passed; add="$PASSED_LABEL"; drop=$(jq -nc --arg a "$FAILED_LABEL" '[$a]')
   reason="signapse-e2e passed on staging"
 else
-  verdict=failed; add="$FAILED_LABEL"; drop=$(jq -nc --arg a "$PASSED_LABEL" --arg b "$QA_PASSED" '[$a, $b]')
+  verdict=failed; add="$FAILED_LABEL"; drop=$(jq -nc --arg a "$PASSED_LABEL" '[$a]')
   case "$JOB" in
     success|failure)
       if [ "$SUITE" = failed ]; then reason="signapse-e2e failed on staging (tests failed or the suite could not run)"
@@ -96,8 +97,10 @@ ${report_line}"
 # "team|name" -> label id, so each team's label is looked up once.
 label_cache='{}'
 
-# resolve_label <team-id> <name>: prints the label id. Team label first, then
-# a workspace label (no team).
+# resolve_label <team-id> <name>: sets LABEL_ID. Team label first, then a
+# workspace label (no team). Sets a global rather than printing, because
+# $(...) would run it in a subshell and drop the cache update.
+LABEL_ID=''
 resolve_label() {
   local team="$1" name="$2" key id data
   key="$team|$name"
@@ -111,7 +114,7 @@ resolve_label() {
     [ -n "$id" ] || { echo "label '$name' does not exist for the ticket's team or workspace" >&2; return 1; }
     label_cache=$(jq -c --arg k "$key" --arg v "$id" '.[$k] = $v' <<< "$label_cache")
   fi
-  printf '%s' "$id"
+  LABEL_ID="$id"
 }
 
 # mutate <field> <query> <vars>: runs a mutation and checks .<field>.success.
@@ -134,7 +137,8 @@ record_ticket() {
 
   have=$(jq -r --arg n "$add" 'any(.issue.labels.nodes[]; (.name | ascii_downcase) == ($n | ascii_downcase))' <<< "$data")
   if [ "$have" != true ]; then
-    add_id=$(resolve_label "$team" "$add") || return 1
+    resolve_label "$team" "$add" || return 1
+    add_id="$LABEL_ID"
     # shellcheck disable=SC2016 # GraphQL variables, not shell expansion.
     mutate issueAddLabel 'mutation($id:String!,$l:String!){issueAddLabel(id:$id,labelId:$l){success}}' \
       "$(jq -nc --arg id "$uuid" --arg l "$add_id" '{id:$id, l:$l}')" || return 1
@@ -153,7 +157,8 @@ record_ticket() {
 
   # Same run, same verdict: already commented (re-run). A re-run with another
   # verdict comments again, because the labels changed.
-  if jq -e --arg v "**${add}**" 'any(.issue.comments.nodes[]; .body | contains($v))' <<< "$data" > /dev/null; then
+  if jq -e --arg v "**${add}**" --arg r "Run: ${RUN_URL}" \
+    'any(.issue.comments.nodes[]; (.body | contains($v)) and (.body | split("\n") | index($r)))' <<< "$data" > /dev/null; then
     log "$id: already commented for this run"
   else
     # shellcheck disable=SC2016 # GraphQL variables, not shell expansion.
@@ -182,22 +187,33 @@ else
 fi
 
 if [ "$verdict" = failed ]; then
+  moves='{"moved":[],"already":[],"kept":[],"failed":[]}'
   if [ "$n" -gt 0 ] && [ -n "${LINEAR_API_KEY:-}" ]; then
     set +e
-    msg=$("$(dirname "$0")/promotion-tickets.sh" "$QA_FAILED" "${RC_TICKETS:-}" 2>&1 >/dev/null)
+    out=$(QA_PASSED_LABEL="$QA_PASSED" "$(dirname "$0")/qa-failed-tickets.sh" "${RC_TICKETS:-}" 2> "$errf")
     rc=$?
     set -e
-    [ -n "$msg" ] && printf '%s\n' "$msg" >&2
-    [ "$rc" -eq 0 ] || add_error "move to '$QA_FAILED': $(tail -n 1 <<< "$msg")"
+    cat "$errf" >&2
+    jq -e 'type == "object"' <<< "$out" > /dev/null 2>&1 && moves="$out"
+    [ "$rc" -eq 0 ] || add_error "QA Failed: $(jq -r '(.errors // []) | join("; ")' <<< "$moves" 2> /dev/null || tail -n 1 "$errf")"
+  elif [ "$n" -gt 0 ]; then
+    moves=$(jq -c '{moved: [], already: [], kept: [], failed: .}' <<< "$tickets")
   fi
 
   if [ -z "${SLACK_CHANNEL:-}" ] || [ -z "${SLACK_BOT_TOKEN:-}" ]; then
     add_error "Slack alert not sent: slack_channel or SLACK_BOT_TOKEN is not set"
   else
-    list=$(jq -r 'if length == 0 then "no tickets (untracked commits only)" else join(", ") end' <<< "$tickets")
+    # Say what happened to each ticket, not what was meant to.
+    # shellcheck disable=SC2016 # jq program, not shell expansion.
+    moved_text=$(jq -r --argjson t "$tickets" --arg qf "$QA_FAILED" '
+      if ($t | length) == 0 then "No tickets (untracked commits only)."
+      else [ (if (.moved + .already | length) > 0 then "In \($qf): \(.moved + .already | join(", "))" else empty end),
+             (if (.kept | length) > 0 then "Left where they are: \(.kept | map("\(.id) (\(.state))") | join(", "))" else empty end),
+             (if (.failed | length) > 0 then ":warning: NOT moved to \($qf) (Linear failed): \(.failed | join(", "))" else empty end)
+           ] | join("\n") end' <<< "$moves")
     linear_note=""
     [ "$(jq length <<< "$errors")" -eq 0 ] || linear_note=$'\n'":warning: Some Linear updates failed; see the run."
-    text=":x: *Staging tests failed for ${WHAT}*"$'\n'"Reason: ${reason}."$'\n'"${FAILED_LABEL} and moved to ${QA_FAILED}: ${list}"$'\n'"<${RUN_URL}|Run>${REPORT:+ · <${REPORT}|Report>}${linear_note}"
+    text=":x: *Staging tests failed for ${WHAT}*"$'\n'"Reason: ${reason}."$'\n'"${moved_text}"$'\n'"<${RUN_URL}|Run>${REPORT:+ · <${REPORT}|Report>}${linear_note}"
     set +e
     resp=$(jq -nc --arg c "$SLACK_CHANNEL" --arg t "$text" '{channel:$c, text:$t}' | slack_post 2>&1)
     set -e
