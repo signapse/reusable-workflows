@@ -148,3 +148,38 @@ STUB
   [ "$status" -eq 0 ]
   [[ "$output" == *"created on sha256:X meanwhile"* ]]
 }
+
+@test "ECR rejecting the accepted media types falls back to a plain lookup" {
+  cat > "$TMP/stub/aws" <<'STUB'
+#!/usr/bin/env bash
+case "$*" in
+  *"ecr batch-get-image"*"--accepted-media-types"*)
+    echo "An error occurred (InvalidParameterException): Invalid parameter at 'acceptedMediaTypes'" >&2; exit 254 ;;
+  *"ecr batch-get-image"*)
+    echo '{"images":[{"imageManifest":"M","imageId":{"imageDigest":"sha256:X"}}]}' ;;
+  *"ecr put-image"*) touch "$TMP/put-done"; echo '{}' ;;
+  *"ecr describe-images"*)
+    [ -f "$TMP/put-done" ] || { echo "An error occurred (ImageNotFoundException)" >&2; exit 254; }
+    echo '{"imageDetails":[{"imageDigest":"sha256:X"}]}' ;;
+esac
+STUB
+  chmod +x "$TMP/stub/aws"
+  run bash "$SCRIPT" signstream/http main-abc123 1.2.33
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"retrying without it"* ]]
+  [[ "$output" == *"retagged"* ]]
+}
+
+@test "any other batch-get-image failure is not retried" {
+  cat > "$TMP/stub/aws" <<'STUB'
+#!/usr/bin/env bash
+case "$*" in
+  *"ecr batch-get-image"*) echo "An error occurred (AccessDeniedException)" >&2; exit 254 ;;
+esac
+STUB
+  chmod +x "$TMP/stub/aws"
+  run bash "$SCRIPT" signstream/http main-abc123 1.2.33
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"AccessDenied"* ]]
+  [[ "$output" != *"retrying"* ]]
+}

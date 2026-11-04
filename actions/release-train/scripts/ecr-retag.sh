@@ -32,11 +32,21 @@ ACCEPTED=(
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
-src_image=$(aws ecr batch-get-image \
+# If ECR rejects the list (review: the API reference documents only the
+# single-image types), retry without it, as main's script always did. The
+# digest read-back below still proves both tags name the same bytes.
+if ! src_image=$(aws ecr batch-get-image \
   --repository-name "$REPO" \
   --image-ids imageTag="$SRC" \
   --accepted-media-types "${ACCEPTED[@]}" \
-  --output json)
+  --output json 2> "$tmp/get.err"); then
+  grep -qi 'InvalidParameter\|media type' "$tmp/get.err" || { cat "$tmp/get.err" >&2; exit 1; }
+  echo "ECR refused --accepted-media-types ($(head -c 200 "$tmp/get.err")); retrying without it" >&2
+  src_image=$(aws ecr batch-get-image \
+    --repository-name "$REPO" \
+    --image-ids imageTag="$SRC" \
+    --output json)
+fi
 
 # jq -j writes the manifest string byte for byte (no trailing newline), and
 # put-image reads it from the file, so the digest cannot drift.
