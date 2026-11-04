@@ -25,7 +25,8 @@ body=""; while [ $# -gt 0 ]; do [ "$1" = -d ] && body="$2"; shift; done
 id=$(jq -r .variables.id <<< "$body")
 f="$TMP/linear/$id"
 if [ -f "$f" ]; then
-  jq -Rn --arg id "$id" '{data: {issue: {identifier: $id, attachments: {nodes: [inputs | {url: .}]}}}}' < "$f"
+  jq -Rn --arg id "$id" --argjson more "$([ -f "$TMP/more-attachments" ] && echo true || echo false)" \
+    '{data: {issue: {identifier: $id, attachments: {nodes: [inputs | {url: .}], pageInfo: {hasNextPage: $more}}}}}' < "$f"
 else
   echo '{"data":{"issue":null},"errors":[{"message":"Entity not found"}]}'
 fi
@@ -41,7 +42,9 @@ case "$1" in
   */pulls/*/files*) n=${1#*/pulls/}; n=${n%%/*}
     jq -Rn '[inputs | {filename: .}]' < "$TMP/pulls/$n.files" ;;
   */pulls/*) cat "$TMP/pulls/${1##*/}.json" ;;
-  */terraform-deploy.yml/runs*) echo "$1" >> "$TMP/run-queries"; cat "$TMP/deploy-runs.json" ;;
+  */terraform-deploy.yml/runs*) echo "$1" >> "$TMP/run-queries"; cat "$TMP/deploy-runs.json"
+    # --paginate prints one object per page.
+    [ ! -f "$TMP/deploy-runs-2.json" ] || cat "$TMP/deploy-runs-2.json" ;;
   */orchestration.yml/runs*) cat "$TMP/orch-runs.json" ;;
   *) echo "gh stub: unhandled $1" >&2; exit 1 ;;
 esac
@@ -175,4 +178,24 @@ field() { tail -n1 <<< "$output" | jq -r "$1"; }
   pending ""
   [ "$status" -eq 0 ]
   [ "$(field '.pending | length')" = 0 ]
+}
+
+@test "AC4: an apply on a later page of runs counts" {
+  echo "$TF/pull/12" > "$TMP/linear/SIG-1"
+  pr 12 2026-11-01T10:00:00Z terragrunt/products/Signstream/stg/eu/sqs/terragrunt.hcl
+  deploy_run "Terraform plan+apply Hub (stg/eu) [k1]" 2026-11-01T11:00:00Z
+  echo '{"workflow_runs":[{"display_title":"Terraform plan+apply Signstream (stg/eu) [k2]","created_at":"2026-11-01T12:00:00Z","conclusion":"success","head_branch":"main"}]}' > "$TMP/deploy-runs-2.json"
+  pending SIG-1
+  [ "$status" -eq 0 ]
+  [ "$(field '.pending | length')" = 0 ]
+  grep -q 'per_page=100' "$TMP/run-queries"
+}
+
+@test "fails closed when a ticket has more attachments than one page" {
+  echo "$TF/pull/12" > "$TMP/linear/SIG-1"
+  pr 12 2026-11-01T10:00:00Z terragrunt/products/Signstream/stg/eu/sqs/terragrunt.hcl
+  touch "$TMP/more-attachments"
+  pending SIG-1
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"more than 250 attachments"* ]]
 }

@@ -50,7 +50,10 @@ inputs:
     required: false
     default: 'eu'
   timeout_minutes:
-    description: 'Limit on dispatching and waiting for the Terraform run, re-dispatches included.'
+    description: >-
+      Limit on dispatching and waiting for the Terraform run, re-dispatches
+      and API calls included. At most 50: the Prodzilla token minted for the
+      gate lasts an hour, and the AC4 check runs after the wait.
     required: false
     default: '45'
   slack_bot_token:
@@ -94,6 +97,7 @@ runs:
         TF_REPO: ${{ inputs.terraform_repo }}
         TICKETS: ${{ inputs.tickets }}
         LINEAR_API_KEY: ${{ inputs.linear_api_key }}
+        TIMEOUT_MINUTES: ${{ inputs.timeout_minutes }}
       run: |
         set -euo pipefail
         missing=()
@@ -105,6 +109,8 @@ runs:
           exit 1
         fi
         case "$ENVIRONMENT" in dev|stg|prod) ;; *) echo "::error::Terraform gate environment must be dev, stg or prod (got '$ENVIRONMENT')"; exit 1 ;; esac
+        case "$TIMEOUT_MINUTES" in ''|*[!0-9]*) echo "::error::timeout_minutes must be a whole number (got '$TIMEOUT_MINUTES')"; exit 1 ;; esac
+        [ "$TIMEOUT_MINUTES" -le 50 ] || { echo "::error::timeout_minutes must be at most 50: the Prodzilla token lasts an hour (got $TIMEOUT_MINUTES)"; exit 1; }
         [[ "$TF_REPO" == */* ]] || { echo "::error::terraform_repo must be owner/name (got '$TF_REPO')"; exit 1; }
         product="$PRODUCT_IN"
         if [ -z "$product" ]; then
@@ -184,15 +190,20 @@ runs:
           jq -r '"Verdict `\(.verdict // "none")`: \(.reason)."
             + (if (.run_url // "") != "" then " [Terraform run](\(.run_url))" else "" end)
             + (if (.dispatches // 1) > 1 then " (\(.dispatches) dispatches)" else "" end)' <<< "$res"
-          jq -r '(.destroys // [], .replaces // [], .unclassified // []) | .[:25][] | "- `\(.)`"' <<< "$res"
+          # Every resource, not the first 25: the Slack alert points here for the rest.
+          jq -r '(.destroys // [], .replaces // [], .unclassified // []) | .[] | "- `\(.)`"' <<< "$res"
           jq -r '.pending // [] | .[] | "- \(.ticket): [\(.url | split("/") | .[-3:] | join("/"))](\(.url)) merged, not applied for \(.products | join(", "))"' <<< "$res"
         } >> "$GITHUB_STEP_SUMMARY"
 
+    # Also after an earlier step failed (bad input, product lookup, token
+    # mint, gate step crash): every stop is reported, never a silent red job.
     - name: Alert Slack and stop
-      if: steps.gate.outputs.gate != 'pass'
+      if: ${{ !cancelled() && steps.gate.outputs.gate != 'pass' }}
       shell: bash
       env:
         RESULT: ${{ steps.gate.outputs.result }}
+        PRODUCT: ${{ steps.cfg.outputs.product }}
+        ENVIRONMENT: ${{ inputs.environment }}
         SLACK_BOT_TOKEN: ${{ inputs.slack_bot_token }}
         SLACK_CHANNEL: ${{ inputs.slack_channel }}
         CONTEXT: ${{ inputs.context }}
@@ -201,6 +212,11 @@ runs:
       run: |
         set -euo pipefail
         S="$GITHUB_ACTION_PATH/../release-train"
+        if [ -z "$RESULT" ]; then
+          RESULT=$(jq -nc --arg p "${PRODUCT:-?}" --arg e "$ENVIRONMENT" \
+            '{gate: "failed", verdict: null, product: $p, environment: $e, run_url: "",
+              reason: "the gate stopped before it had a verdict (inputs, product lookup, token or gate step; see the job log)"}')
+        fi
         gate=$(jq -r .gate <<< "$RESULT")
         reason=$(jq -r '.reason // ""' <<< "$RESULT")
         if [ -z "$SLACK_BOT_TOKEN" ]; then

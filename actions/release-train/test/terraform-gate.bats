@@ -9,6 +9,7 @@
 #   polls         in_progress polls before it completes (default 1)
 # Every gh call is appended to $TMP/gh.log; sleeps to $TMP/slept.
 load 'helpers/load'
+bats_require_minimum_version 1.5.0
 
 S="$BATS_TEST_DIRNAME/../scripts"
 
@@ -167,7 +168,7 @@ field() { tail -n1 <<< "$output" | jq -r "$1"; }
   [ "$(field .run_key)" = sign-stream-api-42-1-stg-2 ]
   [ "$(sed -n 2p "$TMP/dispatched")" = sign-stream-api-42-1-stg-2 ]
   # a cancelled run is never read for a verdict
-  ! grep -q 'run download 101' "$TMP/gh.log"
+  run ! grep -q 'run download 101' "$TMP/gh.log"
 }
 
 @test "cancelled re-dispatches are bounded by MAX_DISPATCHES" {
@@ -182,6 +183,26 @@ field() { tail -n1 <<< "$output" | jq -r "$1"; }
 @test "stale saved plan is re-dispatched once" {
   run_as 1 failure failed false true
   echo "Error: Saved plan is stale" > "$TMP/sc/1/log"
+  run_as 2 success safe true true
+  gate
+  [ "$(field .gate)" = pass ]
+  [ "$(field .dispatches)" = 2 ]
+}
+
+@test "a passing verdict from a run that did not conclude success fails" {
+  run_as 1 failure safe true true
+  gate
+  [ "$(field .gate)" = failed ]
+  [[ "$(field .reason)" == *"says safe, but the Terraform run concluded failure"* ]]
+  run_as 1 failure no_changes
+  rm -f "$TMP/sc/1/polled"; : > "$TMP/dispatched"
+  gate
+  [ "$(field .gate)" = failed ]
+}
+
+@test "stale saved plan early in a long log is still retried (no SIGPIPE under pipefail)" {
+  run_as 1 failure failed false true
+  { echo "Error: Saved plan is stale"; seq 1 200000; } > "$TMP/sc/1/log"
   run_as 2 success safe true true
   gate
   [ "$(field .gate)" = pass ]
@@ -232,7 +253,7 @@ field() { tail -n1 <<< "$output" | jq -r "$1"; }
   [[ "$(field .reason)" == *"NOT cancelled"* ]]
   [ "$(field .run_url)" = "https://github.com/signapse/signapse-core-terraform/actions/runs/101" ]
   [ "$(awk '{s+=$1} END{print s+0}' "$TMP/slept")" -eq 120 ]
-  ! grep -q cancel "$TMP/gh.log"
+  run ! grep -q cancel "$TMP/gh.log"
 }
 
 @test "waits while the run is in progress" {
@@ -306,6 +327,13 @@ field() { tail -n1 <<< "$output" | jq -r "$1"; }
   [ -z "$output" ]
 }
 
+@test "the gate action alerts on every stop, caps its timeout under the token's hour and lists every resource" {
+  a="$BATS_TEST_DIRNAME/../../terraform-gate/action.yml"
+  grep -q "if: \${{ !cancelled() && steps.gate.outputs.gate != 'pass' }}" "$a"
+  grep -q 'TIMEOUT_MINUTES" -le 50' "$a"
+  run ! grep -q '\.\[:25\]\[\]' "$a"
+}
+
 @test "the gate action reads product with --required" {
   grep -q 'pipeline-config.sh" product --required' "$BATS_TEST_DIRNAME/../../terraform-gate/action.yml"
 }
@@ -320,7 +348,9 @@ field() { tail -n1 <<< "$output" | jq -r "$1"; }
   text=$(jq -r '.blocks[0].text.text' <<< "$output")
   [ "$(jq -r .channel <<< "$output")" = C1 ]
   [[ "$text" == *"Product *Signstream*, environment *stg*"* ]]
+  # shellcheck disable=SC2016 # literal backticks.
   [[ "$text" == *'`aws_ssm_parameter.old`'* ]]
+  # shellcheck disable=SC2016 # literal backticks.
   [[ "$text" == *'`aws_db_instance.main`'* ]]
   [[ "$text" == *"Promotion of signapse/api main-1-abc to staging"* ]]
   [[ "$text" != *unclassified* ]]
