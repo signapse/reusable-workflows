@@ -23,12 +23,12 @@ jq -r --arg ticket "${TICKET:-}" --arg trigger "${TRIGGER_ID:-}" --arg repo "$GI
   "",
   (if $ticket != "" then "Triggered by \($ticket | esc) (delivery \($trigger | esc))."
    else "Scheduled run (hourly backstop)." end),
-  "Walked main from `\(.last_tag)` to `\(.head_sha | short)`.",
+  "Walked main from `\(.last_tag)` (the release tag prod runs) to `\(.head_sha | short)`.",
   "",
   (if .outcome == "selected" then
      "**Selected** `\(.rc.image_tag)` ([build #\(.rc.run_number)](\(.rc.run_url | link)))."
    elif .outcome == "already_promoted" then
-     "**No-op:** `\(.rc.image_tag)` is already promoted."
+     "**No-op:** `\(.rc.image_tag)` is already promoted as `\(.rc.release_tag // "")`."
    else
      "**No Release Candidate:** no build since `\(.last_tag)` has all its tickets QA Passed."
    end),
@@ -39,6 +39,10 @@ jq -r --arg ticket "${TICKET:-}" --arg trigger "${TRIGGER_ID:-}" --arg repo "$GI
   "",
   "### Untracked commits",
   (if (.untracked_commits | length) == 0 then "_none_" else (.untracked_commits[] | "- " + commit) end),
+  "",
+  "### Reverted (do not block)",
+  (if ((.reverted // []) | length) == 0 then "_none_"
+   else (.reverted[] | "- " + commit + " (\(.tickets | join(", ") | esc))") end),
   "",
   "### Blocked by",
   (if .blocked_by == null then "_nothing: every walked commit is selectable_"

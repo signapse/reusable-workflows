@@ -4,8 +4,9 @@ name: Release Train (reusable)
 #
 #   qa-passed (ADR 0001, the Autonomous Delivery Pipeline): the `select` job
 #     picks the Release Candidate, the newest main build whose tickets all
-#     carry QA Passed, and outputs it (rc_sha, rc_image_tag, rc_tickets,
-#     untracked_commits, blocked_by). Callers trigger it from the event router
+#     carry QA Passed, walking from the release tag prod runs, and outputs it
+#     (rc_sha, rc_image_tag, rc_tickets, untracked_commits, blocked_by,
+#     staged_tag). Callers trigger it from the event router
 #     (workflow_dispatch with `ticket` + `trigger_id`) plus an hourly schedule.
 #     Caller template: docs/RELEASE-TRAIN.md.
 #
@@ -18,7 +19,8 @@ name: Release Train (reusable)
 # The caller owns `on:` and `permissions:` — a reusable workflow can only
 # downgrade the permissions it is handed, never elevate them. Legacy callers
 # grant contents: write, pull-requests: read, checks: read; qa-passed callers
-# also grant actions: read (the build lookup reads main-push runs).
+# also grant actions: read (the build lookup reads main-push runs); prod's tag
+# is read with the read-only pipeline app (read_app_id).
 
 on:
   workflow_call:
@@ -68,10 +70,42 @@ on:
         type: string
         default: 'main'
       release_tag_pattern:
-        description: 'qa-passed: ERE matching Promotion tags; the walk starts at the nearest one on the first-parent history of the branch.'
+        description: 'qa-passed: ERE matching release tags (bare or v-prefixed semver by default).'
         required: false
         type: string
         default: '^v?[0-9]+\.[0-9]+\.[0-9]+$'
+      prod_services:
+        description: >-
+          qa-passed: JSON array of the signapse-core-k8s deploy-prod.yml
+          services this repo runs as in prod (e.g. ["signstream-api"]). The
+          walk starts at the release tag prod runs (selection-base.sh), so
+          every commit not in prod yet is checked on every run. Required
+          unless selection_base is set.
+        required: false
+        type: string
+        default: ''
+      selection_base:
+        description: >-
+          qa-passed: explicit walk base (tag or sha), instead of reading prod.
+          Only for the first Deployment through the train, when prod runs a
+          tag this repo does not have.
+        required: false
+        type: string
+        default: ''
+      read_app_id:
+        description: 'qa-passed: GitHub App id of the read-only pipeline app (ADR 0005); reads gitops_repo.'
+        required: false
+        type: string
+        default: ''
+      gitops_repo:
+        description: 'qa-passed: repo holding the prod (and Flux) image tags.'
+        required: false
+        type: string
+        default: 'signapse/signapse-core-k8s'
+      gitops_ref:
+        required: false
+        type: string
+        default: 'main'
       linear_team_key:
         description: 'Linear team key, alphanumeric (e.g. SIG)'
         required: false
@@ -121,6 +155,9 @@ on:
       SLACK_BOT_TOKEN:
         # Only the ready-for-prod mode posts to Slack.
         required: false
+      READ_APP_PRIVATE_KEY:
+        # qa-passed: private key of the read_app_id app.
+        required: false
     outputs:
       state:
         description: 'TrainState JSON'
@@ -155,6 +192,20 @@ on:
       blocked_by:
         description: 'qa-passed: ticket that stopped the line (empty when none)'
         value: ${{ jobs.select.outputs.blocked_by }}
+      selection_base:
+        description: 'qa-passed: where the walk started: the release tag prod runs (or selection_base)'
+        value: ${{ jobs.select.outputs.selection_base }}
+      rc_release_tag:
+        description: 'qa-passed: release tag already on the Release Candidate (outcome already_promoted), else empty'
+        value: ${{ jobs.select.outputs.rc_release_tag }}
+      staged_tag:
+        description: >-
+          qa-passed: newest selectable build that already carries a release
+          tag (what staging runs and prod may resume), empty when none
+        value: ${{ jobs.select.outputs.staged_tag }}
+      staged_tickets:
+        description: 'qa-passed: comma-separated tickets from selection_base to staged_tag'
+        value: ${{ jobs.select.outputs.staged_tickets }}
       selection:
         description: 'qa-passed: full selection JSON (see actions/release-train/scripts/release-candidate.sh)'
         value: ${{ jobs.select.outputs.selection }}
@@ -188,11 +239,15 @@ jobs:
       untracked_commits: ${{ steps.select.outputs.untracked_commits }}
       blocked_by: ${{ steps.select.outputs.blocked_by }}
       selection: ${{ steps.select.outputs.selection }}
+      selection_base: ${{ steps.base.outputs.base }}
+      rc_release_tag: ${{ steps.select.outputs.rc_release_tag }}
+      staged_tag: ${{ steps.select.outputs.staged_tag }}
+      staged_tickets: ${{ steps.select.outputs.staged_tickets }}
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.release_branch }}
-          fetch-depth: 0          # the walk needs history and tags since the last Promotion
+          fetch-depth: 0          # the walk needs history and tags since the tag prod runs
           persist-credentials: false
 
       # Same pattern as post-publish: the scripts are fetched explicitly so the
@@ -204,6 +259,54 @@ jobs:
           ref: main
           path: _rw
           persist-credentials: false
+
+      - name: Split GitOps repo
+        id: gitops
+        if: inputs.selection_base == ''
+        env:
+          GITOPS_REPO: ${{ inputs.gitops_repo }}
+          READ_APP_ID: ${{ inputs.read_app_id }}
+          PROD_SERVICES: ${{ inputs.prod_services }}
+        run: |
+          set -euo pipefail
+          missing=()
+          jq -e 'type == "array" and length > 0' <<< "$PROD_SERVICES" > /dev/null 2>&1 || missing+=(prod_services)
+          [ -n "$READ_APP_ID" ] || missing+=(read_app_id)
+          [[ "$GITOPS_REPO" == */* ]] || missing+=("gitops_repo as owner/name")
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::qa-passed selection starts at the tag prod runs and needs: ${missing[*]} (or selection_base). See docs/RELEASE-TRAIN.md"
+            exit 1
+          fi
+          echo "owner=${GITOPS_REPO%%/*}" >> "$GITHUB_OUTPUT"
+          echo "name=${GITOPS_REPO#*/}" >> "$GITHUB_OUTPUT"
+
+      - name: Mint read-only app token
+        id: app
+        if: inputs.selection_base == ''
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ inputs.read_app_id }}
+          private-key: ${{ secrets.READ_APP_PRIVATE_KEY }}
+          owner: ${{ steps.gitops.outputs.owner }}
+          repositories: ${{ steps.gitops.outputs.name }}
+          permission-contents: read
+
+      # Walk base: the release tag prod runs (ADR 0001). Everything after it
+      # is checked again on every run, so a tag that failed staging or was
+      # rolled back keeps stopping the line.
+      - name: Find where prod is
+        id: base
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          SELECTION_BASE: ${{ inputs.selection_base }}
+          PROD_SERVICES: ${{ inputs.prod_services }}
+          GITOPS_REPO: ${{ inputs.gitops_repo }}
+          GITOPS_REF: ${{ inputs.gitops_ref }}
+          RELEASE_TAG_PATTERN: ${{ inputs.release_tag_pattern }}
+        run: |
+          set -euo pipefail
+          b=$("$GITHUB_WORKSPACE/_rw/actions/release-train/scripts/selection-base.sh")
+          echo "base=$(jq -r .base <<< "$b")" >> "$GITHUB_OUTPUT"
 
       - name: Select Release Candidate
         id: select
@@ -218,9 +321,10 @@ jobs:
           RELEASE_TAG_PATTERN: ${{ inputs.release_tag_pattern }}
           TICKET: ${{ inputs.ticket }}
           TRIGGER_ID: ${{ inputs.trigger_id }}
+          BASE: ${{ steps.base.outputs.base }}
         run: |
           set -euo pipefail
-          sel=$("$GITHUB_WORKSPACE/_rw/actions/release-train/scripts/release-candidate.sh" "" HEAD)
+          sel=$("$GITHUB_WORKSPACE/_rw/actions/release-train/scripts/release-candidate.sh" "$BASE" HEAD)
           eof="EOF_$(openssl rand -hex 8)"
           {
             echo "outcome=$(jq -r .outcome <<< "$sel")"
@@ -229,6 +333,9 @@ jobs:
             echo "rc_tickets=$(jq -r '[.tickets[].id] | join(",")' <<< "$sel")"
             echo "untracked_commits=$(jq -c .untracked_commits <<< "$sel")"
             echo "blocked_by=$(jq -r '.blocked_by.id // ""' <<< "$sel")"
+            echo "rc_release_tag=$(jq -r '.rc.release_tag // ""' <<< "$sel")"
+            echo "staged_tag=$(jq -r '.staged.release_tag // ""' <<< "$sel")"
+            echo "staged_tickets=$(jq -r '.staged.tickets // [] | join(",")' <<< "$sel")"
             echo "selection<<$eof"
             echo "$sel"
             echo "$eof"

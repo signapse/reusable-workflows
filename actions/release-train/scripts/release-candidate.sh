@@ -1,11 +1,18 @@
 #!/usr/bin/env bash
-# release-candidate.sh [<last-tag>] [<head-ref>]
+# release-candidate.sh [<base>] [<head-ref>]
 #
 # Selects the Release Candidate (ADR 0001): the newest build on main whose
 # tickets all carry QA Passed. Emits one compact JSON object on stdout; log
 # lines go to stderr.
 #
-# Walk: main's first-parent commits in <last-tag>..<head-ref>, oldest first.
+# <base> is where the walk starts. The train passes the release tag prod runs
+# (selection-base.sh), so every commit not yet in prod is checked again on
+# every run: a tag that failed staging or was rolled back leaves its tickets
+# in QA Failed, and they keep stopping the line until QA re-passes them or
+# their commits are reverted. Walking only from the last Promotion would let
+# the next Release Candidate carry that code past them.
+#
+# Walk: main's first-parent commits in <base>..<head-ref>, oldest first.
 #   * A commit's tickets are the <TEAM>-<n> refs in the commits it brought in
 #     (<sha>^1..<sha>, so a merge commit includes its branch) plus the title
 #     and head branch of the PR(s) GitHub associates with it. PR bodies are
@@ -14,6 +21,13 @@
 #     label, or cannot be read from Linear. The walk stops at the first
 #     blocking commit: nothing at or past it is selectable.
 #   * A commit with no ticket never blocks; it rides along as untracked.
+#   * Reverts (lib/revert.sh, ADR 0001's 24 h revert, SIG-2766): a commit
+#     reverted later in the range, by a revert that is not itself reverted,
+#     does not block and its tickets are not in the candidate; no build
+#     between it and its revert is selectable, because those builds still
+#     contain its code. A revert commit (or a merged revert PR) never blocks
+#     either, whatever ticket its message, title or branch names; it rides
+#     along as untracked. A re-land (revert of a revert) is a normal commit.
 #   * A build is a commit with a successful run of BUILD_WORKFLOW (main-push)
 #     on BRANCH. Its image tag is main-<run_number>-<sha>, the tag main-push
 #     gives every service image. The Release Candidate is the last build seen
@@ -22,17 +36,23 @@
 # depends on which ticket triggered the run, so a repeat run with nothing
 # changed selects the same build (the hourly backstop relies on this).
 #
-# <last-tag> empty or omitted: the nearest tag matching RELEASE_TAG_PATTERN on
-# <head-ref>'s first-parent history (the last Promotion). <head-ref> defaults to HEAD.
+# <base> empty or omitted: the nearest tag matching RELEASE_TAG_PATTERN on
+# <head-ref>'s first-parent history (the last Promotion). Tests and manual runs
+# only; the train always passes the prod tag. <head-ref> defaults to HEAD.
 #
 # Output:
-#   {last_tag, head_sha, outcome, already_promoted,
-#    rc: {sha, image_tag, run_number, run_url} | null,
-#    tickets: [{id, title, url, state}],          # tickets up to the RC
-#    untracked_commits: [{sha, subject}],         # ticketless commits up to the RC
+#   {base, last_tag (= base), last_release_tag, head_sha, outcome, already_promoted,
+#    rc: {sha, image_tag, run_number, run_url, release_tag} | null,
+#    tickets: [{id, title, url, state}],          # every live ticket from <base> to the RC
+#    untracked_commits: [{sha, subject, revert?}],# ticketless and revert commits up to the RC
+#    reverted: [{sha, subject, tickets, reverted_by}],  # reverted commits walked
+#    staged: {sha, image_tag, release_tag, tickets: [ids]} | null,
+#                       # newest build up to the RC that already carries a
+#                       # release tag: what prod may deploy (resume mode)
 #    blocked_by: {id, title, url, state, reason, sha, subject} | null,
-#    commits: [{sha, subject, tickets, build}]}   # every commit walked
-# outcome: selected | already_promoted | none
+#    commits: [{sha, subject, tickets, build, kind}]}   # every commit walked
+# outcome: selected | already_promoted (the RC already carries a release tag:
+# promoted before, nothing new to promote) | none
 #
 # Env:
 #   GITHUB_REPOSITORY    owner/repo (required)
@@ -49,6 +69,10 @@
 source "$(dirname "$0")/../lib/common.sh"
 # shellcheck source=SCRIPTDIR/../lib/linear.sh
 source "$(dirname "$0")/../lib/linear.sh"
+# shellcheck source=SCRIPTDIR/../lib/release-tag.sh
+source "$(dirname "$0")/../lib/release-tag.sh"
+# shellcheck source=SCRIPTDIR/../lib/revert.sh
+source "$(dirname "$0")/../lib/revert.sh"
 
 [ $# -le 2 ] || die "usage: release-candidate.sh [<last-tag>] [<head-ref>]"
 LAST_TAG="${1:-}"
@@ -68,23 +92,15 @@ HERE="$(dirname "$0")"
 
 head_sha=$(git rev-parse --verify "${HEAD_REF}^{commit}") || die "unknown ref: $HEAD_REF"
 
+last_release=$(last_release_tag "$head_sha" "$RELEASE_TAG_PATTERN")
 if [ -z "$LAST_TAG" ]; then
-  # The last Promotion is the nearest matching tag on the release branch's
-  # first-parent history. Ancestry, not version order: a tag on a merged side
-  # branch, or a mix of bare and v-prefixed tags, must not move the boundary.
-  # Tags on one commit are tried highest version first.
-  tagmap=$(git tag --merged "$head_sha" --sort=-v:refname \
-    | { grep -E "$RELEASE_TAG_PATTERN" || true; } \
-    | while IFS= read -r t; do printf '%s %s\n' "$(git rev-parse "${t}^{commit}")" "$t"; done)
-  if [ -n "$tagmap" ]; then
-    LAST_TAG=$(git rev-list --first-parent "$head_sha" \
-      | awk 'NR == FNR { if (!($1 in m)) m[$1] = $2; next } ($1 in m) { print m[$1]; exit }' \
-        <(printf '%s\n' "$tagmap") -)
-  fi
+  LAST_TAG="$last_release"
   [ -n "$LAST_TAG" ] || die "no tag matching $RELEASE_TAG_PATTERN on $HEAD_REF's first-parent history; seed one (git tag 0.0.0 <sha>)"
 fi
 git rev-parse --verify -q "${LAST_TAG}^{commit}" > /dev/null || die "unknown tag: $LAST_TAG"
-log "last Promotion tag: $LAST_TAG"
+git merge-base --is-ancestor "$LAST_TAG" "$head_sha" || die "walk base $LAST_TAG is not in $HEAD_REF's history"
+log "walk base: $LAST_TAG (last release tag: ${last_release:-none})"
+units=$(revert_units "$LAST_TAG" "$head_sha")
 
 # ticket_verdict <id>: sets VERDICT to {id,title,url,state,blocks,reason}.
 # Cached so a ticket spread over several commits is read from Linear once (it
@@ -152,57 +168,99 @@ tickets='[]'
 untracked='[]'
 untracked_pending='[]'
 tickets_pending='[]'
+reverted='[]'
+holes='[]'   # live reverting commits not walked yet: no build is selectable
 rc='null'
+staged='null'
 blocked='null'
 
 while IFS= read -r sha; do
   [ -z "$sha" ] && continue
   subject=$(git log -1 --format=%s "$sha")
   refs=$(pr_text "$sha" | "$HERE/ticket-extractor.sh" "${sha}^1" "$sha")
+  unit=$(printf '%s' "$units" | jq -c --arg s "$sha" '.[$s] // {kind: "normal", reverted_by: []}')
+  kind=$(printf '%s' "$unit" | jq -r .kind)
+
+  # A hole closes once its reverting commit is in this first-parent commit.
+  if [ "$holes" != '[]' ]; then
+    left='[]'
+    while IFS= read -r r; do
+      [ -n "$r" ] || continue
+      git merge-base --is-ancestor "$r" "$sha" \
+        || left=$(jq -nc --argjson a "$left" --arg r "$r" '$a + [$r]')
+    done < <(printf '%s' "$holes" | jq -r '.[]')
+    holes="$left"
+  fi
 
   block='null'
   verdicts='[]'
-  while IFS= read -r id; do
-    [ -z "$id" ] && continue
-    ticket_verdict "$id"
-    v="$VERDICT"
-    verdicts=$(jq -nc --argjson a "$verdicts" --argjson v "$v" '$a + [$v]')
-    if [ "$block" = 'null' ] && [ "$(printf '%s' "$v" | jq -r .blocks)" = true ]; then
-      block="$v"
-    fi
-  done < <(printf '%s' "$refs" | jq -r '.[]')
+  if [ "$kind" = normal ]; then
+    while IFS= read -r id; do
+      [ -z "$id" ] && continue
+      ticket_verdict "$id"
+      v="$VERDICT"
+      verdicts=$(jq -nc --argjson a "$verdicts" --argjson v "$v" '$a + [$v]')
+      if [ "$block" = 'null' ] && [ "$(printf '%s' "$v" | jq -r .blocks)" = true ]; then
+        block="$v"
+      fi
+    done < <(printf '%s' "$refs" | jq -r '.[]')
+  fi
 
   if [ "$block" != 'null' ]; then
     # shellcheck disable=SC2016 # jq bindings, not shell expansion.
     blocked=$(printf '%s' "$block" | jq -c --arg sha "$sha" --arg s "$subject" \
       '{id, title, url, state, reason, sha: $sha, subject: $s}')
     commits=$(jq -nc --argjson a "$commits" --arg sha "$sha" --arg s "$subject" --argjson r "$refs" \
-      '$a + [{sha: $sha, subject: $s, tickets: $r, build: null}]')
+      '$a + [{sha: $sha, subject: $s, tickets: $r, build: null, kind: "normal"}]')
     log "stop at ${sha:0:7}: $(printf '%s' "$block" | jq -r '"\(.id) \(.reason)"')"
     break
   fi
 
-  if [ "$refs" = '[]' ]; then
-    untracked_pending=$(jq -nc --argjson a "$untracked_pending" --arg sha "$sha" --arg s "$subject" \
-      '$a + [{sha: $sha, subject: $s}]')
-  else
-    tickets_pending=$(jq -nc --argjson a "$tickets_pending" --argjson v "$verdicts" \
-      '$a + [$v[] | {id, title, url, state}]')
-  fi
+  case "$kind" in
+    reverted)
+      # shellcheck disable=SC2016 # jq bindings, not shell expansion.
+      reverted=$(jq -nc --argjson a "$reverted" --arg sha "$sha" --arg s "$subject" --argjson r "$refs" --argjson u "$unit" \
+        '$a + [{sha: $sha, subject: $s, tickets: $r, reverted_by: $u.reverted_by}]')
+      holes=$(jq -nc --argjson a "$holes" --argjson u "$unit" '$a + $u.reverted_by | unique')
+      log "${sha:0:7} is reverted later; its tickets ($(printf '%s' "$refs" | jq -r 'join(",")')) do not block"
+      ;;
+    revert)
+      untracked_pending=$(jq -nc --argjson a "$untracked_pending" --arg sha "$sha" --arg s "$subject" \
+        '$a + [{sha: $sha, subject: $s, revert: true}]')
+      ;;
+    *)
+      if [ "$refs" = '[]' ]; then
+        untracked_pending=$(jq -nc --argjson a "$untracked_pending" --arg sha "$sha" --arg s "$subject" \
+          '$a + [{sha: $sha, subject: $s}]')
+      else
+        tickets_pending=$(jq -nc --argjson a "$tickets_pending" --argjson v "$verdicts" \
+          '$a + [$v[] | {id, title, url, state}]')
+      fi
+      ;;
+  esac
 
   build=$(build_of "$sha")
   [ -z "$build" ] && build='null'
-  commits=$(jq -nc --argjson a "$commits" --arg sha "$sha" --arg s "$subject" --argjson r "$refs" --argjson b "$build" \
-    '$a + [{sha: $sha, subject: $s, tickets: $r, build: $b}]')
+  # shellcheck disable=SC2016 # jq bindings, not shell expansion.
+  commits=$(jq -nc --argjson a "$commits" --arg sha "$sha" --arg s "$subject" --argjson r "$refs" --argjson b "$build" --arg k "$kind" \
+    '$a + [{sha: $sha, subject: $s, tickets: $r, build: $b, kind: $k}]')
 
-  if [ "$build" != 'null' ]; then
+  if [ "$build" != 'null' ] && [ "$holes" = '[]' ]; then
+    tag=$(release_tag_at "$sha" "$RELEASE_TAG_PATTERN")
     # shellcheck disable=SC2016 # jq bindings, not shell expansion.
-    rc=$(printf '%s' "$build" | jq -c --arg sha "$sha" \
-      '{sha: $sha, image_tag: "main-\(.run_number)-\($sha)", run_number, run_url}')
+    rc=$(printf '%s' "$build" | jq -c --arg sha "$sha" --arg t "$tag" \
+      '{sha: $sha, image_tag: "main-\(.run_number)-\($sha)", run_number, run_url, release_tag: $t}')
     tickets=$(jq -nc --argjson a "$tickets" --argjson b "$tickets_pending" '$a + $b | unique_by(.id)')
     untracked=$(jq -nc --argjson a "$untracked" --argjson b "$untracked_pending" '$a + $b')
     tickets_pending='[]'
     untracked_pending='[]'
+    if [ -n "$tag" ]; then
+      # shellcheck disable=SC2016 # jq bindings, not shell expansion.
+      staged=$(jq -nc --argjson rc "$rc" --argjson t "$tickets" \
+        '{sha: $rc.sha, image_tag: $rc.image_tag, release_tag: $rc.release_tag, tickets: [$t[].id]}')
+    fi
+  elif [ "$build" != 'null' ]; then
+    log "build of ${sha:0:7} is not selectable: it still contains reverted code (revert not merged yet)"
   fi
 done < <(git rev-list --first-parent --reverse "${LAST_TAG}..${head_sha}")
 
@@ -210,8 +268,7 @@ already=false
 outcome=none
 if [ "$rc" != 'null' ]; then
   outcome=selected
-  rc_sha=$(printf '%s' "$rc" | jq -r .sha)
-  if git tag --points-at "$rc_sha" | grep -qE "$RELEASE_TAG_PATTERN"; then
+  if [ -n "$(printf '%s' "$rc" | jq -r .release_tag)" ]; then
     already=true
     outcome=already_promoted
   fi
@@ -219,15 +276,19 @@ fi
 
 # shellcheck disable=SC2016 # jq bindings, not shell expansion.
 jq -nc \
-  --arg last_tag "$LAST_TAG" \
+  --arg base "$LAST_TAG" \
+  --arg last_release "$last_release" \
   --arg head_sha "$head_sha" \
   --arg outcome "$outcome" \
   --argjson already "$already" \
   --argjson rc "$rc" \
   --argjson tickets "$tickets" \
   --argjson untracked "$untracked" \
+  --argjson reverted "$reverted" \
+  --argjson staged "$staged" \
   --argjson blocked "$blocked" \
   --argjson commits "$commits" \
-  '{last_tag: $last_tag, head_sha: $head_sha, outcome: $outcome, already_promoted: $already,
-    rc: $rc, tickets: $tickets, untracked_commits: $untracked, blocked_by: $blocked,
-    commits: $commits}'
+  '{base: $base, last_tag: $base, last_release_tag: $last_release, head_sha: $head_sha,
+    outcome: $outcome, already_promoted: $already,
+    rc: $rc, tickets: $tickets, untracked_commits: $untracked, reverted: $reverted,
+    staged: $staged, blocked_by: $blocked, commits: $commits}'
