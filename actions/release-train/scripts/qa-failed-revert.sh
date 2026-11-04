@@ -139,8 +139,15 @@ while IFS= read -r sha; do
   parents=$(git log -1 --format=%P "$sha" | wc -w | tr -d ' ')
   prs=$(merged_prs "$sha")
   refs=$(printf '%s' "$prs" | jq -r '.[] | .title, .head' | "$HERE/ticket-extractor.sh" "${sha}^1" "$sha")
+  # lib/revert.sh decides whenever the commit carries git's "This reverts
+  # commit" line: then a revert of a revert (a re-land) is ticket work even
+  # though its subject starts with Revert (review fix: selection blocks on
+  # it, so this run must be able to revert it). The subject and branch
+  # heuristics only cover reverts without that line.
   revert=false
-  if [ "$(jq -r --arg s "$sha" '.[$s].kind // "normal"' <<< "$units")" = revert ] || [[ "$subject" == Revert* ]] \
+  if git log -1 --format=%B "$sha" | grep -q 'This reverts commit [0-9a-f]'; then
+    [ "$(jq -r --arg s "$sha" '.[$s].kind // "normal"' <<< "$units")" = revert ] && revert=true
+  elif [[ "$subject" == Revert* ]] \
     || printf '%s' "$prs" | jq -e 'any(.[]; .head | test("^(prodzilla/)?revert-"))' > /dev/null; then
     revert=true
   fi

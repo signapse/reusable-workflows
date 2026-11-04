@@ -370,7 +370,12 @@ EOF
   ticket SIG-1 "QA Failed" 25
   run run_revert
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.tickets[0] | .action == "opened" and ([.reverted[].subject] == ["feat(SIG-1): A"])' > /dev/null
+  # The re-land is ticket work: it is reverted (newest first), after which A
+  # has nothing left to revert. A is not skipped as "already reverted".
+  echo "$output" | jq -e '.tickets[0] | .action == "opened"
+    and ([.reverted[].subject] == ["Revert \"Revert \"feat(SIG-1): A\"\""])
+    and any(.skipped[]; .subject == "feat(SIG-1): A" and .reason == "nothing left to revert")' > /dev/null
+  [ "$(git show origin/prodzilla/revert-SIG-1:f 2> /dev/null || git --git-dir="$TMP/origin.git" show prodzilla/revert-SIG-1:f)" = "$(printf 'one\ntwo\nthree')" ]
 }
 
 @test "the walk base the caller passes (the tag prod runs) reaches commits in already-tagged builds" {
@@ -460,4 +465,18 @@ EOF
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.tickets[0].action == "no_history"' > /dev/null
   [ "$(created)" -eq 0 ]
+}
+
+@test "a re-land whose original revert is older than the walk base is reverted (selection blocks on it)" {
+  change f "one-a" "feat(SIG-1): A"
+  git revert --no-edit HEAD > /dev/null
+  r=$(git rev-parse HEAD)
+  git tag 1.1.0   # prod runs this
+  git revert --no-commit HEAD > /dev/null
+  git commit -q -m 'Revert "Revert "feat(SIG-1): A""' -m "This reverts commit $r."
+  ticket SIG-1 "QA Failed" 25
+  run run_revert 1.1.0 HEAD
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.tickets[0] | .id == "SIG-1" and .action == "opened"
+    and ([.reverted[].subject] == ["Revert \"Revert \"feat(SIG-1): A\"\""])' > /dev/null
 }
