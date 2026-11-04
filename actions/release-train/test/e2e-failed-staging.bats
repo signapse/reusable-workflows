@@ -22,7 +22,7 @@ setup() {
 set -euo pipefail
 [ "$1" = api ] || exit 1
 shift
-while [ "$1" = -H ]; do shift 2; done
+while [ "$1" = -H ] || [ "$1" = --paginate ]; do [ "$1" = --paginate ] && shift || shift 2; done
 url="$1"; filter="."
 [ "${2:-}" = --jq ] && filter="$3"
 case "$url" in

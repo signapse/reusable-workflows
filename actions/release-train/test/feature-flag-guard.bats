@@ -22,7 +22,9 @@ url=""; for a in "$@"; do case "$a" in https://*) url="$a" ;; -X) echo "write at
 echo "$url" >> "$TMP/calls"
 [ -f "$TMP/posthog-fail" ] && { echo "curl: (22) The requested URL returned error: 401" >&2; exit 22; }
 n=$(sed -E 's/.*search=sig-([0-9]+)-.*/\1/' <<< "$url")
-if [ -f "$TMP/flags/$n.json" ]; then cat "$TMP/flags/$n.json"; else echo '{"results":[]}'; fi
+# page 2 of a search is $TMP/flags/<n>.json.2, linked by "next" on page 1.
+if [[ "$url" == *"&page=2"* ]]; then cat "$TMP/flags/$n.json.2"
+elif [ -f "$TMP/flags/$n.json" ]; then cat "$TMP/flags/$n.json"; else echo '{"results":[]}'; fi
 EOS
   chmod +x "$TMP/stub/"*
   export POSTHOG_API_KEY=phx_read QA_COHORT_ID=42
@@ -90,6 +92,17 @@ field() { tail -n1 <<< "$output" | jq -r "$@"; }
   guard
   [ "$status" -ne 0 ]
   [ "$(field -c '.checked[0].offending')" = '[{"index":3,"rollout_percentage":100}]' ]
+}
+
+@test "a leaking flag on a later page of the search fails" {
+  flag 1 sig-1-safe 0
+  jq -c '. + {next: "https://eu.posthog.com/api/projects/256388/feature_flags/?search=sig-1-&limit=100&page=2"}' \
+    "$TMP/flags/1.json" > "$TMP/f" && mv "$TMP/f" "$TMP/flags/1.json"
+  jq -nc '{results: [{key: "sig-1-leak", active: true, deleted: false,
+    filters: {groups: [{properties: [], rollout_percentage: 50}]}}]}' > "$TMP/flags/1.json.2"
+  guard
+  [ "$status" -eq 1 ]
+  [[ "$(field '.errors[0]')" == *"sig-1-leak"* ]]
 }
 
 @test "no QA Cohort id with a Feature ticket to check fails instead of trusting any cohort" {
