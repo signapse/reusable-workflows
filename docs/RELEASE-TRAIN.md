@@ -406,6 +406,7 @@ prod (caller job, needs: [train, staging])
   smoke     signapse-e2e playwright.yml@main, environment prod, grep @prod-safe   AC4
   verdict   pass: flag guard again, tickets -> On Prod (only from on_prod_from)
             fail: prod_smoke_passed=false, run red
+            unknown: prod_smoke_passed empty, run red, smoke-unknown alerts
   rollback  only on a failed smoke (SIG-2771): see "Automatic rollback" below
 ```
 
@@ -519,7 +520,8 @@ rollback.yml.
 `run_key` (service S was dispatched with `<run_key>-<S>`), `deploy_runs`,
 `terraform_gate`, `terraform_run_url`, `linear_release_id`,
 `linear_release_url`, `prod_smoke_passed` (`true`/`false` once deployed;
-`false` after a partial Deployment), `partial_deployment`, `moved_services`,
+empty when nothing was deployed or the result is unknown; `false` after
+a partial Deployment), `partial_deployment`, `moved_services`,
 `smoke_report_url`, and from the rollback job `rolled_back`,
 `rollback_results`, `incident_url`.
 
@@ -530,7 +532,15 @@ The `rollback` job runs when the Deployment reached prod
 or after a partial Deployment (`partial_deployment == 'true'`: a deploy-prod
 run or the final check failed after some services moved). Then only
 `moved_services` are rolled back, and there is no Linear Release to mark.
-A cancelled train run never rolls back. Spec step 6 "Fail" and "Failure
+A cancelled train run never rolls back. The smoke result has three values:
+`true` (the suite job succeeded and reported `passed`), `false` (the suite
+reported `failed`) and empty, unknown: the suite gave no verdict (its job
+errored, was cancelled or skipped before reporting, or reported `passed`
+from a job that did not succeed), or the verdict job died before reading
+it. Unknown is never treated as a pass or a failure: nothing is rolled back,
+no ticket moves, and the `smoke-unknown` job posts a critical Slack alert and
+ends the run red, because rolling back a Deployment that may be healthy is
+worse than asking a human. Spec step 6 "Fail" and "Failure
 handling":
 
 ```text
@@ -539,7 +549,9 @@ rollback
                            all dispatched, then waited on; restored tag checked against previous_tags
   release-rolled-back.sh   AC2: Linear Release -> `Rolled back` (canceled-type stage)
   rollback-incident.sh     AC3/AC5: incident.io incident, Cause = Deployment, link to the run
-  rollback-tickets.sh      AC4/AC5: comment + QA Failed on every ticket, Slack alert to slack_channel
+  rollback-tickets.sh      AC4/AC5: comment + QA Failed on every ticket (never out of Done),
+                           QA Passed removed from those in QA Failed (qa-failed-tickets.sh),
+                           Slack alert to slack_channel naming what moved, stayed or failed
   End red                  the run fails in every path
 ```
 

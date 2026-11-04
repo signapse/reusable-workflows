@@ -156,17 +156,45 @@ tickets_env() {
   [[ "$(linear_calls commentCreate | head -1 | jq -r .variables.b)" == *"$RUN"* ]]
   [ "$(linear_calls workflowStates | jq -r .variables.name)" = "QA Failed" ]
   [ "$(linear_calls issueUpdate | jq -r .variables.id | paste -sd, -)" = SIG-1,SIG-2 ]
+  # QA Passed goes with the move to QA Failed (review fix).
+  [ "$(linear_calls issueRemoveLabel | jq -c '[.variables.id, .variables.l]' | paste -sd, -)" = '["SIG-1","lbl-qa"],["SIG-2","lbl-qa"]' ]
   [ "$(jq -r .channel "$TMP/slack.log")" = C123 ]
   text=$(jq -r .text "$TMP/slack.log")
   [[ "$text" == *"rolled back"* ]]
-  [[ "$text" == *"Moved to QA Failed: SIG-1, SIG-2"* ]]
+  [[ "$text" == *"In QA Failed: SIG-1, SIG-2"* ]]
   [[ "$text" == *"|Incident>"* ]]
   [[ "$text" != *"<!channel>"* ]]
 }
 
+@test "AC4: a Done ticket (follow-up commit in the Deployment) is not moved out of Done" {
+  tickets_env
+  echo Done > "$TMP/state-SIG-2"
+  ROLLBACK_OK=true ROLLBACK_RESULTS="$OK_RESULTS" run "$S/rollback-tickets.sh"
+  [ "$status" -eq 0 ]
+  [ "$(linear_calls issueUpdate | jq -r .variables.id | paste -sd, -)" = SIG-1 ]
+  # It never went back to QA: it keeps QA Passed, and the alert says it stayed.
+  [ "$(linear_calls issueRemoveLabel | jq -r .variables.id | paste -sd, -)" = SIG-1 ]
+  text=$(jq -r .text "$TMP/slack.log")
+  [[ "$text" == *"In QA Failed: SIG-1"* ]]
+  [[ "$text" == *"Left where they are: SIG-2 (Done)"* ]]
+}
+
+@test "AC4: a run whose URL extends this one's (run 421 vs 42) does not count as commented" {
+  tickets_env
+  jq -nc --arg b "**Prod smoke failed** after ...
+
+Run: ${RUN}1" '[$b]' > "$TMP/comments-SIG-1"
+  ROLLBACK_OK=true ROLLBACK_RESULTS="$OK_RESULTS" run "$S/rollback-tickets.sh"
+  [ "$status" -eq 0 ]
+  [ "$(linear_calls commentCreate | jq -r .variables.id | paste -sd, -)" = uuid-SIG-1,uuid-SIG-2 ]
+}
+
 @test "AC4: re-run: tickets already commented for this run are not commented again" {
   tickets_env
-  echo "[\"**Prod smoke failed** after ... Run: $RUN\"]" > "$TMP/comments-SIG-1"
+  jq -nc --arg b "**Prod smoke failed** after ...
+
+Run: ${RUN}
+Report: none" '[$b]' > "$TMP/comments-SIG-1"
   ROLLBACK_OK=true ROLLBACK_RESULTS="$OK_RESULTS" run "$S/rollback-tickets.sh"
   [ "$status" -eq 0 ]
   [ "$(linear_calls commentCreate | jq -r .variables.id | paste -sd, -)" = uuid-SIG-2 ]
@@ -203,4 +231,14 @@ tickets_env() {
   ROLLBACK_OK=true ROLLBACK_RESULTS="$OK_RESULTS" run "$S/rollback-tickets.sh"
   [ "$status" -eq 1 ]
   [[ "$(field '.errors | join(" ")')" == *"Slack alert not sent"* ]]
+}
+
+@test "AC4: the alert does not claim tickets moved when Linear failed" {
+  tickets_env
+  touch "$TMP/linear-down"
+  ROLLBACK_OK=true ROLLBACK_RESULTS="$OK_RESULTS" run "$S/rollback-tickets.sh"
+  [ "$status" -eq 1 ]
+  text=$(jq -r .text "$TMP/slack.log")
+  [[ "$text" == *"NOT moved to QA Failed (Linear failed): SIG-1, SIG-2"* ]]
+  [[ "$text" != *"In QA Failed"* ]]
 }

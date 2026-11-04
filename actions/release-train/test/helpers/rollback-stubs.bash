@@ -6,7 +6,9 @@
 #     releases(filter       $TMP/release.json as the only node, or none
 #     releaseUpdate         success
 #     issue(id:) comments   $TMP/comments-<id> holds existing comment bodies (JSON array)
-#     commentCreate, workflowStates, issueUpdate   success
+#     commentCreate, workflowStates, issueUpdate, issueRemoveLabel   success
+#     issue(id:) state      $TMP/state-<id>, default On Prod
+#     issue(id:) labels     QA Passed (lbl-qa) and Feature (lbl-feature)
 #   api.incident.io         body to $TMP/incident.json; answers $TMP/inc-code (201) with $TMP/inc-body
 #   slack.com               body to $TMP/slack.log (one JSON per line); {"ok":true}
 # $TMP/linear-down makes every Linear call fail with HTTP 500.
@@ -45,6 +47,12 @@ case "$url" in
       *commentCreate*) out='{"data":{"commentCreate":{"success":true}}}' ;;
       *workflowStates*) out='{"data":{"workflowStates":{"nodes":[{"id":"state-qa-failed"}]}}}' ;;
       *issueUpdate*) out='{"data":{"issueUpdate":{"success":true}}}' ;;
+      *issueRemoveLabel*) out='{"data":{"issueRemoveLabel":{"success":true}}}' ;;
+      *"issue(id:\$id){state{name}}"*)
+        id=$(jq -r .variables.id <<< "$body")
+        out=$(jq -nc --arg s "$(cat "$TMP/state-$id" 2>/dev/null || echo 'On Prod')" '{data: {issue: {state: {name: $s}}}}') ;;
+      *"issue(id:\$id){labels{nodes{id name}}}"*)
+        out='{"data":{"issue":{"labels":{"nodes":[{"id":"lbl-qa","name":"QA Passed"},{"id":"lbl-feature","name":"Feature"}]}}}}' ;;
       *"issue(id:"*)
         id=$(jq -r .variables.id <<< "$body")
         out=$(jq -nc --arg id "$id" --argjson c "$(cat "$TMP/comments-$id" 2>/dev/null || echo '[]')" \
