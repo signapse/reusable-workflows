@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# shellcheck disable=SC2030,SC2031 # each @test runs in its own subshell on purpose.
+# shellcheck disable=SC2030,SC2031,SC2016 # each @test runs in its own subshell on purpose; literal backticks in expected text.
 # What follows a failed prod smoke (SIG-2771), with curl stubbed
 # (helpers/rollback-stubs.bash):
 #   release-rolled-back.sh  AC2: Linear Release -> Rolled back
