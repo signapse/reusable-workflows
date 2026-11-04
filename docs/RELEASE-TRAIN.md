@@ -87,7 +87,7 @@ prod's tag): what prod deploys when a run promotes nothing new.
 | `rc_sha` | `4f1c…` | Release Candidate commit, empty when none |
 | `rc_image_tag` | `main-212-4f1c…` | Image tag to re-tag (no rebuild) |
 | `rc_tickets` | `SIG-1,SIG-2` | Every live ticket from prod's tag to the Release Candidate (signapse-e2e `tickets` format) |
-| `untracked_commits` | `[{"sha":"…","subject":"chore(deps): …"}]` | Ticketless commits riding along |
+| `untracked_commits` | `[{"sha":"…","subject":"chore(deps): …"}, {"sha":"…","subject":"Revert …","revert":true}]` | Commits riding along without a ticket check: ticketless commits, and revert commits (`revert: true`) even when their message, PR title or branch names a ticket |
 | `blocked_by` | `SIG-3` | Ticket that stopped the line, empty when none |
 | `selection_base` | `1.2.40` | Where the walk started: the release tag prod runs |
 | `rc_release_tag` | `1.2.44` | Release tag already on the Release Candidate (`already_promoted`), else empty |
@@ -154,6 +154,10 @@ jobs:
       LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
       READ_APP_PRIVATE_KEY: ${{ secrets.READ_APP_PRIVATE_KEY }}
 ```
+
+`prod_services` and `read_app_id` (with secret `READ_APP_PRIVATE_KEY`) are
+required unless `selection_base` is set: the walk starts at the tag prod
+runs, read from `gitops_repo` with the read-only app.
 
 Optional inputs: `qa_passed_label`, `qa_failed_state`, `build_workflow`,
 `release_branch`, `release_tag_pattern`, `linear_team_key`, `gitops_repo`,

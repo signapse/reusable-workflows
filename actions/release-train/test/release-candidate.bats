@@ -497,3 +497,15 @@ revert_of() {
   echo "$output" | jq -e '.rc == null and .blocked_by.id == "SIG-1"' > /dev/null
   echo "$output" | jq -e --arg a "$(sha_of "feat(SIG-1): A")" '.blocked_by.sha == $a' > /dev/null
 }
+
+@test "a re-land whose original revert is older than the walk base is checked, not ridden along" {
+  commit "feat(SIG-1): A"; built "feat(SIG-1): A" 11
+  revert_of "feat(SIG-1): A" 'Revert "feat(SIG-1): A"'; built 'Revert "feat(SIG-1): A"' 12
+  git tag 1.0.1   # prod runs this: A and its revert are behind the walk base
+  revert_of 'Revert "feat(SIG-1): A"' 'Revert "Revert "feat(SIG-1): A""'; built 'Revert "Revert "feat(SIG-1): A""' 13
+  ticket SIG-1 "QA Failed"
+  run select_rc 1.0.1 HEAD
+  [ "$status" -eq 0 ]
+  # The re-land brings A's code back: it is ticket work, so SIG-1 blocks it.
+  echo "$output" | jq -e '.rc == null and .blocked_by.id == "SIG-1"' > /dev/null
+}

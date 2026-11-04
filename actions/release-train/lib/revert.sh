@@ -28,11 +28,30 @@ revert_edges() {
     [ -n "$by" ] && [ "${#t}" -ge 7 ] || continue
     full=$(git rev-parse -q --verify "${t}^{commit}" 2> /dev/null) || continue
     out=$(jq -c --arg b "$by" --arg t "$full" '. + [{by: $b, target: $t}] | unique' <<< "$out")
-  done < <(git log --format='@@%H%n%B' "${base}..${head}" \
-    | awk '/^@@[0-9a-f]+$/ { h = substr($0, 3); next }
-           { while (match($0, /This reverts commit [0-9a-f]+/)) {
-               print h, substr($0, RSTART + 20, RLENGTH - 20); $0 = substr($0, RSTART + RLENGTH) } }')
+  done < <(git log --format='@@%H%n%B' "${base}..${head}" | _revert_lines)
+  # A target older than <base> may itself be a revert (prod's base sits after
+  # an original revert, and the range holds the revert of that revert: a
+  # re-land). Its own edges decide that, so read them too, one level deep
+  # (review fix: otherwise the re-land looks like a pure revert and its code
+  # is never checked).
+  while IFS=" " read -r by t; do
+    [ -n "$by" ] && [ "${#t}" -ge 7 ] || continue
+    full=$(git rev-parse -q --verify "${t}^{commit}" 2> /dev/null) || continue
+    out=$(jq -c --arg b "$by" --arg t "$full" '. + [{by: $b, target: $t}] | unique' <<< "$out")
+  done < <(jq -r '[.[].target] | unique | .[]' <<< "$out" \
+    | while IFS= read -r t; do
+        git merge-base --is-ancestor "$t" "$base" 2> /dev/null || continue
+        git log -1 --format='@@%H%n%B' "$t"
+      done | _revert_lines)
   echo "$out"
+}
+
+# stdin: git log --format='@@%H%n%B'; stdout: "<by> <target-prefix>" per
+# "This reverts commit" line.
+_revert_lines() {
+  awk '/^@@[0-9a-f]+$/ { h = substr($0, 3); next }
+       { while (match($0, /This reverts commit [0-9a-f]+/)) {
+           print h, substr($0, RSTART + 20, RLENGTH - 20); $0 = substr($0, RSTART + RLENGTH) } }'
 }
 
 revert_units() {
