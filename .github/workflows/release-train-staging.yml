@@ -11,7 +11,8 @@ name: Release Train staging tests (reusable)
 #      pass  -> every ticket gets Staging Passed (Staging Failed removed) and
 #               a comment with the run and report links; tickets stay On Staging
 #      fail, error, cancelled or skipped -> every ticket gets Staging Failed
-#               (Staging Passed removed), a comment, moves to QA Failed, and a
+#               (Staging Passed and QA Passed removed), a comment, moves to
+#               QA Failed (never out of Done), and a
 #               Slack alert goes to slack_channel. The run then fails.
 #   3. outputs staging_passed ('true' only on a recorded pass) and report_url.
 #      Production (SIG-2769) must run only when staging_passed == 'true'.
@@ -28,6 +29,8 @@ name: Release Train staging tests (reusable)
 #     needs: train
 #     if: needs.train.outputs.promoted == 'true'
 #     uses: signapse/reusable-workflows/.github/workflows/release-train-staging.yml@main
+#     permissions:
+#       contents: read
 #     with:
 #       tickets: ${{ needs.train.outputs.rc_tickets }}
 #       release_tag: ${{ needs.train.outputs.release_tag }}
@@ -50,8 +53,10 @@ on:
       tickets:
         description: >-
           Comma-separated tickets of the promoted Release Candidate (the train's
-          rc_tickets). Empty when it carries only untracked commits: the suite
-          then runs its default staging scope and only Slack hears of a failure.
+          rc_tickets: every live ticket from the tag prod runs to the
+          candidate, the same set prod deploys). Empty when it carries only
+          untracked commits: the suite then runs its default staging scope and
+          only Slack hears of a failure.
         required: true
         type: string
       release_tag:
@@ -76,6 +81,15 @@ on:
         required: false
         type: string
         default: 'QA Failed'
+      qa_passed_label:
+        description: 'Label removed from every ticket that moves to QA Failed (QA approval does not survive a failure).'
+        required: false
+        type: string
+        default: 'QA Passed'
+      linear_team_key:
+        required: false
+        type: string
+        default: 'SIG'
     secrets:
       LINEAR_API_KEY:
         required: true
@@ -154,6 +168,8 @@ jobs:
           STAGING_PASSED_LABEL: ${{ inputs.staging_passed_label }}
           STAGING_FAILED_LABEL: ${{ inputs.staging_failed_label }}
           QA_FAILED_STATE: ${{ inputs.qa_failed_state }}
+          QA_PASSED_LABEL: ${{ inputs.qa_passed_label }}
+          LINEAR_TEAM_KEY: ${{ inputs.linear_team_key }}
           SLACK_CHANNEL: ${{ inputs.slack_channel }}
           LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}

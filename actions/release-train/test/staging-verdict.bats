@@ -70,8 +70,8 @@ case "$op" in
     k=$(key)
     if [ -z "$k" ]; then printf '{"errors":[{"message":"Entity not found: Issue"}],"data":null}\n200'; exit 0; fi
     jq -c --arg k "$k" --argjson v "$v" '.issues[$k] as $i
-      | {data: {issue: {id: $i.id, identifier: $k, team: {id: $i.team}, labels: {nodes: $i.labels},
-                        comments: {nodes: [$i.comments[] | select(contains($v.run)) | {body: .}]}}}}' "$st" ;;
+      | {data: {issue: {id: $i.id, identifier: $k, team: {id: $i.team}, state: {name: $i.state}, labels: {nodes: $i.labels},
+                        comments: {nodes: [$i.comments[] | select(contains($v.run // "")) | {body: .}]}}}}' "$st" ;;
   labels)
     jq -c --argjson v "$v" '{data: {issueLabels: {nodes: [.labels[]
       | select((.name | ascii_downcase) == ($v.n | ascii_downcase))
@@ -160,7 +160,9 @@ fail() { export SUITE_JOB_RESULT=failure SUITE_RESULT=failed; }
   [ "$status" -eq 0 ]
   [ "$(jq -r .verdict <<< "$output")" = failed ]
   [ "$(jq -r .staging_passed <<< "$output")" = false ]
-  [ "$(labels SIG-1)" = '["Feature","QA Passed","Staging Failed"]' ]
+  # QA Passed goes with the move to QA Failed (ADR 0001, spec "Board and labels").
+  [ "$(labels SIG-1)" = '["Feature","Staging Failed"]' ]
+  grep -q '^remove SIG-1 QA Passed (lab-qa)$' "$TMP/calls"
   [ "$(labels SIG-2)" = '["Bug","Staging Failed"]' ]
   [ "$(state SIG-1)" = "QA Failed" ] && [ "$(state SIG-2)" = "QA Failed" ]
   [[ "$(comment SIG-2)" == *"**Staging Failed**"*"$RUN"*"$REPORT"* ]]
@@ -168,6 +170,22 @@ fail() { export SUITE_JOB_RESULT=failure SUITE_RESULT=failed; }
   slack=$(grep '^slack' "$TMP/calls" | sed 's/^slack //')
   [ "$(jq -r .channel <<< "$slack")" = '#demo-releases' ]
   [[ "$(jq -r .text <<< "$slack")" == *"SIG-1, SIG-2"*"$RUN"* ]]
+}
+
+@test "a pass keeps QA Passed" {
+  pass
+  run verdict
+  [ "$status" -eq 0 ]
+  [ "$(labels SIG-1)" = '["Feature","QA Passed","Staging Passed"]' ]
+}
+
+@test "a fail never moves a Done ticket (follow-up commit) out of Done" {
+  jq '.issues["SIG-2"].state = "Done"' "$TMP/linear.json" > "$TMP/l" && mv "$TMP/l" "$TMP/linear.json"
+  fail
+  run verdict
+  [ "$status" -eq 0 ]
+  [ "$(state SIG-2)" = "Done" ]
+  [ "$(state SIG-1)" = "QA Failed" ]
 }
 
 @test "AC2: fail replaces Staging Passed and keeps the other labels" {
@@ -195,7 +213,7 @@ fail() { export SUITE_JOB_RESULT=failure SUITE_RESULT=failed; }
   [ "$status" -eq 0 ]
   [ "$(jq -r .verdict <<< "$output")" = failed ]
   [[ "$(jq -r .reason <<< "$output")" == *cancelled* ]]
-  [ "$(labels SIG-1)" = '["Feature","QA Passed","Staging Failed"]' ]
+  [ "$(labels SIG-1)" = '["Feature","Staging Failed"]' ]
   grep -q '^slack' "$TMP/calls"
 }
 
@@ -238,7 +256,10 @@ fail() { export SUITE_JOB_RESULT=failure SUITE_RESULT=failed; }
   pass
   run verdict
   [ "$status" -eq 0 ]
-  [ "$(labels SIG-1)" = '["Feature","QA Passed","Staging Passed"]' ]
+  # The flip records the pass, but the fail already sent the ticket to QA
+  # Failed without its QA Passed: only QA takes it out (prod refuses it).
+  [ "$(labels SIG-1)" = '["Feature","Staging Passed"]' ]
+  [ "$(state SIG-1)" = "QA Failed" ]
   [ "$(comments SIG-1)" -eq 2 ]
 }
 
