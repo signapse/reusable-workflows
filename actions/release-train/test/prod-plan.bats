@@ -198,6 +198,18 @@ field() { tail -n1 <<< "$output" | jq -r "$@"; }
   [ "$(field -c .to_deploy)" = '["svc-a"]' ]
 }
 
+@test "services on different tags: the oldest one is the base, so every ticket reaching prod is checked" {
+  git tag 1.0.5 "$(git rev-list -n1 --grep='SIG-1 feature' HEAD)"
+  prod_tag svc-a 1.0.5
+  prod_tag svc-b 1.0.0
+  jq '.["SIG-1"].labels = ["Feature", "QA Passed"]' "$TMP/linear.json" > "$TMP/l" && mv "$TMP/l" "$TMP/linear.json"
+  export RELEASE_TAG=1.1.0 PROD_SERVICES='["svc-a","svc-b"]'
+  plan
+  [ "$(field .base)" = 1.0.0 ]
+  [ "$(field .decision)" = refused ]
+  [[ "$(field .reason)" == *"SIG-1"* ]]
+}
+
 @test "a service with no prod patch file fails the plan" {
   export RELEASE_TAG=1.1.0 PROD_SERVICES='["svc-a","nope"]'
   plan

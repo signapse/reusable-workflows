@@ -119,13 +119,17 @@ fi
 
 # Commit range for the tickets: from the tag prod runs (or ran) before this
 # one, when it is a release tag behind this one in git; otherwise from the
-# previous release tag.
+# previous release tag. With services on different tags, the OLDEST one
+# (review fix): every ticket whose code reaches any service must be checked.
 base=""
+base_sha=""
 while IFS= read -r t; do
   [ -n "$t" ] && [ "$t" != "$tag" ] || continue
   if b=$(git rev-parse --verify -q "${t}^{commit}") && git merge-base --is-ancestor "$b" "$sha"; then
-    base="$t"
-    break
+    if [ -z "$base" ] || git merge-base --is-ancestor "$b" "$base_sha"; then
+      base="$t"
+      base_sha="$b"
+    fi
   fi
 done < <(jq -r '.services[] | if .on_tag then .deployed_previous else .current_tag end' <<< "$plan")
 if [ -z "$base" ] && git rev-parse --verify -q "${sha}^" > /dev/null; then

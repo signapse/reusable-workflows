@@ -496,7 +496,9 @@ jobs:
           TIMEOUT_MINUTES: ${{ inputs.deploy_timeout_minutes }}
         run: |
           set -euo pipefail
-          export TIMEOUT_SECONDS=$((TIMEOUT_MINUTES * 60))
+          # awk, not $((...)): the input is a number and may be fractional.
+          TIMEOUT_SECONDS=$(awk -v m="$TIMEOUT_MINUTES" 'BEGIN { printf "%d", m * 60 }')
+          export TIMEOUT_SECONDS
           # Unique per attempt; service S gets RUN_KEY-S.
           RUN_KEY="${GITHUB_REPOSITORY#*/}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-prod"
           export RUN_KEY
