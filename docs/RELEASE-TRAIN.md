@@ -137,15 +137,23 @@ The `promote` job runs after `select` when `outcome` is `selected`:
    `ecr-retag.sh` re-puts the Release Candidate's manifest
    (`main-<n>-<sha>`) under the release tag. No rebuild: the bytes are the
    same, and the script reads both digests back and fails if they differ. It
-   never moves an existing release tag to other bytes. Then the commit gets
+   never moves an existing release tag to other bytes, and a failed lookup
+   (anything but "not found") stops it before any write. Then the commit gets
    the same tag in git through the GitHub API. The summary lists both digests
-   per repository.
+   per repository. Set the ECR repositories' tag mutability to `IMMUTABLE`
+   (a manual step in signapse-core-terraform): on a mutable repository
+   another writer could still set the tag between the script's lookup and its
+   write. On an immutable one that write fails and the script reads the tag
+   back instead.
 5. **Wait for staging** (`staging-deploy-wait.sh`, bounded by
    `staging_deploy_timeout_minutes`): Flux image automation commits the new
    tag into each `staging_watch_paths` file in signapse-core-k8s (the
-   `{"$imagepolicy": …}` setter line). Then it polls `staging_version_url`
-   until the service reports the tag (or newer). **`staging_version_url` is
-   required**: a Flux commit only says the tag was chosen, and the old fixed
+   `{"$imagepolicy": …}` setter line). Then it polls every URL in
+   `staging_version_url` (newline- or comma-separated, one per service that
+   has a version endpoint) until each reports the tag (or newer).
+   **`staging_version_url` is required**: a Flux commit only says the tag was
+   chosen, one service's version says nothing about another's rollout, and
+   the old fixed
    sleep let staging tests run against the old pods. A repo without a version
    endpoint cannot switch to `qa-passed` until it has one.
 6. **Tickets**: every ticket in `rc_tickets` moves to `On Staging`
@@ -195,8 +203,13 @@ or reports `already_promoted` if the first run already tagged it.
   version is cut.
 - ECR is tagged before git, and the git tag is what makes the next selection
   say `already_promoted`. If the run fails after the ECR tag but before the
-  git tag, the next run computes the same version, finds the ECR tags already
-  on the right digest (no-op) and adds the git tag.
+  git tag, a re-run of the same Release Candidate computes the same version,
+  finds the ECR tags already on the right digest (no-op) and adds the git
+  tag. If instead the next run selects a newer Release Candidate, it computes
+  the same version from git and `ecr-retag.sh` refuses to move the stray ECR
+  tag: the run fails naming it and the `aws ecr batch-delete-image` command
+  that removes it. Until someone deletes it, Flux's staging ImagePolicy may
+  run that stray tag (the older build).
 - If the run fails after the git tag (staging wait timed out, a ticket did
   not move), use **Re-run failed jobs** on that run. The plan sees the tag
   already on the commit (`resume`), skips the window check, re-verifies the
@@ -262,7 +275,11 @@ jobs:
       trigger_id: ${{ inputs.trigger_id }}
       # build_workflow: main-push.yml   # if the build workflow has another file name
       prod_services: '["signstream-api","signstream-websocket"]'   # deploy-prod.yml service names
-      # Promotion to staging (example: sign-stream-api)
+      # Promotion to staging (example: sign-stream-api). Before this goes
+      # live, every listed service's staging ImagePolicy in signapse-core-k8s
+      # must select semver release tags. Today stg signstream-websocket still
+      # follows main-<n>-<sha> (numerical policy), so Flux would never pick
+      # the release tag and the wait would time out (manual step).
       services: '["http","websocket","pip-worker"]'
       ecr_repo_prefix: signstream
       iam_role_arn: arn:aws:iam::827204657141:role/github-actions-connect
@@ -270,7 +287,8 @@ jobs:
         workloads/stg/signstream-api/helmrelease-patch.yaml
         workloads/stg/signstream-websocket/helmrelease-patch.yaml
         workloads/stg/signstream-pip-worker/helmrelease-patch.yaml
-      staging_version_url: https://api.stg.signstream.example/version   # required; JSON body with .version
+      staging_version_url: |   # required; one per service with a version endpoint, JSON body with .version
+        https://api.stg.signstream.example/version
       read_app_id: ${{ vars.PIPELINE_READ_APP_ID }}
     secrets:
       LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}

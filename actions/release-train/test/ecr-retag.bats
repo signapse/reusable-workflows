@@ -27,7 +27,7 @@ case "$*" in
     ;;
   *"ecr describe-images"*)
     # The dest tag exists only after the put, on the source digest.
-    [ -f "$TMP/put-done" ] || exit 254
+    [ -f "$TMP/put-done" ] || { echo "An error occurred (ImageNotFoundException)" >&2; exit 254; }
     echo '{"imageDetails":[{"imageDigest":"sha256:X"}]}'
     ;;
 esac
@@ -48,7 +48,7 @@ case "$*" in
     echo '{"images":[{"imageManifest":"M","imageId":{"imageDigest":"sha256:X"}}]}' ;;
   *"ecr put-image"*) touch "$TMP/put-done"; echo '{}' ;;
   *"ecr describe-images"*)
-    [ -f "$TMP/put-done" ] || exit 254
+    [ -f "$TMP/put-done" ] || { echo "An error occurred (ImageNotFoundException)" >&2; exit 254; }
     echo '{"imageDetails":[{"imageDigest":"sha256:Y"}]}' ;;
 esac
 STUB
@@ -106,4 +106,45 @@ STUB
   run bash "$SCRIPT" signstream/http main-abc123 1.2.33
   [ "$status" -eq 0 ]
   [[ "$output" == *"no-op"* ]]
+}
+
+@test "a describe-images failure other than not-found stops before any put" {
+  cat > "$TMP/stub/aws" <<'STUB'
+#!/usr/bin/env bash
+case "$*" in
+  *"ecr batch-get-image"*)
+    echo '{"images":[{"imageManifest":"M","imageId":{"imageDigest":"sha256:X"}}]}' ;;
+  *"ecr describe-images"*) echo "An error occurred (ThrottlingException)" >&2; exit 254 ;;
+  *"ecr put-image"*) touch "$TMP/put-done"; echo '{}' ;;
+esac
+STUB
+  chmod +x "$TMP/stub/aws"
+  run bash "$SCRIPT" signstream/http main-abc123 1.2.33
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"cannot read signstream/http:1.2.33"* ]]
+  [ ! -f "$TMP/put-done" ]
+}
+
+@test "a tag created between the lookup and the put (immutable repo) is read back, never moved" {
+  cat > "$TMP/stub/aws" <<'STUB'
+#!/usr/bin/env bash
+case "$*" in
+  *"ecr batch-get-image"*)
+    echo '{"images":[{"imageManifest":"M","imageId":{"imageDigest":"sha256:X"}}]}' ;;
+  *"ecr describe-images"*)
+    [ -f "$TMP/raced" ] || { echo "An error occurred (ImageNotFoundException)" >&2; exit 254; }
+    echo "{\"imageDetails\":[{\"imageDigest\":\"$(cat "$TMP/raced")\"}]}" ;;
+  *"ecr put-image"*)
+    echo "$RACE_DIGEST" > "$TMP/raced"
+    echo "An error occurred (ImageTagAlreadyExistsException)" >&2; exit 254 ;;
+esac
+STUB
+  chmod +x "$TMP/stub/aws"
+  RACE_DIGEST=sha256:OTHER run bash "$SCRIPT" signstream/http main-abc123 1.2.33
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"refusing to move"*"sha256:OTHER"* ]]
+  rm "$TMP/raced"
+  RACE_DIGEST=sha256:X run bash "$SCRIPT" signstream/http main-abc123 1.2.33
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"created on sha256:X meanwhile"* ]]
 }

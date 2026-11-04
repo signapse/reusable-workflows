@@ -24,7 +24,9 @@ cat "$f"
 EOS
   cat > "$TMP/stub/curl" <<'EOS'
 #!/usr/bin/env bash
-cat "$TMP/version.json"
+# The last argument is the URL; $TMP/version-<host> overrides version.json.
+u="${*: -1}"; h="${u#https://}"; h="${h%%/*}"
+if [ -f "$TMP/version-$h" ]; then cat "$TMP/version-$h"; else cat "$TMP/version.json"; fi
 EOS
   cat > "$TMP/stub/sleep" <<'EOS'
 #!/usr/bin/env bash
@@ -130,4 +132,17 @@ EOF
   [ "$status" -ne 0 ]
   TAG=main-12-abc run "$SCRIPT"
   [ "$status" -ne 0 ]
+}
+
+@test "several version URLs: waits until every service reports the tag" {
+  file 0 1.2.45
+  export VERSION_URL="https://api.example/version, https://ws.example/version"
+  echo '{"version":"1.2.44"}' > "$TMP/version-ws.example"
+  run "$SCRIPT"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"never reported 1.2.45"*"https://ws.example/version"* ]]
+  [[ "$output" != *"never reported 1.2.45"*"https://api.example/version"* ]]
+  echo '{"version":"1.2.45"}' > "$TMP/version-ws.example"
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
 }

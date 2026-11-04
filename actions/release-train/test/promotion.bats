@@ -8,6 +8,7 @@
 #   linear.json          ticket id -> [label names]
 #   calls                every aws/gh write, in order
 load 'helpers/load'
+bats_require_minimum_version 1.5.0
 
 S="$BATS_TEST_DIRNAME/../scripts"
 
@@ -115,7 +116,7 @@ esac
 EOS
   chmod +x "$TMP/stub/aws" "$TMP/stub/gh" "$TMP/stub/curl"
 
-  cd "$TMP/repo"
+  cd "$TMP/repo" || return 1
   git init -q -b main
   git config user.email t@t.t
   git config user.name t
@@ -235,7 +236,7 @@ digest() { cat "$TMP/ecr/$1/$2"; }
   echo "$output" | jq -e '[.images[] | .source_digest == .tag_digest] | all' > /dev/null
   # No rebuild: only manifest re-puts, carrying the stored media type.
   grep -q "put-image signstream/http 1.2.45 application/vnd.oci.image.index.v1+json" "$TMP/calls"
-  ! grep -qi "build" "$TMP/calls"
+  run ! grep -qi "build" "$TMP/calls"
 }
 
 @test "AC1: the git commit gets the same tag, after the images" {

@@ -136,9 +136,10 @@ on:
         default: ''
       staging_version_url:
         description: >-
-          qa-passed, required for a Promotion: URL whose JSON body names the
-          version staging runs. The Promotion waits until it reports the
-          release tag (or newer); there is no fixed-sleep fallback.
+          qa-passed, required for a Promotion: newline- or comma-separated
+          URLs, one per promoted service that has one, whose JSON body names
+          the version it runs. The Promotion waits until every URL reports
+          the release tag (or newer); there is no fixed-sleep fallback.
         required: false
         type: string
         default: ''
