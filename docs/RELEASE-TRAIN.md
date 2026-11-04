@@ -433,8 +433,10 @@ already carries a release tag), or else the newest release tag on the
 branch, and deploy it when, read fresh from Linear and signapse-core-k8s:
 
 - prod does not run it yet on every service,
-- rollback.yml never replaced it (no `Rolled-back-from: <tag>` trailer on the
-  service's prod file),
+- prod never ran it and moved off it: no `Rolled-back-from: <tag>` trailer
+  (rollback.yml) and no `deploy(prod): <svc> → <tag>` commit followed by
+  another tag (a manual deploy-prod.yml rollback) in the service's prod file
+  history (every page of it),
 - it has at least one ticket, and every ticket since prod's tag has its
   staging pass on record (above),
 - the deploy window is open (or a ticket carries `hotfix`).
@@ -453,7 +455,15 @@ from deploying an earlier tag that already passed staging.
 - The AC5 flag guard accepts a Feature flag's non-environment condition only
   when every property is the QA Cohort, `qa_cohort_id` (PostHog cohort id,
   created by SIG-2749). Another cohort, or no `qa_cohort_id` with Feature
-  tickets to check, fails the guard.
+  tickets to check, fails the guard. Every page of PostHog's flag search is
+  read.
+- If the guard or the "prod still runs the tag" check fails after a passed
+  smoke, tickets do not move and a critical Slack alert (`<!channel>`) goes
+  out. Nothing is rolled back: a widened flag is a PostHog change that an
+  image rollback does not undo.
+- If deploy-prod fails for one service after another already moved, the
+  Slack alert is critical and says prod may run a mix of tags; there is no
+  automatic rollback without a smoke verdict.
 
 ### Idempotency and concurrency
 

@@ -70,9 +70,22 @@ while IFS= read -r id; do
   [ -n "$id" ] || continue
   [[ "$id" =~ -([0-9]+)$ ]] || { err "$id: not a ticket id"; continue; }
   prefix="sig-${BASH_REMATCH[1]}-"
-  if ! resp=$(curl -sS --fail --connect-timeout 5 --max-time 30 \
-    -H "Authorization: Bearer ${POSTHOG_API_KEY}" \
-    "${POSTHOG_HOST%/}/api/projects/${POSTHOG_PROJECT_ID}/feature_flags/?search=${prefix}&limit=100"); then
+  # Every page of the search: a leaking flag on page 2 must not pass.
+  url="${POSTHOG_HOST%/}/api/projects/${POSTHOG_PROJECT_ID}/feature_flags/?search=${prefix}&limit=100"
+  resp='{"results":[]}'
+  pages=0
+  while [ -n "$url" ]; do
+    pages=$((pages + 1))
+    if [ "$pages" -gt 20 ] || ! page=$(curl -sS --fail --connect-timeout 5 --max-time 30 \
+      -H "Authorization: Bearer ${POSTHOG_API_KEY}" "$url") \
+      || ! jq -e '(.results | type) == "array"' <<< "$page" > /dev/null 2>&1; then
+      resp=""
+      break
+    fi
+    resp=$(jq -c --argjson p "$page" '.results += $p.results' <<< "$resp")
+    url=$(jq -r '.next // empty' <<< "$page")
+  done
+  if [ -z "$resp" ]; then
     err "$id: PostHog flag lookup failed"
     continue
   fi

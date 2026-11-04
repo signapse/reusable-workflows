@@ -25,7 +25,10 @@ setup() {
 set -euo pipefail
 [ "$1" = api ] || { echo "gh stub: unhandled $*" >&2; exit 1; }
 shift
-while [ "$1" = -H ]; do shift 2; done
+while [ "$1" = -H ] || [ "$1" = --paginate ]; do
+  [ "$1" = --paginate ] && { echo paginate >> "$TMP/gh-flags"; shift; continue; }
+  shift 2
+done
 url="$1"
 case "$url" in
   repos/*/contents/*)
@@ -36,7 +39,9 @@ case "$url" in
   repos/*/commits\?*)
     p=$(sed -E 's/.*[?&]path=([^&]*).*/\1/' <<< "$url")
     f="$TMP/hist/$(tr / _ <<< "$p")"
-    if [ -f "$f" ]; then cat "$f"; else echo '[]'; fi ;;
+    if [ -f "$f" ]; then cat "$f"; else echo '[]'; fi
+    # --paginate prints one array per page: $TMP/hist/<path>.2 is page 2.
+    [ ! -f "$f.2" ] || cat "$f.2" ;;
   *) echo "gh stub: unhandled api $url" >&2; exit 1 ;;
 esac
 EOS
@@ -154,6 +159,26 @@ field() { tail -n1 <<< "$output" | jq -r "$@"; }
   [ "$status" -eq 0 ]
   [ "$(field .decision)" = refused ]
   [[ "$(field .reason)" == *"rolled back"* ]]
+}
+
+@test "a tag replaced by hand with deploy-prod.yml (no trailer) is refused too" {
+  k8s_history workloads/prod/svc-a/helmrelease-patch.yaml \
+    $'deploy(prod): svc-a → 1.0.0\n\nPrevious: 1.1.0' \
+    $'deploy(prod): svc-a → 1.1.0\n\nPrevious: 1.0.0'
+  export RELEASE_TAG=1.1.0
+  plan
+  [ "$status" -eq 0 ]
+  [ "$(field .decision)" = refused ]
+}
+
+@test "a rollback trailer past the first page of the file's history still counts" {
+  k8s_history workloads/prod/svc-a/helmrelease-patch.yaml $'chore: unrelated'
+  printf '%s' "$(jq -nc '[{commit: {message: "rollback(prod): svc-a → 1.0.0\n\nRolled-back-from: 1.1.0"}}]')" \
+    > "$TMP/hist/workloads_prod_svc-a_helmrelease-patch.yaml.2"
+  export RELEASE_TAG=1.1.0
+  plan
+  [ "$(field .decision)" = refused ]
+  grep -q paginate "$TMP/gh-flags"
 }
 
 @test "shared services read workloads/prod-common, as deploy-prod.yml does" {

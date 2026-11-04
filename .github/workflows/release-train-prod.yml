@@ -556,7 +556,10 @@ jobs:
           source "$GITHUB_WORKSPACE/_rw/actions/release-train/lib/slack.sh"
           text=":rotating_light: Dark Deployment of \`${GITHUB_REPOSITORY}\` \`${TAG}\` to prod failed. <${RUN_URL}|Run>"
           if [ -n "${RUNS:-}" ] && [ "$RUNS" != '[]' ]; then
-            text="${text}; deploy-prod: $(jq -r 'map("<\(.run_url)|\(.service)>: \(.conclusion | if . == "" then "not finished" else . end)") | join(", ")' <<< "$RUNS"). Prod may run a mix of tags."
+            # Some services may already run the new tag: critical, a human
+            # decides whether to finish the Deployment or roll it back. No
+            # automatic rollback here: there is no smoke verdict yet.
+            text=":rotating_light: <!channel> ${text#:rotating_light: }; deploy-prod: $(jq -r 'map("<\(.run_url)|\(.service)>: \(.conclusion | if . == "" then "not finished" else . end)") | join(", ")' <<< "$RUNS"). Prod may run a mix of tags: finish the Deployment (re-run failed jobs) or roll the moved services back by hand."
           fi
           resp=$(jq -nc --arg c "$SLACK_CHANNEL" --arg t "$text" '{channel: $c, text: $t}' | slack_post) || resp='{"ok":false}'
           [ "$(jq -r .ok <<< "$resp")" = true ] || echo "::error::Slack alert failed: $resp"
@@ -673,6 +676,26 @@ jobs:
           set -euo pipefail
           "$GITHUB_WORKSPACE/_rw/actions/release-train/scripts/promotion-tickets.sh" "$STATE" "$TICKETS"
           echo "Moved to **${STATE}**: ${TICKETS:-no tickets (untracked commits only)}" >> "$GITHUB_STEP_SUMMARY"
+
+      # The smoke passed but a check after it failed: a Feature flag left the
+      # QA Cohort during the Deployment, or prod no longer runs the tag.
+      # Users may see an unreviewed feature, so Releasers hear about it now.
+      # No rollback: the flag is a PostHog change a rollback does not undo.
+      - name: Alert Slack (checks after a passed smoke)
+        if: failure() && steps.smoke.outputs.passed == 'true'
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL: ${{ inputs.slack_channel || inputs.slack_releases_channel || vars.SLACK_RELEASES_CHANNEL || '#releases' }}
+          TAG: ${{ needs.deploy.outputs.release_tag }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if [ -z "$SLACK_BOT_TOKEN" ]; then echo "::error::No SLACK_BOT_TOKEN: the alert was not posted."; exit 0; fi
+          # shellcheck source=/dev/null
+          source "$GITHUB_WORKSPACE/_rw/actions/release-train/lib/slack.sh"
+          text=":rotating_light: <!channel> \`${GITHUB_REPOSITORY}\` \`${TAG}\` passed the prod smoke, but a check after it failed (a Feature flag is on beyond the QA Cohort, or prod no longer runs the tag). Tickets were not moved. Check PostHog now. <${RUN_URL}|Run>"
+          resp=$(jq -nc --arg c "$SLACK_CHANNEL" --arg t "$text" '{channel: $c, text: $t}' | slack_post) || resp='{"ok":false}'
+          [ "$(jq -r .ok <<< "$resp")" = true ] || echo "::error::Slack alert failed: $resp"
 
       - name: Fail on a smoke failure or an unrecorded release
         if: steps.smoke.outputs.passed != 'true' || needs.release.result != 'success'
