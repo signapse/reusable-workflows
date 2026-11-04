@@ -415,7 +415,8 @@ prod (caller job, needs: [train, staging])
   release   deployment-release.yml@main   AC3: Linear Release (Deployed), Sentry release + production deploy
   smoke     signapse-e2e playwright.yml@main, environment prod, grep @prod-safe   AC4
   verdict   pass: flag guard again, tickets -> On Prod (only from on_prod_from)
-            fail: prod_smoke_passed=false, run red (SIG-2771 rolls back)
+            fail: prod_smoke_passed=false, run red
+  rollback  only on a failed smoke (SIG-2771): see "Automatic rollback" below
 ```
 
 ### Every ticket since prod's tag must have passed staging (both modes)
@@ -526,8 +527,67 @@ rollback.yml.
 `terraform_gate`, `terraform_run_url`, `linear_release_id`,
 `linear_release_url`, `prod_smoke_passed` (`true`/`false` once deployed;
 `false` after a partial Deployment), `partial_deployment`, `moved_services`,
-`smoke_report_url`. The rollback job chains on
-`needs.prod.outputs.prod_smoke_passed == 'false'`.
+`smoke_report_url`, and from the rollback job `rolled_back`,
+`rollback_results`, `incident_url`.
+
+### Automatic rollback (SIG-2771)
+
+The `rollback` job runs when the Deployment reached prod
+(`deployed == 'true'`) and the smoke failed (`prod_smoke_passed == 'false'`),
+or after a partial Deployment (`partial_deployment == 'true'`: a deploy-prod
+run or the final check failed after some services moved). Then only
+`moved_services` are rolled back, and there is no Linear Release to mark.
+A cancelled train run never rolls back. Spec step 6 "Fail" and "Failure
+handling":
+
+```text
+rollback
+  prod-rollback.sh         AC1: signapse-core-k8s rollback.yml per service (Prodzilla, actions: write),
+                           all dispatched, then waited on; restored tag checked against previous_tags
+  release-rolled-back.sh   AC2: Linear Release -> `Rolled back` (canceled-type stage)
+  rollback-incident.sh     AC3/AC5: incident.io incident, Cause = Deployment, link to the run
+  rollback-tickets.sh      AC4/AC5: comment + QA Failed on every ticket, Slack alert to slack_channel
+  End red                  the run fails in every path
+```
+
+- **Run keys.** Service S's rollback key is `<deploy run_key>-S-rollback`
+  (rollback.yml shows it in its run title). When the run dispatched nothing
+  (prod already ran the tag), the deploy key is `<repo>-<run id>-prod`.
+- **Waiting.** Bounded by `rollback_timeout_minutes` (default 30) for all
+  services together. A run still going at the limit is not cancelled.
+- **Cancelled.** A rollback that ends `cancelled` was displaced in the
+  per-service concurrency queue. It is dispatched again with the same key, up
+  to `rollback_max_attempts` (default 3) dispatches in all.
+- **Verdict per service** from the `rollback-result` artifact (`rollback.json`):
+  `success` with the restored tag equal to the tag prod ran before is ok.
+  `no_previous_tag` (rollback.yml exit 3), `needs_human` (exit 4: the tag
+  history is not clean pipeline changes), `failed`, a different restored tag,
+  no artifact, a timeout or a failed dispatch all count as "the rollback
+  failed" (AC5).
+- **Incident.** One per Deployment, idempotency key = the deploy run key.
+  Severity `incident_io_minor_severity_id` (default P3) when every service was
+  restored, else `incident_io_major_severity_id` (default P2). The workspace
+  has P1-P4 and no "Minor"/"Major". The Cause field is set to Deployment
+  (dora-metrics counts it), and the run URL goes in the summary and the
+  `incident_io_link_field_id` link field. `incident_io_mode: test` opens a
+  test incident instead, for trying the path out.
+- **Release.** `linear_release_id` from the release job; if recording the
+  Release failed, the Release is looked up by version in the pipeline.
+- **Slack.** Normal alert when rolled back. When the rollback failed it is
+  critical (`<!channel>`) and names each service and the reason.
+- **AC5: still records what it can.** Every step after the rollback runs
+  whatever the rollback did, and a failure in one does not stop the next.
+- **Re-runs** ("Re-run failed jobs"): a rollback that already succeeded with
+  the key is reused, one still running is waited on, a failed one is
+  dispatched again with the same key (rollback.yml never rolls back twice for
+  one key). The incident is not duplicated (idempotency key), the Release
+  move and ticket comments check first. The Slack alert is posted again,
+  marked with the attempt number.
+- **On Prod guard.** A re-run can re-run the smoke against the rolled-back
+  prod. Before moving tickets to On Prod, the verdict job now checks that prod
+  still runs the release tag on every service.
+- prod-plan.sh already refuses a tag rollback.yml replaced, so the train
+  never redeploys it by itself.
 
 ### Sentry production deploy marker
 
@@ -665,6 +725,7 @@ jobs:
       SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
       SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
       POSTHOG_READ_API_KEY: ${{ secrets.POSTHOG_READ_API_KEY }}
+      INCIDENT_IO_API_KEY: ${{ secrets.INCIDENT_IO_API_KEY }}
       E2E_PROD_SIGNSTUDIO_ADMIN_API_TOKEN: ${{ secrets.E2E_PROD_SIGNSTUDIO_ADMIN_API_TOKEN }}
       E2E_PROD_SIGNSTUDIO_USER_EMAIL: ${{ secrets.E2E_PROD_SIGNSTUDIO_USER_EMAIL }}
       E2E_PROD_SIGNSTUDIO_USER_PASSWORD: ${{ secrets.E2E_PROD_SIGNSTUDIO_USER_PASSWORD }}
