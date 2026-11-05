@@ -472,13 +472,17 @@ from deploying an earlier tag that already passed staging.
   out. Nothing is rolled back: a widened flag is a PostHog change that an
   image rollback does not undo.
 - If a deploy-prod run or the final "prod runs the tag" check fails or times
-  out after some services already run the new tag (re-read from
-  signapse-core-k8s; if that read fails, the deploy-prod runs that
-  succeeded), that is a failed Deployment: `partial_deployment` is `true`,
-  `moved_services` lists those services and `prod_smoke_passed` is `false`,
-  so SIG-2771's rollback restores exactly them. The Slack alert is critical
-  and names them. If no service moved, prod is unchanged and nothing is
-  rolled back.
+  out, `scripts/prod-partial.sh` waits (up to 10 minutes) for any deploy-prod
+  run still going (it pushes the tag before its rollout check), then re-reads
+  the tags prod runs:
+  - some dispatched services run the new tag: a failed Deployment.
+    `partial_deployment` is `true`, `moved_services` lists them and
+    `prod_smoke_passed` is `false`, so SIG-2771's rollback restores exactly
+    them. Critical Slack alert naming them.
+  - none does: prod is unchanged, nothing to roll back.
+  - unknown (tags unreadable, or a run still going or never found while its
+    service is not on the tag yet): never guessed. Critical Slack alert, no
+    automatic rollback, `prod_smoke_passed` stays empty; a human checks.
 
 ### Idempotency and concurrency
 
