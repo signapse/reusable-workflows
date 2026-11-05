@@ -171,10 +171,19 @@ linear_issue() {
   while :; do
     resp=$(linear_query "$q" "$(jq -nc --arg id "$id" --arg a "$after" \
       '{id: $id, after: (if $a == "" then null else $a end)}')") || die "Linear query for $id failed"
-    printf '%s' "$resp" | jq -e 'type == "object" and ((.errors // []) | length == 0)' > /dev/null 2>&1 \
-      || die "Linear returned errors or an unparsable reply for $id: $resp"
+    printf '%s' "$resp" | jq -e 'type == "object"' > /dev/null 2>&1 \
+      || die "Linear returned an unparsable reply for $id: $resp"
     issue=$(printf '%s' "$resp" | jq -c '.data.issue // empty')
-    [ -n "$issue" ] || die "Linear has no issue $id"
+    if [ -z "$issue" ] && [ -z "$after" ]; then
+      # issue: null is how Linear answers an unknown identifier (a typo, a
+      # deleted ticket, a branch like alex/sig-2024-cleanup). It can't be in
+      # QA Failed, so it must not stop the other tickets' reverts.
+      echo null
+      return 0
+    fi
+    printf '%s' "$resp" | jq -e '(.errors // []) | length == 0' > /dev/null \
+      || die "Linear returned errors for $id: $(printf '%s' "$resp" | jq -c .errors)"
+    [ -n "$issue" ] || die "Linear lost issue $id while paging its history"
     printf '%s' "$issue" | jq -e '(.identifier | type) == "string" and (.state.name | type) == "string"
         and (.history.nodes | type) == "array"' > /dev/null \
       || die "Linear reply for $id lacks identifier, state or history: $issue"
@@ -240,6 +249,10 @@ finish() { results=$(jq -nc --argjson a "$results" --argjson r "$r" '$a + [$r]')
 while IFS= read -r id <&3; do
   [ -z "$id" ] && continue
   t=$(linear_issue "$id")
+  if [ "$t" = null ]; then
+    log "$id: not found in Linear; nothing to do"
+    continue
+  fi
   state=$(printf '%s' "$t" | jq -r .state)
   if [ "$state" != "$QA_FAILED_STATE" ]; then
     log "$id: $state, not $QA_FAILED_STATE; nothing to do"
