@@ -448,6 +448,17 @@ EOF
   [ "$(created)" -eq 0 ]
 }
 
+@test "a ref Linear does not know is skipped; later tickets still get their revert" {
+  change f "one-a" "feat(SIG-0): typo'd ticket"
+  change g "x" "feat(SIG-1): A"
+  ticket SIG-1 "QA Failed" 25
+  run run_revert
+  [ "$status" -eq 0 ]
+  grep -q "SIG-0: not found in Linear" "$TMP/stderr"
+  echo "$output" | jq -e '[.tickets[].id] == ["SIG-1"] and .tickets[0].action == "opened"' > /dev/null
+  [ "$(created)" -eq 1 ]
+}
+
 @test "PR creation failure fails the run and is reported" {
   change f "one-a" "feat(SIG-1): A"
   ticket SIG-1 "QA Failed" 25
