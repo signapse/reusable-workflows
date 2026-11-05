@@ -274,6 +274,10 @@ jobs:
 
   dev-smoke:
     needs: wait-for-dev
+    # The called suite needs only contents: read (signapse-e2e#21); don't
+    # pass it the caller's pull-requests: write.
+    permissions:
+      contents: read
     # The ref is literal: GitHub does not evaluate expressions in `uses:`, so
     # it cannot be a caller input. Pin it here (a tag or sha, via a PR to this
     # repo) once signapse-e2e cuts one; callers pin this file's own ref.
