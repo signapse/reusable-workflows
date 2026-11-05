@@ -66,8 +66,19 @@ EOS
 teardown() { rm -rf "$TMP"; }
 
 prod() { printf 'spec:\n  values:\n    image:\n      tag: "%s"\n' "$1" > "$TMP/k8s/workloads/prod/svc-a/helmrelease-patch.yaml"; }
+# merge <subject> [body]: a real change (a file per subject); a revert body
+# ("This reverts commit <sha>.") undoes that commit for real, since only a
+# commit that undoes its target counts as a revert (lib/revert.sh).
 merge() {
-  git commit -q --allow-empty -m "$1" ${2:+-m "$2"}
+  local t
+  t=$(sed -nE 's/^This reverts commit ([0-9a-f]+)\.?$/\1/p' <<< "${2:-}")
+  if [ -n "$t" ]; then
+    git revert --no-commit "$t" > /dev/null
+  else
+    echo "$1" >> "f-$(printf '%s' "$1" | cksum | cut -d' ' -f1)"
+    git add -A
+  fi
+  git commit -q -m "$1" ${2:+-m "$2"}
   jq --arg s "$(git rev-parse HEAD)" --argjson n "$(( $(jq length "$TMP/builds.json") + 11 ))" '.[$s] = $n' \
     "$TMP/builds.json" > "$TMP/b" && mv "$TMP/b" "$TMP/builds.json"
 }
