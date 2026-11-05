@@ -471,9 +471,14 @@ from deploying an earlier tag that already passed staging.
   smoke, tickets do not move and a critical Slack alert (`<!channel>`) goes
   out. Nothing is rolled back: a widened flag is a PostHog change that an
   image rollback does not undo.
-- If deploy-prod fails for one service after another already moved, the
-  Slack alert is critical and says prod may run a mix of tags; there is no
-  automatic rollback without a smoke verdict.
+- If a deploy-prod run or the final "prod runs the tag" check fails or times
+  out after some services already run the new tag (re-read from
+  signapse-core-k8s; if that read fails, the deploy-prod runs that
+  succeeded), that is a failed Deployment: `partial_deployment` is `true`,
+  `moved_services` lists those services and `prod_smoke_passed` is `false`,
+  so SIG-2771's rollback restores exactly them. The Slack alert is critical
+  and names them. If no service moved, prod is unchanged and nothing is
+  rolled back.
 
 ### Idempotency and concurrency
 
@@ -505,7 +510,8 @@ rollback.yml.
 `previous_tags` (`{service: tag}`), `previous_tag` (when all services agree),
 `run_key` (service S was dispatched with `<run_key>-<S>`), `deploy_runs`,
 `terraform_gate`, `terraform_run_url`, `linear_release_id`,
-`linear_release_url`, `prod_smoke_passed` (`true`/`false` once deployed),
+`linear_release_url`, `prod_smoke_passed` (`true`/`false` once deployed;
+`false` after a partial Deployment), `partial_deployment`, `moved_services`,
 `smoke_report_url`. The rollback job chains on
 `needs.prod.outputs.prod_smoke_passed == 'false'`.
 
