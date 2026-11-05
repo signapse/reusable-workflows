@@ -1102,6 +1102,8 @@ jobs:
       # A partial Deployment never reached the release job: no Release to mark.
       - name: Mark the Linear Release ${{ inputs.rolled_back_stage }} (AC2)
         id: release
+        # Bounded so the ticket and Slack step after it always runs.
+        timeout-minutes: 5
         if: ${{ !cancelled() && needs.deploy.outputs.deployed == 'true' }}
         env:
           LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
@@ -1121,6 +1123,8 @@ jobs:
 
       - name: Open the incident.io incident (AC3, AC5)
         id: incident
+        # Bounded so the ticket and Slack step after it always runs.
+        timeout-minutes: 5
         if: ${{ !cancelled() }}
         env:
           INCIDENT_IO_API_KEY: ${{ secrets.INCIDENT_IO_API_KEY }}
