@@ -970,9 +970,12 @@ jobs:
   rollback:
     name: Roll back prod
     needs: [deploy, release, smoke, verdict]
+    # Also after a partial Deployment (SIG-2769): a deploy-prod run or the
+    # final check failed after some services moved. Then only those roll back.
     if: >-
-      !cancelled() && needs.deploy.outputs.deployed == 'true' &&
-      needs.verdict.outputs.prod_smoke_passed == 'false'
+      !cancelled() && (
+        (needs.deploy.outputs.deployed == 'true' && needs.verdict.outputs.prod_smoke_passed == 'false') ||
+        needs.deploy.outputs.partial_deployment == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 90
     permissions:
@@ -992,7 +995,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: signapse/reusable-workflows
-          ref: main
+          ref: ${{ job.workflow_sha }} # scripts from the same commit as this workflow, not mutable main
           path: _rw
           persist-credentials: false
 
@@ -1028,7 +1031,7 @@ jobs:
         if: ${{ !cancelled() }}
         env:
           GH_TOKEN: ${{ steps.prodzilla.outputs.token }}
-          SERVICES: ${{ needs.deploy.outputs.services }}
+          SERVICES: ${{ needs.deploy.outputs.partial_deployment == 'true' && needs.deploy.outputs.moved_services || needs.deploy.outputs.services }}
           PREVIOUS_TAGS: ${{ needs.deploy.outputs.previous_tags }}
           RELEASE_TAG: ${{ needs.deploy.outputs.release_tag }}
           DEPLOY_RUN_KEY: ${{ steps.cfg.outputs.run_key }}
@@ -1066,9 +1069,10 @@ jobs:
             exit 1
           fi
 
+      # A partial Deployment never reached the release job: no Release to mark.
       - name: Mark the Linear Release ${{ inputs.rolled_back_stage }} (AC2)
         id: release
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && needs.deploy.outputs.deployed == 'true' }}
         env:
           LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
           RELEASE_ID: ${{ needs.release.outputs.linear_release_id }}
@@ -1103,6 +1107,7 @@ jobs:
           REPOSITORY: ${{ github.repository }}
           RELEASE_TAG: ${{ needs.deploy.outputs.release_tag }}
           TICKETS: ${{ needs.deploy.outputs.tickets }}
+          CAUSE: ${{ needs.deploy.outputs.partial_deployment == 'true' && 'Prod deploy failed part-way' || 'Prod smoke failed' }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           REPORT_URL: ${{ needs.smoke.outputs.report_url }}
           RELEASE_URL: ${{ steps.release.outputs.url || needs.release.outputs.linear_release_url }}
@@ -1133,6 +1138,7 @@ jobs:
           NOTES: ${{ format('{0} {1}', steps.release.outputs.note, steps.incident.outputs.note) }}
           REPOSITORY: ${{ github.repository }}
           RELEASE_TAG: ${{ needs.deploy.outputs.release_tag }}
+          CAUSE: ${{ needs.deploy.outputs.partial_deployment == 'true' && 'Prod deploy failed part-way' || 'Prod smoke failed' }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
           REPORT_URL: ${{ needs.smoke.outputs.report_url }}
@@ -1158,11 +1164,12 @@ jobs:
           RELEASE: ${{ steps.release.outcome }}
           INCIDENT: ${{ steps.incident.outcome }}
           TICKETS: ${{ steps.tickets.outcome }}
+          WHAT: ${{ needs.deploy.outputs.partial_deployment == 'true' && 'The prod Deployment failed part-way' || 'Prod @prod-safe smoke failed' }}
         run: |
           if [ "$ROLLBACK_OK" = true ]; then
-            echo "::error::Prod @prod-safe smoke failed; prod was rolled back to the previous tags. Tickets are in QA Failed."
+            echo "::error::${WHAT}; prod was rolled back to the previous tags. Tickets are in QA Failed."
           else
-            echo "::error::Prod @prod-safe smoke failed and the automatic rollback did NOT restore every service. Roll back by hand (signapse-core-k8s docs/OPERATIONS.md)."
+            echo "::error::${WHAT} and the automatic rollback did NOT restore every service. Roll back by hand (signapse-core-k8s docs/OPERATIONS.md)."
           fi
           echo "Linear Release step: ${RELEASE:-not run}; incident step: ${INCIDENT:-not run}; tickets and Slack step: ${TICKETS:-not run}"
           exit 1

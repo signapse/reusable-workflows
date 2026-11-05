@@ -31,6 +31,8 @@
 #   no_previous_tag  exit 3 in rollback.yml: nothing to roll back to
 #   needs_human      exit 4: the history isn't clean pipeline changes
 #   failed           anything else (ECR, Flux suspended, stg automation, ...)
+#   missing_workflow ROLLBACK_WORKFLOW does not exist on K8S_REPO (404): nothing
+#                    is dispatched, every service needs a human
 # Every non-ok service sets needs_human=true in the result (AC5: Major).
 #
 # Env:
@@ -165,7 +167,23 @@ evaluate() {
 }
 
 # Seed state, then adopt or dispatch.
-listed=$(list_runs) || die "could not list ${ROLLBACK_WORKFLOW} runs on ${K8S_REPO}: $(cat "$work/err")"
+if ! listed=$(list_runs); then
+  # rollback.yml (SIG-2753) is not on K8S_REPO: nothing can be rolled back.
+  # Say so plainly (every service not ok, needs a human) instead of a generic
+  # script failure, so the critical alert names the missing workflow.
+  if grep -qiE 'HTTP 404|Not Found' "$work/err"; then
+    why="${ROLLBACK_WORKFLOW} does not exist on ${K8S_REPO} (SIG-2753, signapse-core-k8s#503 not merged?); nothing was rolled back, roll back by hand (signapse-core-k8s docs/OPERATIONS.md)"
+    log "$why"
+    mapfile -t svcs <<< "$services"
+    jq -nc --arg why "$why" --argjson p "$PREVIOUS_TAGS" --arg k "$DEPLOY_RUN_KEY" '
+      [$ARGS.positional[] | {service: ., run_key: "\($k)-\(.)-rollback", run_id: "", run_url: "", conclusion: "",
+        attempts: 0, result: "missing_workflow", expected: ($p[.] // ""), restored: "", replaced: "",
+        restored_commit: "", restored_commit_date: "", ok: false, reason: $why}]
+      | {ok: false, needs_human: true, reason: $why, results: .}' --args "${svcs[@]}"
+    exit 0
+  fi
+  die "could not list ${ROLLBACK_WORKFLOW} runs on ${K8S_REPO}: $(cat "$work/err")"
+fi
 while IFS= read -r svc; do
   [ -n "$svc" ] || continue
   key="${DEPLOY_RUN_KEY}-${svc}-rollback"

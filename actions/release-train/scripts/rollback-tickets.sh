@@ -24,6 +24,7 @@
 #   LINEAR_TEAM_KEY     team of the QA Failed column (default SIG)
 #   ROLLBACK_OK         true | false
 #   ROLLBACK_RESULTS    prod-rollback.sh's results array
+#   CAUSE               what failed, default "Prod smoke failed"
 #   INCIDENT_URL        the incident, when one was opened or found
 #   NOTES               extra lines for the alert (failed Release or incident steps)
 #   LINEAR_API_KEY      required when there are tickets
@@ -129,7 +130,7 @@ else
   if [ "$critical" = true ]; then
     head=":rotating_light: <!channel> *Prod rollback FAILED for ${WHAT}*${attempt}"
   else
-    head=":rewind: *Prod smoke failed for ${WHAT}; rolled back*${attempt}"
+    head=":rewind: *${CAUSE:-Prod smoke failed} for ${WHAT}; rolled back*${attempt}"
   fi
   linear_note=""
   [ "$(jq length <<< "$errors")" -eq 0 ] || linear_note=$'\n'":warning: Some Linear updates failed; see the run."

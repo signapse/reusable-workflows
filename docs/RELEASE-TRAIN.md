@@ -565,6 +565,11 @@ rollback
 - **Run keys.** Service S's rollback key is `<deploy run_key>-S-rollback`
   (rollback.yml shows it in its run title). When the run dispatched nothing
   (prod already ran the tag), the deploy key is `<repo>-<run id>-prod`.
+- **rollback.yml missing.** If signapse-core-k8s has no `rollback.yml`
+  (SIG-2753, signapse-core-k8s#503 not merged), listing its runs returns 404:
+  nothing is dispatched, every service is reported `missing_workflow` with a
+  reason naming the workflow, the incident is Major and the Slack alert is
+  critical (`<!channel>`). The run ends red.
 - **Waiting.** Bounded by `rollback_timeout_minutes` (default 30) for all
   services together. A run still going at the limit is not cancelled.
 - **Cancelled.** A rollback that ends `cancelled` was displaced in the
