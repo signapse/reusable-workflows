@@ -34,9 +34,10 @@ later tickets (SIG-2764 onwards); for now the train selects and reports.
    and are listed as untracked.
 6. **Reverts** (ADR 0001's 24 h revert, SIG-2766), recognised by git's
    `This reverts commit <sha>` line (`lib/revert.sh`). The line alone is not
-   enough: the commit must actually undo the target (its tree equals its
-   parent with the target reverted, on every path the target changed).
-   Otherwise it is a normal commit and the target's tickets are checked.
+   enough: the commit must undo the commits it names and do nothing else
+   (its whole tree equals its parent with each named commit reverted, newest
+   first; a squashed revert PR naming several commits works). Otherwise it is
+   a normal commit and the tickets it names, and its own, are checked.
    - A commit reverted later in the walk does not block, and its tickets are
      not in the candidate. It is listed under **Reverted**. Builds between it
      and its revert are not selectable: they still contain its code.
