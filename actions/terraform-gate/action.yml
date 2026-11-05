@@ -6,7 +6,9 @@ description: >-
   verdict, and fails the job (after a Slack alert) when the plan is blocked,
   the run failed, or a ticket being promoted has a merged Terraform PR that is
   not applied in that environment. no_changes and applied safe plans pass.
-  Run it after checking out the product repo and before tagging or deploying.
+  terraform-deploy.yml refuses the run unless the calling repo is listed for
+  that product. Run it after checking out the product repo and before tagging
+  or deploying.
   See docs/RELEASE-TRAIN.md "Terraform gate".
 
 inputs:
@@ -151,6 +153,9 @@ runs:
         TF_REF: ${{ inputs.terraform_ref }}
         TF_REGION: ${{ inputs.region }}
         TIMEOUT_MINUTES: ${{ inputs.timeout_minutes }}
+        # Not an input: terraform-deploy.yml only applies PRODUCT for repos
+        # listed for it, so the product is bound to the repo being promoted.
+        SOURCE_REPO: ${{ github.repository }}
       run: |
         set -euo pipefail
         S="$GITHUB_ACTION_PATH/../release-train/scripts"

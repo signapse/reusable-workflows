@@ -184,19 +184,19 @@ Terraform must pass before every Promotion (ADR 0002). The composite action
    (`pipeline-config.sh product --required`: a missing file or key fails the
    gate; without `--required` the script prints nothing, which SIG-2760 uses
    for optional keys such as `sentry_project`); it names the directory under
-   `terragrunt/products/` in signapse-core-terraform. Nothing on this side
-   binds a repo to its product: a repo whose file names another product
-   would plan and apply that product's stack (creates and updates only).
-   Binding repo to product belongs in signapse-core-terraform's dispatch
-   entry point (an allow-list per caller repo); until it exists, review
-   changes to `.signapse/pipeline.yml` like workflow changes.
+   `terragrunt/products/` in signapse-core-terraform. The product is bound
+   to the repo there: the gate sends `source_repo` (always
+   `github.repository`, not an input) and `terraform-deploy.yml` refuses the
+   run unless `.github/product-repos.txt` in signapse-core-terraform lists
+   that repo for the product (signapse-core-terraform#508). A repo whose
+   `pipeline.yml` names another product gets a `failed` verdict, never a plan.
 2. **Token.** Mint a Prodzilla installation token narrowed to
    signapse-core-terraform with `actions: write` (dispatch, and read runs,
    logs and the artifact) and `pull-requests: read` (step 4). The train never
    holds the Terraform AWS role (ADR 0005).
 3. **Dispatch and wait** (`terraform-gate.sh`). Dispatch
    `terraform-deploy.yml` on `main` with `product`, `environment`,
-   `region: eu`, `action: plan`, `apply: true` and a unique `run_key`
+   `region: eu`, `action: plan`, `apply: true`, `source_repo` and a unique `run_key`
    (`<repo>-<run_id>-<attempt>-<env>-<n>`). Find the run whose title carries
    `[run_key]`, wait for it (`terraform_timeout_minutes`, default 45, at most
    50: wall clock including API calls, so the hour-long Prodzilla token
@@ -465,7 +465,9 @@ Terraform gate re-dispatches (see [Terraform gate](#terraform-gate)).
 - No ECR semver tag above the repo's highest git release tag. Flux picks the
   highest; the version is computed from git.
 - `.signapse/pipeline.yml` declares `product:` (a `terragrunt/products/`
-  directory with a `config/stg.yml` in signapse-core-terraform), and the
+  directory with a `config/stg.yml` in signapse-core-terraform), the repo is
+  listed for that product in signapse-core-terraform's
+  `.github/product-repos.txt`, and the
   Prodzilla app is installed on signapse-core-terraform with
   `PRODZILLA_APP_ID`/`PRODZILLA_APP_PRIVATE_KEY` visible to the repo.
 - The read-only pipeline app (ADR 0005) is installed on signapse-core-k8s,
