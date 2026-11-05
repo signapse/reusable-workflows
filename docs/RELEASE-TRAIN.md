@@ -33,7 +33,10 @@ later tickets (SIG-2764 onwards); for now the train selects and reports.
 5. Commits with no ticket (Dependabot, chores) never block. They ride along
    and are listed as untracked.
 6. **Reverts** (ADR 0001's 24 h revert, SIG-2766), recognised by git's
-   `This reverts commit <sha>` line (`lib/revert.sh`):
+   `This reverts commit <sha>` line (`lib/revert.sh`). The line alone is not
+   enough: the commit must actually undo the target (its tree equals its
+   parent with the target reverted, on every path the target changed).
+   Otherwise it is a normal commit and the target's tickets are checked.
    - A commit reverted later in the walk does not block, and its tickets are
      not in the candidate. It is listed under **Reverted**. Builds between it
      and its revert are not selectable: they still contain its code.
