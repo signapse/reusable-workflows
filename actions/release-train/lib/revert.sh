@@ -70,12 +70,30 @@ _verified_edges() {
 # it), so <by> only counts as a revert if its whole tree equals <by>^1 with
 # every named target reverted in turn, newest first (3-way merges with base
 # <target>, as git revert does). Anything else in the commit (extra code, a
-# conflict resolution, an empty "revert") fails, so its tickets are checked.
+# conflict resolution) or nothing at all (an empty "revert") fails, so its
+# tickets are checked.
 _undoes() {
-  local by="$1" t tree cur
+  local by="$1" t o tree cur placed ordered=() next=()
   shift
   cur=$(git rev-parse -q --verify "${by}^1" 2> /dev/null) || return 1
+  # An empty commit undoes nothing, whatever it names (the target may have
+  # been undone already by another commit): a normal commit.
+  [ "$(git rev-parse "${cur}^{tree}")" != "$(git rev-parse "${by}^{tree}")" ] || return 1
+  # Newest first by ancestry, not timestamps (which can tie or be skewed):
+  # each target goes before the first one that is its ancestor.
   for t in $(git rev-list --no-walk=sorted "$@" 2> /dev/null); do
+    placed=0 next=()
+    for o in "${ordered[@]}"; do
+      if [ "$placed" = 0 ] && git merge-base --is-ancestor "$o" "$t"; then
+        next+=("$t")
+        placed=1
+      fi
+      next+=("$o")
+    done
+    [ "$placed" = 1 ] || next+=("$t")
+    ordered=("${next[@]}")
+  done
+  for t in "${ordered[@]}"; do
     git rev-parse -q --verify "${t}^1" > /dev/null 2>&1 || return 1
     tree=$(git merge-tree --write-tree --merge-base="$t" "$cur" "${t}^1" 2> /dev/null) || return 1
     cur=$(GIT_AUTHOR_NAME=revert-check GIT_AUTHOR_EMAIL=revert-check@invalid \
