@@ -9,7 +9,8 @@
 # Exposes:
 #   revert_edges <base> <head>
 #     JSON [{by, target}] for every commit in <base>..<head> (all parents)
-#     naming a target that resolves to a commit. Full shas.
+#     naming a target that resolves to a commit and actually undoing it
+#     (_undoes). Full shas.
 #   revert_units <base> <head>
 #     JSON {"<first-parent sha>": {kind, reverted_by: [...]}} for the
 #     first-parent commits in <base>..<head> that are reverted or are a
@@ -27,6 +28,7 @@ revert_edges() {
   while IFS=" " read -r by t; do
     [ -n "$by" ] && [ "${#t}" -ge 7 ] || continue
     full=$(git rev-parse -q --verify "${t}^{commit}" 2> /dev/null) || continue
+    _undoes "$by" "$full" || continue
     out=$(jq -c --arg b "$by" --arg t "$full" '. + [{by: $b, target: $t}] | unique' <<< "$out")
   done < <(git log --format='@@%H%n%B' "${base}..${head}" | _revert_lines)
   # A target older than <base> may itself be a revert (prod's base sits after
@@ -37,6 +39,7 @@ revert_edges() {
   while IFS=" " read -r by t; do
     [ -n "$by" ] && [ "${#t}" -ge 7 ] || continue
     full=$(git rev-parse -q --verify "${t}^{commit}" 2> /dev/null) || continue
+    _undoes "$by" "$full" || continue
     out=$(jq -c --arg b "$by" --arg t "$full" '. + [{by: $b, target: $t}] | unique' <<< "$out")
   done < <(jq -r '[.[].target] | unique | .[]' <<< "$out" \
     | while IFS= read -r t; do
@@ -44,6 +47,24 @@ revert_edges() {
         git log -1 --format='@@%H%n%B' "$t"
       done | _revert_lines)
   echo "$out"
+}
+
+# _undoes <by> <target>: the trailer alone proves nothing (anyone can write
+# it), so <by> only counts as a revert of <target> if its tree matches
+# "<by>^1 with <target> reverted" (a 3-way merge with base <target>) on every
+# path <target> changed. A conflict, a missing parent or any difference on
+# those paths means not a revert, so the target's tickets are still checked.
+# One commit reverting several targets that touch the same file fails this
+# too: safe, the tickets are checked.
+_undoes() {
+  local by="$1" t="$2" tree paths
+  git rev-parse -q --verify "${t}^1" > /dev/null 2>&1 || return 1
+  git rev-parse -q --verify "${by}^1" > /dev/null 2>&1 || return 1
+  paths=$(git diff --no-renames --name-only "${t}^1" "$t" | sort -u)
+  [ -n "$paths" ] || return 0 # an empty change has nothing to undo
+  tree=$(git merge-tree --write-tree --merge-base="$t" "${by}^1" "${t}^1" 2> /dev/null) || return 1
+  tree=$(head -n 1 <<< "$tree")
+  [ -z "$(comm -12 <(echo "$paths") <(git diff --no-renames --name-only "$tree" "$by" | sort -u))" ]
 }
 
 # stdin: git log --format='@@%H%n%B'; stdout: "<by> <target-prefix>" per

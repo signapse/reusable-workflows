@@ -78,7 +78,11 @@ teardown() { rm -rf "$TMP"; }
 
 # Logs go to stderr; keep them out of $output so it stays JSON.
 select_rc() { "$SCRIPT" "$@" 2> "$TMP/stderr"; }
-commit() { git commit -q --allow-empty -m "$1"; }
+# commit <subject>: a real change (a file per subject), so reverts are real too.
+commit() {
+  echo "$1" >> "f-$(printf '%s' "$1" | cksum | cut -d' ' -f1)"
+  git add -A && git commit -q -m "$1"
+}
 sha_of() { git log --format='%H %s' | awk -v s="$1" '{h=$1; $1=""; if (substr($0,2)==s) {print h; exit}}'; }
 built() {
   jq --arg s "$1" --argjson n "$2" '.[$s] = $n' "$TMP/builds.json" > "$TMP/b" && mv "$TMP/b" "$TMP/builds.json"
@@ -423,9 +427,38 @@ a_then_b() {
 
 # --- Reverts (ADR 0001 24 h revert, SIG-2766) ---
 
-# revert_of <subject-of-target> <message>: an empty commit carrying git's trailer.
+# revert_of <subject-of-target> <message>: a real revert carrying git's trailer.
 revert_of() {
-  git commit -q --allow-empty -m "$2" -m "This reverts commit $(sha_of "$1")."
+  local t
+  t=$(sha_of "$1")
+  git revert --no-commit "$t" > /dev/null
+  git commit -q -m "$2" -m "This reverts commit $t."
+}
+
+# forged_revert_of <subject-of-target> <message>: the trailer without undoing anything.
+forged_revert_of() {
+  echo x >> unrelated
+  git add -A && git commit -q -m "$2" -m "This reverts commit $(sha_of "$1")."
+}
+
+@test "a commit naming a revert it does not perform is not a revert: the ticket still blocks" {
+  commit "feat(SIG-1): A"; built "feat(SIG-1): A" 11
+  forged_revert_of "feat(SIG-1): A" 'Revert "feat(SIG-1): A"'; built 'Revert "feat(SIG-1): A"' 12
+  ticket SIG-1 "QA Failed"
+  run select_rc
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e --arg a "$(sha_of "feat(SIG-1): A")" '.rc == null and .blocked_by.id == "SIG-1" and .blocked_by.sha == $a' > /dev/null
+  echo "$output" | jq -e '(.reverted // []) == []' > /dev/null
+}
+
+@test "an empty commit carrying the trailer does not count as a revert" {
+  commit "feat(SIG-1): A"; built "feat(SIG-1): A" 11
+  git commit -q --allow-empty -m 'Revert "feat(SIG-1): A"' -m "This reverts commit $(sha_of "feat(SIG-1): A")."
+  built 'Revert "feat(SIG-1): A"' 12
+  ticket SIG-1 "QA Failed"
+  run select_rc
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.rc == null and .blocked_by.id == "SIG-1"' > /dev/null
 }
 
 @test "a QA Failed ticket whose commit is reverted no longer blocks" {
@@ -464,7 +497,7 @@ revert_of() {
   git merge -q --no-ff prodzilla/revert-SIG-1 -m "Merge pull request #7 from o/feature-sig-1"
   built "Merge pull request #7 from o/feature-sig-1" 11
   git checkout -q -b revert-branch
-  git revert -m 1 --no-edit HEAD > /dev/null 2>&1 || git commit -q --allow-empty -m 'Revert "Merge pull request #7"' -m "This reverts commit $(git rev-parse main)."
+  git revert -m 1 --no-edit HEAD > /dev/null
   git checkout -q main
   git merge -q --no-ff revert-branch -m "Merge pull request #8 from o/prodzilla/revert-SIG-1"
   built "Merge pull request #8 from o/prodzilla/revert-SIG-1" 12
