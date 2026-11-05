@@ -100,7 +100,9 @@ body=$(jq -nc --arg key "$IDEMPOTENCY_KEY" --arg mode "$MODE" --arg name "$name"
      + (if $link_field != "" then [{custom_field_id: $link_field, values: [{value_link: $run}]}] else [] end))}
   + (if $type != "" then {incident_type_id: $type} else {} end)')
 
-resp=$(curl -sS -w '\n%{http_code}' -X POST "${BASE}/v2/incidents" \
+# Bounded: a hung connection must not hold back the ticket and Slack step.
+# A timed-out POST may still have opened it; the idempotency key covers a re-run.
+resp=$(curl -sS --connect-timeout 15 --max-time 60 -w '\n%{http_code}' -X POST "${BASE}/v2/incidents" \
   -H "Authorization: Bearer ${INCIDENT_IO_API_KEY}" \
   -H "Content-Type: application/json" \
   --data-binary @- <<< "$body" 2>&1) || out false false "incident.io unreachable: ${resp:0:200}"
