@@ -70,7 +70,7 @@ The job summary shows the number of untracked commits (the list is in the Releas
 
 ### Sentry
 
-The Sentry job checks out `sha` (or the `version` tag), so `set_commits: auto` associates commits up to the deployed commit, not the caller's default branch. For errors to be attributed to the Deployment, the service's Sentry SDK `release` option must report the same string, `<repo name>@<tag>`. `retag-release.yml` still creates a bare-tag Sentry release.
+The Sentry job checks out `sha` (or the `version` tag), so `set_commits: auto` associates commits up to the deployed commit, not the caller's default branch. For errors to be attributed to the Deployment, the service's Sentry SDK `release` option must report the same string, `<repo name>@<tag>`. Before a repo calls this workflow, make its pods report that string: for SignStream, signapse/signapse-core-k8s#512 sets `SENTRY_RELEASE` to `sign-stream-api@<image tag>` in the four SignStream charts (merge it together with the switch to this workflow). Until then the services report the bare tag and their errors do not attach to this release. `retag-release.yml` still creates a bare-tag Sentry release.
 
 ### `.signapse/pipeline.yml` reader
 
