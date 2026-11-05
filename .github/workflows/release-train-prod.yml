@@ -18,7 +18,11 @@ name: Release Train prod (reusable)
 #             Sentry release with its production deploy marker (AC3)
 #   smoke     signapse-e2e @prod-safe against prod (AC4)
 #   verdict   pass: AC5 guard again, tickets -> On Prod.
-#             fail: prod_smoke_passed=false and a red run. The automatic
+#             fail: prod_smoke_passed=false and a red run.
+#   partial   a deploy-prod run or the final check fails or times out after
+#             some services already run the tag: a failed Deployment.
+#             prod_smoke_passed=false, partial_deployment=true and
+#             moved_services name what the rollback restores. The automatic
 #             rollback is SIG-2771's job, chained after this one.
 #
 # Two ways in (see scripts/prod-plan.sh):
@@ -281,10 +285,17 @@ on:
         value: ${{ jobs.release.outputs.linear_release_url }}
       prod_smoke_passed:
         description: >-
-          'true' | 'false' once deployed. Empty when nothing was deployed, or
+          'true' | 'false' once deployed. 'false' also after a partial
+          Deployment (partial_deployment). Empty when nothing was deployed, or
           when the verdict job died before reading the smoke result (unknown:
           SIG-2771 never rolls back on unknown, only on 'false').
-        value: ${{ jobs.verdict.outputs.prod_smoke_passed }}
+        value: ${{ jobs.verdict.outputs.prod_smoke_passed || (jobs.deploy.outputs.partial_deployment == 'true' && 'false') || '' }}
+      partial_deployment:
+        description: "'true' when a deploy-prod run or the final check failed or timed out after some services already ran release_tag (a failed Deployment)"
+        value: ${{ jobs.deploy.outputs.partial_deployment || 'false' }}
+      moved_services:
+        description: 'JSON array of the services this run moved to release_tag before a partial Deployment failed (what a rollback restores)'
+        value: ${{ jobs.deploy.outputs.moved_services || '[]' }}
       smoke_report_url:
         value: ${{ jobs.smoke.outputs.report_url }}
 
@@ -319,6 +330,8 @@ jobs:
       terraform_gate: ${{ steps.terraform.outputs.gate }}
       terraform_run_url: ${{ steps.terraform.outputs.run_url }}
       deployed: ${{ steps.verify.outputs.deployed || 'false' }}
+      partial_deployment: ${{ steps.partial.outputs.partial || 'false' }}
+      moved_services: ${{ steps.partial.outputs.moved || '[]' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -330,7 +343,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: signapse/reusable-workflows
-          ref: main
+          ref: ${{ job.workflow_sha }} # scripts from the same commit as this workflow, not mutable main
           path: _rw
           persist-credentials: false
 
@@ -539,6 +552,44 @@ jobs:
           echo "deployed=true" >> "$GITHUB_OUTPUT"
           echo "Prod runs \`$TAG\` on every service." >> "$GITHUB_STEP_SUMMARY"
 
+      # A deploy-prod run or the check above failed or timed out after some
+      # services may already run the new tag. Prod running a mix of tags is a
+      # failed Deployment: report which services moved, so prod_smoke_passed
+      # is 'false' (not empty) and SIG-2771's rollback restores exactly those.
+      - name: Services already on ${{ steps.plan.outputs.release_tag }} after a failure
+        id: partial
+        if: >-
+          always() && steps.plan.outputs.go == 'true' &&
+          (steps.dispatch.outcome == 'failure' || steps.dispatch.outcome == 'cancelled' || steps.verify.outcome == 'failure')
+        env:
+          GH_TOKEN: ${{ steps.read.outputs.token }}
+          PROD_SERVICES: ${{ inputs.prod_services }}
+          GITOPS_REPO: ${{ inputs.gitops_repo }}
+          GITOPS_REF: ${{ inputs.gitops_ref }}
+          TAG: ${{ steps.plan.outputs.release_tag }}
+          TO_DEPLOY: ${{ steps.plan.outputs.to_deploy }}
+          RUNS: ${{ steps.dispatch.outputs.runs }}
+        run: |
+          set -euo pipefail
+          # Only services this run dispatched: one already on the tag before
+          # it is not part of this Deployment's change.
+          if now=$("$GITHUB_WORKSPACE/_rw/actions/release-train/scripts/prod-tags.sh" "$TAG"); then
+            moved=$(jq -c --argjson d "${TO_DEPLOY:-[]}" '[.[] | select(.on_tag) | .service | select(. as $s | $d | index($s))]' <<< "$now")
+          else
+            echo "::warning::Could not re-read the tags prod runs; counting the deploy-prod runs that succeeded as moved."
+            moved=$(jq -c --argjson d "${TO_DEPLOY:-[]}" '[.[] | select(.conclusion == "success") | .service | select(. as $s | $d | index($s))] | unique' <<< "${RUNS:-[]}")
+          fi
+          if [ "$moved" = '[]' ]; then
+            echo "No service runs \`$TAG\` after the failure: prod is unchanged." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          {
+            echo "partial=true"
+            echo "moved=$moved"
+          } >> "$GITHUB_OUTPUT"
+          echo "::error::Partial Deployment: $(jq -r 'join(", ")' <<< "$moved") already run $TAG. Treated as a failed Deployment (prod_smoke_passed=false), so the rollback restores them."
+          echo "**Partial Deployment:** $(jq -r 'map("`\(.)`") | join(", ")' <<< "$moved") run \`$TAG\`; prod_smoke_passed=false." >> "$GITHUB_STEP_SUMMARY"
+
       # The Terraform gate alerts on its own failures; this covers the flag
       # guard, the deploy-prod runs and the final check.
       - name: Alert Slack
@@ -550,6 +601,7 @@ jobs:
           SLACK_CHANNEL: ${{ inputs.slack_channel || inputs.slack_releases_channel || vars.SLACK_RELEASES_CHANNEL || '#releases' }}
           TAG: ${{ steps.plan.outputs.release_tag }}
           RUNS: ${{ steps.dispatch.outputs.runs }}
+          MOVED: ${{ steps.partial.outputs.moved }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
@@ -562,6 +614,9 @@ jobs:
             # decides whether to finish the Deployment or roll it back. No
             # automatic rollback here: there is no smoke verdict yet.
             text=":rotating_light: <!channel> ${text#:rotating_light: }; deploy-prod: $(jq -r 'map("<\(.run_url)|\(.service)>: \(.conclusion | if . == "" then "not finished" else . end)") | join(", ")' <<< "$RUNS"). Prod may run a mix of tags: finish the Deployment (re-run failed jobs) or roll the moved services back by hand."
+            if [ -n "${MOVED:-}" ] && [ "$MOVED" != '[]' ]; then
+              text="${text%% Prod may run a mix of tags*} Partial Deployment: $(jq -r 'join(", ")' <<< "$MOVED") already run the new tag. Treated as a failed Deployment (prod_smoke_passed=false): the automatic rollback restores them; check its result."
+            fi
           fi
           resp=$(jq -nc --arg c "$SLACK_CHANNEL" --arg t "$text" '{channel: $c, text: $t}' | slack_post) || resp='{"ok":false}'
           [ "$(jq -r .ok <<< "$resp")" = true ] || echo "::error::Slack alert failed: $resp"
@@ -643,7 +698,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: signapse/reusable-workflows
-          ref: main
+          ref: ${{ job.workflow_sha }} # scripts from the same commit as this workflow, not mutable main
           path: _rw
           persist-credentials: false
 
