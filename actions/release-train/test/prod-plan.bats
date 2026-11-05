@@ -321,9 +321,10 @@ field() { tail -n1 <<< "$output" | jq -r "$@"; }
 
 @test "a reverted commit's ticket in range does not refuse the Deployment" {
   cd "$TMP/repo" || return 1
-  git commit -q --allow-empty -m "SIG-4 broke staging"
+  echo broken > sig-4 && git add sig-4 && git commit -q -m "SIG-4 broke staging"
   bad=$(git rev-parse HEAD)
-  git commit -q --allow-empty -m 'Revert "SIG-4 broke staging"' -m "This reverts commit $bad."
+  git revert --no-commit "$bad" > /dev/null
+  git commit -q -m 'Revert "SIG-4 broke staging"' -m "This reverts commit $bad."
   git tag 1.2.0
   jq '."SIG-4" = {state: "QA Failed", labels: ["Staging Failed"]}' "$TMP/linear.json" > "$TMP/l" && mv "$TMP/l" "$TMP/linear.json"
   export RELEASE_TAG=1.2.0
