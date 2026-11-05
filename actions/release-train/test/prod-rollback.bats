@@ -55,7 +55,9 @@ if [ "$1" = -X ]; then
   exit 0
 fi
 case "$1" in
-  */workflows/rollback.yml/runs\?*) jq -c '{workflow_runs: (. | reverse)}' "$TMP/runs.json" ;;
+  */workflows/rollback.yml/runs\?*)
+    [ -f "$TMP/no-workflow" ] && { echo 'gh: Not Found (HTTP 404)' >&2; exit 1; }
+    jq -c '{workflow_runs: (. | reverse)}' "$TMP/runs.json" ;;
   *) echo "gh stub: unhandled api $1" >&2; exit 1 ;;
 esac
 EOS
@@ -167,6 +169,29 @@ field() { tail -n1 <<< "$output" | jq -r "$@"; }
   [ "$(field .ok)" = false ]
   [ "$(field '.results[0].result')" = not_dispatched ]
   [[ "$(field '.results[0].reason')" == *"HTTP 403"* ]]
+}
+
+@test "rollback.yml missing on signapse-core-k8s (404): every service fails naming it, nothing dispatched" {
+  touch "$TMP/no-workflow"
+  export SERVICES='["signstream-api","signstream-websocket"]'
+  rollback
+  [ "$status" -eq 0 ]
+  [ "$(field .ok)" = false ]
+  [ "$(field .needs_human)" = true ]
+  [[ "$(field .reason)" == *"rollback.yml does not exist on signapse/signapse-core-k8s"* ]]
+  [ "$(field '[.results[].result] | unique | join(",")')" = missing_workflow ]
+  [ "$(field '[.results[].service] | join(",")')" = signstream-api,signstream-websocket ]
+  [ "$(field '.results[0].expected')" = 1.3.0 ]
+  [ ! -s "$TMP/dispatched" ]
+}
+
+@test "any other listing failure still exits 1" {
+  cat > "$TMP/stub/gh" <<'EOS'
+#!/usr/bin/env bash
+echo 'gh: Server Error (HTTP 502)' >&2; exit 1
+EOS
+  rollback
+  [ "$status" -eq 1 ]
 }
 
 @test "re-run: an earlier attempt's successful rollback is reused, nothing dispatched" {

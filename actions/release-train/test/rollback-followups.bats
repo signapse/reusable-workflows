@@ -107,6 +107,15 @@ incident_env() {
   [ "$(jq 'has("incident_type_id")' "$b")" = false ]
 }
 
+@test "partial Deployment: CAUSE names it in the incident instead of a failed smoke" {
+  incident_env
+  CAUSE="Prod deploy failed part-way" ROLLBACK_OK=true ROLLBACK_RESULTS="$OK_RESULTS" run "$S/rollback-incident.sh"
+  [ "$status" -eq 0 ]
+  [[ "$(jq -r .name "$TMP/incident.json")" == "Prod deploy failed part-way after deploying"*"rolled back" ]]
+  [[ "$(jq -r .summary "$TMP/incident.json")" == *"treated as a failed Deployment"* ]]
+  [[ "$(jq -r .summary "$TMP/incident.json")" != *"@prod-safe smoke tests failed"* ]]
+}
+
 @test "AC5: rollback failed: Major severity, names the service and the reason" {
   incident_env
   ROLLBACK_OK=false ROLLBACK_RESULTS="$BAD_RESULTS" run "$S/rollback-incident.sh"
@@ -178,6 +187,13 @@ tickets_env() {
   [[ "$text" == *"In QA Failed: SIG-1, SIG-2"* ]]
   [[ "$text" == *"|Incident>"* ]]
   [[ "$text" != *"<!channel>"* ]]
+}
+
+@test "partial Deployment: the Slack alert names the cause" {
+  tickets_env
+  CAUSE="Prod deploy failed part-way" ROLLBACK_OK=true ROLLBACK_RESULTS="$OK_RESULTS" run "$S/rollback-tickets.sh"
+  [ "$status" -eq 0 ]
+  [[ "$(jq -r .text "$TMP/slack.log")" == *"Prod deploy failed part-way for"*"rolled back"* ]]
 }
 
 @test "AC4: a Done ticket (follow-up commit in the Deployment) is not moved out of Done" {

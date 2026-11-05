@@ -26,6 +26,8 @@
 #   INCIDENT_MODE         standard (default) | test (for trying the path out)
 #   REPOSITORY, RELEASE_TAG, RUN_URL (required), REPORT_URL, RELEASE_URL, TICKETS
 #   ROLLBACK_RESULTS      prod-rollback.sh's results array (may be [])
+#   CAUSE                 what failed, default "Prod smoke failed" (the workflow
+#                         sends "Prod deploy failed part-way" for a partial Deployment)
 #   INCIDENT_IO_BASE_URL  default https://api.incident.io
 # Stdout: {ok, created, severity, incident_id, reference, url, reason}
 # Exit 0 when the incident exists (created now or earlier), 1 otherwise.
@@ -67,16 +69,19 @@ case "$MODE" in standard | test) ;; *) out false false "INCIDENT_MODE must be st
 jq -e 'type == "array"' <<< "$RESULTS" > /dev/null 2>&1 || out false false "ROLLBACK_RESULTS is not a JSON array"
 
 services=$(jq -r 'map("`\(.service)`") | join(", ")' <<< "$RESULTS")
+CAUSE="${CAUSE:-Prod smoke failed}"
 if [ "$sev" = minor ]; then
-  name="Prod smoke failed after deploying ${WHAT}; rolled back"
+  name="${CAUSE} after deploying ${WHAT}; rolled back"
   impact="Customers used ${WHAT} from its Deployment until the automatic rollback finished; ${services:-every service} now runs the previous version again."
   steps="We rolled back automatically to the previous version ($(jq -r 'map("`\(.service)` → `\(.restored)`") | join(", ")' <<< "$RESULTS")) and moved the tickets to QA Failed."
 else
-  name="Prod smoke failed after deploying ${WHAT}; ROLLBACK FAILED"
+  name="${CAUSE} after deploying ${WHAT}; ROLLBACK FAILED"
   impact="Customers may still be on ${WHAT}: the automatic rollback did not restore every service."
   steps="The automatic rollback did not finish: $(jq -r 'map("`\(.service)`: \(.reason)") | join("; ")' <<< "$RESULTS"). Someone needs to roll back by hand (signapse-core-k8s docs/OPERATIONS.md)."
 fi
-summary="**Problem**: The @prod-safe smoke tests failed after ${WHAT} was deployed to production.
+problem="The @prod-safe smoke tests failed after ${WHAT} was deployed to production."
+[ "$CAUSE" = "Prod smoke failed" ] || problem="${CAUSE} while deploying ${WHAT} to production: some services ran it, so it was treated as a failed Deployment."
+summary="**Problem**: ${problem}
 
 **Impact**: ${impact}
 
