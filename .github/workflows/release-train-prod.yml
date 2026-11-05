@@ -982,7 +982,7 @@ jobs:
   # failed jobs" would re-run a failed smoke against the restored prod, and a
   # pass there skips this job (docs/RELEASE-TRAIN.md "Re-runs").
   # Re-runs are safe: rollback.yml is keyed on the
-  # rollback run key, the incident on the deploy run key, the Release move and
+  # rollback run key, the incident on run id + release tag, the Release move and
   # ticket comments check before writing.
   rollback:
     name: Roll back prod
@@ -1020,12 +1020,17 @@ jobs:
         id: cfg
         env:
           DEPLOY_RUN_KEY: ${{ needs.deploy.outputs.run_key }}
+          RELEASE_TAG: ${{ needs.deploy.outputs.release_tag }}
           LINEAR_PIPELINE: ${{ inputs.linear_pipeline }}
         run: |
           set -euo pipefail
           # Empty when this run dispatched nothing (prod already ran the tag):
           # then a key stable across re-runs of this run.
           echo "run_key=${DEPLOY_RUN_KEY:-${GITHUB_REPOSITORY#*/}-${GITHUB_RUN_ID}-prod}" >> "$GITHUB_OUTPUT"
+          # One incident per train run and release tag, whatever the attempt:
+          # a "Re-run all jobs" may get a new deploy key (or none, when prod
+          # already runs the tag) and must still find the first incident.
+          echo "incident_key=${GITHUB_REPOSITORY#*/}-${GITHUB_RUN_ID}-${RELEASE_TAG}-prod" >> "$GITHUB_OUTPUT"
           pipeline="$LINEAR_PIPELINE"
           [ -n "$pipeline" ] || pipeline=$("$GITHUB_WORKSPACE/_rw/actions/release-train/scripts/pipeline-config.sh" linear_pipeline 2>/dev/null || true)
           echo "linear_pipeline=$pipeline" >> "$GITHUB_OUTPUT"
@@ -1145,7 +1150,7 @@ jobs:
         if: ${{ !cancelled() }}
         env:
           INCIDENT_IO_API_KEY: ${{ secrets.INCIDENT_IO_API_KEY }}
-          IDEMPOTENCY_KEY: ${{ steps.cfg.outputs.run_key }}
+          IDEMPOTENCY_KEY: ${{ steps.cfg.outputs.incident_key }}
           ROLLBACK_OK: ${{ steps.rollback.outputs.ok }}
           ROLLBACK_RESULTS: ${{ steps.rollback.outputs.results }}
           MINOR_SEVERITY_ID: ${{ inputs.incident_io_minor_severity_id }}

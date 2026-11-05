@@ -582,7 +582,7 @@ rollback
   history is not clean pipeline changes), `failed`, a different restored tag,
   no artifact, a timeout or a failed dispatch all count as "the rollback
   failed" (AC5).
-- **Incident.** One per Deployment, idempotency key = the deploy run key.
+- **Incident.** One per Deployment, idempotency key `<repo>-<run id>-<release tag>-prod`: the same on every attempt of the run, so "Re-run all jobs" (new deploy key, or none when prod already runs the tag) finds the first incident.
   Severity `incident_io_minor_severity_id` (default P3) when every service was
   restored, else `incident_io_major_severity_id` (default P2). The workspace
   has P1-P4 and no "Minor"/"Major". The Cause field is set to Deployment
