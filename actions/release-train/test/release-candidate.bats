@@ -451,6 +451,45 @@ forged_revert_of() {
   echo "$output" | jq -e '(.reverted // []) == []' > /dev/null
 }
 
+@test "a real revert that also adds other code is not a revert: the ticket still blocks" {
+  commit "feat(SIG-1): A"; built "feat(SIG-1): A" 11
+  git revert --no-commit "$(sha_of "feat(SIG-1): A")" > /dev/null
+  echo "new code" > smuggled && git add smuggled
+  git commit -q -m 'Revert "feat(SIG-1): A"' -m "This reverts commit $(sha_of "feat(SIG-1): A")."
+  built 'Revert "feat(SIG-1): A"' 12
+  ticket SIG-1 "QA Failed"
+  run select_rc
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.rc == null and .blocked_by.id == "SIG-1"' > /dev/null
+}
+
+@test "naming an empty commit as the target does not make a code change a revert" {
+  git commit -q --allow-empty -m "chore(SIG-1): empty"; built "chore(SIG-1): empty" 11
+  echo "new code" > smuggled && git add smuggled
+  git commit -q -m 'feat(SIG-1): B' -m "This reverts commit $(sha_of "chore(SIG-1): empty")."
+  built 'feat(SIG-1): B' 12
+  ticket SIG-1 "QA Failed"
+  run select_rc
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.rc == null and .blocked_by.id == "SIG-1"' > /dev/null
+}
+
+@test "a squash of two reverts (one revert PR for a ticket with two commits) reverts both" {
+  commit "feat(SIG-1): A"; built "feat(SIG-1): A" 11
+  echo more >> "f-$(printf '%s' "feat(SIG-1): A" | cksum | cut -d' ' -f1)"; git add -A; git commit -q -m "fix(SIG-1): A2"; built "fix(SIG-1): A2" 12
+  commit "feat(SIG-2): B"; built "feat(SIG-2): B" 13
+  a=$(sha_of "feat(SIG-1): A"); a2=$(sha_of "fix(SIG-1): A2")
+  git revert --no-commit "$a2" "$a" > /dev/null
+  git commit -q -m 'Revert SIG-1 (#9)' -m "This reverts commit $a2." -m "This reverts commit $a."
+  built 'Revert SIG-1 (#9)' 14
+  ticket SIG-1 "QA Failed"
+  ticket SIG-2 "On Dev · Ready for QA" "QA Passed"
+  run select_rc
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e --arg r "$(sha_of 'Revert SIG-1 (#9)')" '.outcome == "selected" and .rc.sha == $r and .blocked_by == null' > /dev/null
+  echo "$output" | jq -e '[.tickets[].id] == ["SIG-2"]' > /dev/null
+}
+
 @test "an empty commit carrying the trailer does not count as a revert" {
   commit "feat(SIG-1): A"; built "feat(SIG-1): A" 11
   git commit -q --allow-empty -m 'Revert "feat(SIG-1): A"' -m "This reverts commit $(sha_of "feat(SIG-1): A")."
