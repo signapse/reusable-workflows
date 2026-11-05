@@ -31,6 +31,8 @@
 #   no_previous_tag  exit 3 in rollback.yml: nothing to roll back to
 #   needs_human      exit 4: the history isn't clean pipeline changes
 #   failed           anything else (ECR, Flux suspended, stg automation, ...)
+#   not_current      CURRENT_TAGS shows the service on another tag than
+#                    RELEASE_TAG: nothing dispatched, needs a human
 #   missing_workflow ROLLBACK_WORKFLOW does not exist on K8S_REPO (404): nothing
 #                    is dispatched, every service needs a human
 # Every non-ok service sets needs_human=true in the result (AC5: Major).
@@ -40,6 +42,10 @@
 #   PREVIOUS_TAGS     JSON object service -> tag prod ran before (may be {})
 #   RELEASE_TAG       the tag being rolled back from; without a previous tag,
 #                     a rollback is ok only if it restored something else
+#   CURRENT_TAGS      optional prod-tags.sh output read just before: a service
+#                     that no longer runs RELEASE_TAG (a newer deployment landed
+#                     after the smoke) is not rolled back, it needs a human
+#                     (result not_current), so a rollback never undoes it
 #   DEPLOY_RUN_KEY    the deploy job's run key; service S's deploy-prod key is
 #                     DEPLOY_RUN_KEY-S and its rollback key DEPLOY_RUN_KEY-S-rollback (required)
 #   ENVIRONMENT       rollback.yml environment (default prod)
@@ -81,6 +87,8 @@ done
 [ "$POLL_SECONDS" -gt 0 ] || die "POLL_SECONDS must be > 0"
 [ "$MAX_ATTEMPTS" -gt 0 ] || die "MAX_ATTEMPTS must be > 0"
 case "$ENVIRONMENT" in prod | stg) ;; *) die "ENVIRONMENT must be prod or stg (got '$ENVIRONMENT')" ;; esac
+CURRENT_TAGS="${CURRENT_TAGS:-}"
+[ -z "$CURRENT_TAGS" ] || jq -e 'type == "array"' <<< "$CURRENT_TAGS" > /dev/null 2>&1 || die "CURRENT_TAGS must be prod-tags.sh's JSON array (got '$CURRENT_TAGS')"
 jq -e 'type == "object"' <<< "$PREVIOUS_TAGS" > /dev/null 2>&1 || die "PREVIOUS_TAGS must be a JSON object (got '$PREVIOUS_TAGS')"
 services=$(jq -r 'if type == "array" and length > 0 and all(type == "string" and test("^[a-z0-9][a-z0-9-]{0,62}$")) then .[] else error("bad") end' \
   <<< "$SERVICES" 2> /dev/null) || die "SERVICES must be a non-empty JSON array of service names (got '$SERVICES')"
@@ -196,13 +204,22 @@ while IFS= read -r svc; do
   # Every run with this key that exists now is an earlier attempt, not ours.
   st_set "$svc" '.known = [$m[].id]' --argjson m "$mine"
   latest=$(jq -c 'first // empty' <<< "$mine")
-  if [ -n "$latest" ] && [ "$(jq -r '.status' <<< "$latest")" != completed ]; then
-    st_set "$svc" '.run_id = ($r.id | tostring) | .run_url = $r.html_url | .status = "running" | .attempts = 1' --argjson r "$latest"
-    log "${svc}: an earlier attempt's rollback is still going, following it: $(st "$svc" run_url)"
-  elif [ -n "$latest" ] && [ "$(jq -r '.conclusion' <<< "$latest")" = success ]; then
-    st_set "$svc" '.run_id = ($r.id | tostring) | .run_url = $r.html_url | .attempts = 1' --argjson r "$latest"
+  # Any earlier success with this key is reused, even if a later attempt
+  # with the same key failed or was cancelled (rollback.yml never rolls back
+  # twice for one key, so that success is the rollback).
+  done_ok=$(jq -c '[.[] | select(.status == "completed" and .conclusion == "success")] | first // empty' <<< "$mine")
+  current=""
+  [ -z "$CURRENT_TAGS" ] || current=$(jq -r --arg s "$svc" '[.[] | select(.service == $s) | .current_tag][0] // ""' <<< "$CURRENT_TAGS")
+  if [ -n "$done_ok" ]; then
+    st_set "$svc" '.run_id = ($r.id | tostring) | .run_url = $r.html_url | .attempts = 1' --argjson r "$done_ok"
     log "${svc}: already rolled back by an earlier attempt: $(st "$svc" run_url)"
     evaluate "$svc" success
+  elif [ -n "$latest" ] && [ "$(jq -r '.status' <<< "$latest")" != completed ]; then
+    st_set "$svc" '.run_id = ($r.id | tostring) | .run_url = $r.html_url | .status = "running" | .attempts = 1' --argjson r "$latest"
+    log "${svc}: an earlier attempt's rollback is still going, following it: $(st "$svc" run_url)"
+  elif [ -n "$current" ] && [ -n "${RELEASE_TAG:-}" ] && [ "$current" != "$RELEASE_TAG" ]; then
+    finish "$svc" "" not_current false "needs a human: prod runs ${current}, not ${RELEASE_TAG}, so a newer deployment (or a manual rollback) landed after the smoke; not rolled back"
+    log "${svc}: $(st "$svc" reason)"
   else
     dispatch "$svc" || finish "$svc" "" not_dispatched false "could not dispatch ${ROLLBACK_WORKFLOW}: $(tail -n 1 "$work/err")"
   fi
@@ -246,6 +263,8 @@ while [ "$(pending)" -gt 0 ]; do
       log "${svc}: following $(st "$svc" run_url)"
     fi
     run=$(jq -c --arg id "$(st "$svc" run_id)" '[.workflow_runs[]? | select((.id | tostring) == $id)] | first // empty' <<< "$listed")
+    # Fell off the first page (many newer rollback runs): read it by id.
+    [ -n "$run" ] || run=$(gh api "repos/${K8S_REPO}/actions/runs/$(st "$svc" run_id)" 2> /dev/null | jq -c 'select(.id != null)' 2> /dev/null || true)
     [ -n "$run" ] || continue
     [ "$(jq -r .status <<< "$run")" = completed ] || continue
     conclusion=$(jq -r '.conclusion // ""' <<< "$run")

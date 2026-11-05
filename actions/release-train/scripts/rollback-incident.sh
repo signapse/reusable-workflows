@@ -109,6 +109,15 @@ raw="${resp%$'\n'*}"
 msg=$(jq -r '[.errors[]?.message] | join("; ")' <<< "$raw" 2> /dev/null || true)
 [ -n "$msg" ] || msg="${raw:0:200}"
 
+# An earlier attempt opened it (idempotency conflict): find that incident so
+# the alert and the run still link it. Its summary carries this run's URL
+# (the same on every attempt). Not found: still ok, just no link.
+existing() {
+  local list
+  list=$(curl -sS --max-time 20 "${BASE}/v2/incidents?page_size=50" -H "Authorization: Bearer ${INCIDENT_IO_API_KEY}" 2> /dev/null) || return 0
+  jq -c --arg r "(${RUN_URL})" '[.incidents[]? | select((.summary // "") | contains($r))] | first // empty' <<< "$list" 2> /dev/null || true
+}
+
 case "$code" in
   2??)
     inc=$(jq -c '.incident // empty' <<< "$raw" 2> /dev/null || true)
@@ -116,10 +125,10 @@ case "$code" in
     [ -n "$inc" ] || out false false "incident.io answered HTTP ${code} without an incident; re-run to make sure it exists"
     log "incident.io: opened $(jq -r '.reference // .id' <<< "$inc") (${sev})"
     out true true "opened" "$inc" ;;
-  409) out true false "already opened by an earlier attempt (idempotency key ${IDEMPOTENCY_KEY}): ${msg}" ;;
+  409) out true false "already opened by an earlier attempt (idempotency key ${IDEMPOTENCY_KEY}): ${msg}" "$(existing)" ;;
   422)
     if jq -e '[.errors[]? | (.source.field // "") == "idempotency_key" or ((.message // "") | ascii_downcase | contains("idempotency"))] | any' <<< "$raw" > /dev/null 2>&1; then
-      out true false "already opened by an earlier attempt (idempotency key ${IDEMPOTENCY_KEY}): ${msg}"
+      out true false "already opened by an earlier attempt (idempotency key ${IDEMPOTENCY_KEY}): ${msg}" "$(existing)"
     fi
     out false false "incident.io rejected the incident (HTTP 422): ${msg}" ;;
   *) out false false "incident.io HTTP ${code}: ${msg}" ;;

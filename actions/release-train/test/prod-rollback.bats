@@ -57,7 +57,11 @@ fi
 case "$1" in
   */workflows/rollback.yml/runs\?*)
     [ -f "$TMP/no-workflow" ] && { echo 'gh: Not Found (HTTP 404)' >&2; exit 1; }
-    jq -c '{workflow_runs: (. | reverse)}' "$TMP/runs.json" ;;
+    # $TMP/page-size: only that many newest runs are listed (pagination).
+    jq -c --argjson n "$(cat "$TMP/page-size" 2>/dev/null || echo 100)" '{workflow_runs: (. | reverse | .[:$n])}' "$TMP/runs.json" ;;
+  */actions/runs/*)
+    id="${1##*/}"
+    jq -c --argjson id "$id" '.[] | select(.id == $id)' "$TMP/runs.json" ;;
   *) echo "gh stub: unhandled api $1" >&2; exit 1 ;;
 esac
 EOS
@@ -233,4 +237,48 @@ EOS
   [ "$status" -eq 1 ]
   SERVICES='["Bad Name"]' rollback
   [ "$status" -eq 1 ]
+}
+
+@test "re-run: an earlier success is reused even when a later attempt with the key failed" {
+  printf 'success success 1.3.0\nfailure failed 1.3.0\n' > "$TMP/plan-signstream-api"
+  "$S/prod-rollback.sh" > /dev/null 2>&1                     # run 701: success
+  body='{"ref":"main","inputs":{"service":"signstream-api","environment":"prod","run_key":"sign-stream-api-42-1-prod-signstream-api-rollback"}}'
+  gh api -X POST x <<< "$body"                               # run 702: a later failed attempt
+  : > "$TMP/dispatched"
+  rollback
+  [ "$(field .ok)" = true ]
+  [ "$(field '.results[0].run_id')" = 701 ]
+  [ ! -s "$TMP/dispatched" ]
+}
+
+@test "a service no longer on the release tag (newer deployment after the smoke) is not rolled back" {
+  export RELEASE_TAG=1.4.0 SERVICES='["signstream-api","signstream-websocket"]'
+  export PREVIOUS_TAGS='{"signstream-api":"1.3.0","signstream-websocket":"1.3.0"}'
+  export CURRENT_TAGS='[{"service":"signstream-api","current_tag":"1.5.0","on_tag":false},{"service":"signstream-websocket","current_tag":"1.4.0","on_tag":true}]'
+  rollback
+  [ "$status" -eq 0 ]
+  [ "$(field .ok)" = false ]
+  [ "$(field '.results[] | select(.service == "signstream-api") | .result')" = not_current ]
+  [[ "$(field '.results[] | select(.service == "signstream-api") | .reason')" == *"prod runs 1.5.0, not 1.4.0"* ]]
+  [ "$(field '.results[] | select(.service == "signstream-websocket") | .ok')" = true ]
+  [ "$(jq -r .inputs.service "$TMP/dispatched")" = signstream-websocket ]
+}
+
+@test "a followed run that fell off the first page of runs is read by id, not timed out" {
+  echo "never x 1.3.0" > "$TMP/plan-signstream-api"
+  echo "success success 1.3.0" > "$TMP/plan-signstream-websocket"
+  export SERVICES='["signstream-api","signstream-websocket"]'
+  export PREVIOUS_TAGS='{"signstream-api":"1.3.0","signstream-websocket":"1.3.0"}'
+  # Both runs are found on the first listing. Then newer runs push 701 off
+  # the page (page size 1 from the first sleep on); it completes and is read by id.
+  cat > "$TMP/stub/sleep" <<'EOS'
+#!/usr/bin/env bash
+echo "$1" >> "$TMP/slept"
+echo 1 > "$TMP/page-size"
+jq -c 'map(if .id == 701 then .status = "completed" | .conclusion = "success" | ._result = "success" else . end)' "$TMP/runs.json" > "$TMP/r" && mv "$TMP/r" "$TMP/runs.json"
+EOS
+  chmod +x "$TMP/stub/sleep"
+  rollback
+  [ "$(field .ok)" = true ]
+  [ "$(field '.results[] | select(.service == "signstream-api") | .result')" = success ]
 }

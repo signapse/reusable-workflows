@@ -1043,6 +1043,35 @@ jobs:
           repositories: ${{ needs.deploy.outputs.gitops_name }}
           permission-actions: write
 
+      # What prod runs right before the rollback: a service no longer on the
+      # release tag (a newer deployment landed after the smoke) is left to a
+      # human, so the rollback never undoes it. Best effort: without it the
+      # rollback still runs.
+      - name: Mint read-only app token for ${{ inputs.gitops_repo }}
+        id: read
+        continue-on-error: true
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ inputs.read_app_id }}
+          private-key: ${{ secrets.READ_APP_PRIVATE_KEY }}
+          owner: ${{ needs.deploy.outputs.gitops_owner }}
+          repositories: ${{ needs.deploy.outputs.gitops_name }}
+          permission-contents: read
+
+      - name: Read the tags prod runs
+        id: current
+        if: ${{ !cancelled() && steps.read.outputs.token != '' }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ steps.read.outputs.token }}
+          PROD_SERVICES: ${{ needs.deploy.outputs.services }}
+          GITOPS_REPO: ${{ inputs.gitops_repo }}
+          GITOPS_REF: ${{ inputs.gitops_ref }}
+          RELEASE_TAG: ${{ needs.deploy.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          echo "tags=$("$GITHUB_WORKSPACE/_rw/actions/release-train/scripts/prod-tags.sh" "$RELEASE_TAG" | jq -c .)" >> "$GITHUB_OUTPUT"
+
       - name: Roll back with ${{ inputs.rollback_workflow }} (AC1)
         id: rollback
         if: ${{ !cancelled() }}
@@ -1051,6 +1080,7 @@ jobs:
           SERVICES: ${{ needs.deploy.outputs.partial_deployment == 'true' && needs.deploy.outputs.moved_services || needs.deploy.outputs.services }}
           PREVIOUS_TAGS: ${{ needs.deploy.outputs.previous_tags }}
           RELEASE_TAG: ${{ needs.deploy.outputs.release_tag }}
+          CURRENT_TAGS: ${{ steps.current.outputs.tags }}
           DEPLOY_RUN_KEY: ${{ steps.cfg.outputs.run_key }}
           K8S_REPO: ${{ inputs.gitops_repo }}
           K8S_REF: ${{ inputs.gitops_ref }}

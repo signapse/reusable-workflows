@@ -558,6 +558,14 @@ rollback
 - **Run keys.** Service S's rollback key is `<deploy run_key>-S-rollback`
   (rollback.yml shows it in its run title). When the run dispatched nothing
   (prod already ran the tag), the deploy key is `<repo>-<run id>-prod`.
+- **Only from the release tag.** Right before dispatching, the job re-reads
+  the tags prod runs. A service no longer on the release tag (a newer
+  deployment or a manual rollback landed after the smoke) is not rolled back:
+  `not_current`, needs a human. rollback.yml itself still picks its target
+  from the tag history when it starts, so a deployment landing in the seconds
+  between that read and rollback.yml's own resolution is not caught here;
+  closing that needs rollback.yml to take the tag it must replace
+  (signapse-core-k8s#503).
 - **rollback.yml missing.** If signapse-core-k8s has no `rollback.yml`
   (SIG-2753, signapse-core-k8s#503 not merged), listing its runs returns 404:
   nothing is dispatched, every service is reported `missing_workflow` with a
@@ -594,9 +602,11 @@ rollback
   jobs" also re-runs a failed smoke, which now tests the restored prod: it
   can pass, and then the rollback job is skipped and its failed steps are
   never retried. In the re-run, a rollback that already succeeded with the
-  key is reused, one still running is waited on, and a failed one is
+  key is reused (even if a later attempt with the key failed), one still
+  running is waited on (read by id if newer runs push it off the listing), and a failed one is
   dispatched again with the same key (rollback.yml never rolls back twice
-  for one key). The incident is not duplicated (idempotency key), and the
+  for one key). The incident is not duplicated (idempotency key; the existing one is
+  found by the run URL in its summary and linked again), and the
   Release move and ticket comments check first. The Slack alert is posted
   again, marked with the attempt number.
 - **On Prod guard.** A re-run can re-run the smoke against the rolled-back
