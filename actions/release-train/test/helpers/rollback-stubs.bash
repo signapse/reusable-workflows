@@ -10,6 +10,7 @@
 #     issue(id:) state      $TMP/state-<id>, default On Prod
 #     issue(id:) labels     QA Passed (lbl-qa) and Feature (lbl-feature)
 #   api.incident.io         body to $TMP/incident.json; answers $TMP/inc-code (201) with $TMP/inc-body
+#     /v2/incidents?...     (list) $TMP/inc-list, default no incidents
 #   slack.com               body to $TMP/slack.log (one JSON per line); {"ok":true}
 # $TMP/linear-down makes every Linear call fail with HTTP 500.
 
@@ -60,6 +61,8 @@ case "$url" in
       *) echo "curl stub: unhandled Linear query: $q" >&2; exit 1 ;;
     esac
     printf '%s\n200' "$out" ;;
+  https://api.incident.io/v2/incidents\?*)
+    cat "$TMP/inc-list" 2>/dev/null || echo '{"incidents":[]}' ;;
   https://api.incident.io/*)
     echo "$body" > "$TMP/incident.json"
     printf '%s\n%s' "$(cat "$TMP/inc-body" 2>/dev/null || echo '{"incident":{"id":"01INC","reference":"INC-7","permalink":"https://app.incident.io/signapse-workspace/incidents/7"}}')" \

@@ -135,6 +135,21 @@ incident_env() {
   [ "$status" -eq 0 ]
   [ "$(field .created)" = false ]
   [[ "$(field .reason)" == *"already opened"* ]]
+  [ "$(field .url)" = "" ]
+}
+
+@test "AC3: re-run: the incident an earlier attempt opened is found by the run URL and linked" {
+  incident_env
+  echo 409 > "$TMP/inc-code"
+  echo '{"errors":[{"message":"conflict"}]}' > "$TMP/inc-body"
+  jq -nc --arg run "$RUN" '{incidents: [
+    {id: "01OTHER", reference: "INC-6", permalink: "https://app.incident.io/x/incidents/6", summary: "[Failing run](https://github.com/o/r/actions/runs/1)"},
+    {id: "01INC", reference: "INC-7", permalink: "https://app.incident.io/x/incidents/7", summary: "**Problem** ... [Failing run](\($run))"}]}' > "$TMP/inc-list"
+  ROLLBACK_OK=true ROLLBACK_RESULTS="$OK_RESULTS" run "$S/rollback-incident.sh"
+  [ "$status" -eq 0 ]
+  [ "$(field .created)" = false ]
+  [ "$(field .reference)" = INC-7 ]
+  [ "$(field .url)" = https://app.incident.io/x/incidents/7 ]
 }
 
 @test "AC3: any other 422 (e.g. a required field) fails with incident.io's message" {
