@@ -354,6 +354,8 @@ jobs:
           private-key: ${{ secrets.READ_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
           permission-actions: read
+          # contents: compare API orders same-second merges in private repos.
+          permission-contents: read
           permission-pull-requests: read
 
       - name: Move tickets whose linked PRs all passed dev smoke
