@@ -33,6 +33,10 @@
 #   PRODUCT          terragrunt/products dir, from .signapse/pipeline.yml (required)
 #   ENVIRONMENT      dev | stg | prod (required)
 #   RUN_KEY          unique prefix for this gate; dispatch n gets RUN_KEY-n (required)
+#   SOURCE_REPO      owner/repo being promoted (required). Sent as source_repo:
+#                    terraform-deploy.yml refuses the run unless that repo is
+#                    listed for PRODUCT, so a repo cannot apply another
+#                    product's stack by naming it in its pipeline.yml.
 #   TF_REPO          default signapse/signapse-core-terraform
 #   TF_WORKFLOW      default terraform-deploy.yml
 #   TF_REF           ref to dispatch on, default main
@@ -61,6 +65,7 @@ need jq
 : "${PRODUCT:?PRODUCT not set}"
 : "${ENVIRONMENT:?ENVIRONMENT not set}"
 : "${RUN_KEY:?RUN_KEY not set}"
+: "${SOURCE_REPO:?SOURCE_REPO not set}"
 TF_REPO="${TF_REPO:-signapse/signapse-core-terraform}"
 TF_WORKFLOW="${TF_WORKFLOW:-terraform-deploy.yml}"
 TF_REF="${TF_REF:-main}"
@@ -73,6 +78,7 @@ MAX_DISPATCHES="${MAX_DISPATCHES:-4}"
 case "$ENVIRONMENT" in dev | stg | prod) ;; *) die "ENVIRONMENT must be dev, stg or prod (got '$ENVIRONMENT')" ;; esac
 case "$TF_REGION" in eu | us) ;; *) die "TF_REGION must be eu or us (got '$TF_REGION')" ;; esac
 [[ "$PRODUCT" =~ ^[A-Za-z0-9_-]+$ ]] || die "PRODUCT must be a terragrunt/products directory name (got '$PRODUCT')"
+[[ "$SOURCE_REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || die "SOURCE_REPO must be owner/repo (got '$SOURCE_REPO')"
 [[ "$RUN_KEY" =~ ^[A-Za-z0-9._-]+$ ]] || die "RUN_KEY must be [A-Za-z0-9._-] (got '$RUN_KEY')"
 for n in "$TIMEOUT_SECONDS" "$FIND_TIMEOUT_SECONDS" "$POLL_SECONDS" "$MAX_DISPATCHES"; do
   case "$n" in "" | *[!0-9]*) die "numeric env expected, got '$n'" ;; esac
@@ -124,7 +130,8 @@ dispatch() {
     -f "inputs[region]=$TF_REGION" \
     -f "inputs[action]=plan" \
     -f "inputs[apply]=true" \
-    -f "inputs[run_key]=$key" > /dev/null 2> "$work/err"
+    -f "inputs[run_key]=$key" \
+    -f "inputs[source_repo]=$SOURCE_REPO" > /dev/null 2> "$work/err"
 }
 
 # find_run: sets run_id/run_url for the run whose title carries [key].

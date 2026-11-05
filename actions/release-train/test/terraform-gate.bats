@@ -69,7 +69,7 @@ echo "$1" >> "$TMP/slept"
 EOS
   chmod +x "$TMP/stub/"*
 
-  export GH_TOKEN=x PRODUCT=Signstream ENVIRONMENT=stg RUN_KEY=sign-stream-api-42-1-stg
+  export GH_TOKEN=x PRODUCT=Signstream ENVIRONMENT=stg RUN_KEY=sign-stream-api-42-1-stg SOURCE_REPO=signapse/sign-stream-api
   export POLL_SECONDS=30 TIMEOUT_SECONDS=600 FIND_TIMEOUT_SECONDS=90
 }
 
@@ -90,7 +90,7 @@ gate() { run "$S/terraform-gate.sh"; }
 # stdout is one JSON line, after the stderr log lines.
 field() { tail -n1 <<< "$output" | jq -r "$1"; }
 
-@test "dispatches terraform-deploy.yml on main with product, environment, apply=true and a run_key" {
+@test "dispatches terraform-deploy.yml on main with product, environment, apply=true, a run_key and the source repo" {
   run_as 1 success no_changes
   gate
   [ "$status" -eq 0 ]
@@ -103,6 +103,15 @@ field() { tail -n1 <<< "$output" | jq -r "$1"; }
   grep -qx 'inputs\[action\]=plan' "$args"
   grep -qx 'inputs\[apply\]=true' "$args"
   grep -qx 'inputs\[run_key\]=sign-stream-api-42-1-stg-1' "$args"
+  grep -qx 'inputs\[source_repo\]=signapse/sign-stream-api' "$args"
+}
+
+@test "refuses to dispatch without a valid SOURCE_REPO" {
+  SOURCE_REPO="" gate
+  [ "$status" -ne 0 ]
+  SOURCE_REPO="not a repo" gate
+  [ "$status" -ne 0 ]
+  [ ! -s "$TMP/dispatched" ]
 }
 
 @test "AC3: no_changes passes without applying" {
