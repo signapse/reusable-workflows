@@ -474,6 +474,33 @@ forged_revert_of() {
   echo "$output" | jq -e '.rc == null and .blocked_by.id == "SIG-1"' > /dev/null
 }
 
+@test "an empty commit naming a target another commit already reverted is not a revert" {
+  commit "feat(SIG-1): A"; built "feat(SIG-1): A" 11
+  revert_of "feat(SIG-1): A" 'Revert "feat(SIG-1): A"'; built 'Revert "feat(SIG-1): A"' 12
+  git commit -q --allow-empty -m "chore(SIG-3): nothing" -m "This reverts commit $(sha_of "feat(SIG-1): A")."
+  built "chore(SIG-3): nothing" 13
+  ticket SIG-1 "QA Failed"
+  ticket SIG-3 "QA Failed"
+  run select_rc
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e --arg c "$(sha_of "chore(SIG-3): nothing")" '.blocked_by.id == "SIG-3" and .blocked_by.sha == $c' > /dev/null
+}
+
+@test "a squashed multi-commit revert is checked in ancestry order, not by timestamp" {
+  GIT_COMMITTER_DATE="2026-01-02T00:00:00Z" commit "feat(SIG-1): A"; built "feat(SIG-1): A" 11
+  f="f-$(printf '%s' "feat(SIG-1): A" | cksum | cut -d' ' -f1)"
+  echo more >> "$f"; git add -A
+  GIT_COMMITTER_DATE="2026-01-01T00:00:00Z" git commit -q -m "fix(SIG-1): A2"; built "fix(SIG-1): A2" 12
+  a=$(sha_of "feat(SIG-1): A"); a2=$(sha_of "fix(SIG-1): A2")
+  git revert --no-commit "$a2" "$a" > /dev/null
+  git commit -q -m 'Revert SIG-1 (#9)' -m "This reverts commit $a." -m "This reverts commit $a2."
+  built 'Revert SIG-1 (#9)' 13
+  ticket SIG-1 "QA Failed"
+  run select_rc
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e --arg r "$(sha_of 'Revert SIG-1 (#9)')" '.outcome == "selected" and .rc.sha == $r and .blocked_by == null' > /dev/null
+}
+
 @test "a squash of two reverts (one revert PR for a ticket with two commits) reverts both" {
   commit "feat(SIG-1): A"; built "feat(SIG-1): A" 11
   echo more >> "f-$(printf '%s' "feat(SIG-1): A" | cksum | cut -d' ' -f1)"; git add -A; git commit -q -m "fix(SIG-1): A2"; built "fix(SIG-1): A2" 12
