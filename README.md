@@ -492,6 +492,8 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
+    with:
+      reusable_workflows_ref: main   # must match the @ref above, or the scripts come from main
 ```
 
 ## Conventions

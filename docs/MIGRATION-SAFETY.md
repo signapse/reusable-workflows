@@ -34,10 +34,11 @@ Changes to a table that the **same migration** creates with a plain `CREATE TABL
 |---|---|
 | `DROP FUNCTION` / `PROCEDURE` / `SEQUENCE` | The previous code may call them, but most are trigger functions replaced in the same migration, so the reviewer checks |
 | `DROP INDEX`, `ALTER TABLE ... DROP CONSTRAINT`, `RENAME CONSTRAINT`, `ALTER INDEX ... RENAME` | The previous code's reads and writes still succeed. A dropped index or constraint costs performance or loosens a rule; it doesn't change the shape the code reads. Our migrations often drop and recreate one in the same file (billing 004 and 025). The one real break is an `ON CONFLICT` that targets the dropped unique index or names the constraint, so the warning annotation asks the reviewer to check for that |
+| `ADD [CONSTRAINT ...] CHECK (... IS NOT NULL)` (with or without `NOT VALID`), `ALTER COLUMN ... DROP DEFAULT`, `DROP IDENTITY` | They break the previous code's INSERTs that leave the column out, like `SET NOT NULL`, but only when the column is (or the CHECK makes it) effectively NOT NULL. The check can't see nullability, so the reviewer confirms every deployed writer sets the column. `NOT VALID` only skips existing rows; new INSERTs are still checked |
 
 ### Passes silently
 
-A new table, a nullable column, a column with a `DEFAULT`, `CREATE INDEX`, `ADD CONSTRAINT`, `DROP NOT NULL`, `DROP DEFAULT`, data `UPDATE`s. A PR that changes no migration file prints nothing and passes. If the diff can't be computed or `migration_paths` is an invalid regex, the check fails (exit 2) rather than passing.
+A new table, a nullable column, a column with a `DEFAULT`, `CREATE INDEX`, `ADD CONSTRAINT` (other than a `CHECK` with `IS NOT NULL`), `DROP NOT NULL`, data `UPDATE`s. A PR that changes no migration file prints nothing and passes. If the diff can't be computed or `migration_paths` is an invalid regex, the check fails (exit 2) rather than passing.
 
 ### Not covered
 
@@ -59,8 +60,9 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
-    # with:
-    #   migration_paths: '^internal/adaptors/storage/postgres/migrations/.+\.sql$'
+    with:
+      reusable_workflows_ref: main   # must match the @ref above (e.g. v1 with @v1)
+    #  migration_paths: '^internal/adaptors/storage/postgres/migrations/.+\.sql$'
 ```
 
 Then make **`migration-safety / Migration safety`** a required status check in the repo's branch protection (a manual settings change).
@@ -68,7 +70,7 @@ Then make **`migration-safety / Migration safety`** a required status check in t
 | Input | Default | Meaning |
 |---|---|---|
 | `migration_paths` | `(^\|/)[A-Za-z0-9_-]*migrations?/.+\.sql$` | Extended regex over repo-relative paths |
-| `reusable_workflows_ref` | `main` | Which ref of this repo to load the scripts from |
+| `reusable_workflows_ref` | `main` | Which ref of this repo to load the scripts from. Set it to the same ref as the `uses: ...@<ref>` pin; otherwise a `@v1` caller runs main's rules and override |
 
 ## Override
 
