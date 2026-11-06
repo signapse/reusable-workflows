@@ -6,7 +6,7 @@ SCRIPT="$BATS_TEST_DIRNAME/../scripts/release-candidate-summary.sh"
 
 setup() { export GITHUB_REPOSITORY=o/r; }
 
-SEL='{"last_tag":"1.0.0","head_sha":"abcdef1234","outcome":"selected","already_promoted":false,
+SEL='{"base":"1.0.0","head_sha":"abcdef1234","outcome":"selected","already_promoted":false,
   "rc":{"sha":"1111111aaaa","image_tag":"main-11-1111111aaaa","run_number":11,"run_url":"https://github.com/o/r/actions/runs/11"},
   "tickets":[{"id":"SIG-1","title":"A","url":"https://linear.app/x/SIG-1","state":"On Dev · Ready for QA"}],
   "untracked_commits":[{"sha":"2222222bbbb","subject":"chore: deps"}],
@@ -36,10 +36,15 @@ SEL='{"last_tag":"1.0.0","head_sha":"abcdef1234","outcome":"selected","already_p
   [[ "$output" == *'Triggered by SIG-1 \[x\]\(y\) (delivery d).'* ]]
 }
 
-@test "no Release Candidate" {
+@test "no Release Candidate: the reason follows the walk" {
   sel=$(jq -c '.outcome = "none" | .rc = null | .tickets = [] | .untracked_commits = []' <<< "$SEL")
   run "$SCRIPT" <<< "$sel"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"**No Release Candidate:**"* ]]
+  [[ "$output" == *"**No Release Candidate:** no commits since"* ]]
   [[ "$output" == *"_none_"* ]]
+  run "$SCRIPT" <<< "$(jq -c '.commits = [{"sha":"3333333cccc"}]' <<< "$sel")"
+  [[ "$output" == *"the walk stopped at a blocking ticket"* ]]
+  run "$SCRIPT" <<< "$(jq -c '.commits = [{"sha":"3333333cccc"}] | .blocked_by = null' <<< "$sel")"
+  [[ "$output" == *"no selectable build yet"* ]]
+  [[ "$output" == *"_nothing blocked the walk_"* ]]
 }

@@ -23,14 +23,18 @@ jq -r --arg ticket "${TICKET:-}" --arg trigger "${TRIGGER_ID:-}" --arg repo "$GI
   "",
   (if $ticket != "" then "Triggered by \($ticket | esc) (delivery \($trigger | esc))."
    else "Scheduled run (hourly backstop)." end),
-  "Walked main from `\(.last_tag)` (the release tag prod runs) to `\(.head_sha | short)`.",
+  "Walked main from `\(.base)` to `\(.head_sha | short)`.",
   "",
   (if .outcome == "selected" then
      "**Selected** `\(.rc.image_tag)` ([build #\(.rc.run_number)](\(.rc.run_url | link)))."
    elif .outcome == "already_promoted" then
      "**No-op:** `\(.rc.image_tag)` is already promoted as `\(.rc.release_tag // "")`."
+   elif (.commits | length) == 0 then
+     "**No Release Candidate:** no commits since `\(.base)`."
+   elif .blocked_by != null then
+     "**No Release Candidate:** the walk stopped at a blocking ticket before any selectable build."
    else
-     "**No Release Candidate:** no build since `\(.last_tag)` has all its tickets QA Passed."
+     "**No Release Candidate:** no selectable build yet (no successful build, or the builds still contain reverted code)."
    end),
   "",
   "### Tickets",
@@ -45,7 +49,7 @@ jq -r --arg ticket "${TICKET:-}" --arg trigger "${TRIGGER_ID:-}" --arg repo "$GI
    else (.reverted[] | "- " + commit + " (\(.tickets | join(", ") | esc))") end),
   "",
   "### Blocked by",
-  (if .blocked_by == null then "_nothing: every walked commit is selectable_"
+  (if .blocked_by == null then "_nothing blocked the walk_"
    else "- [\(.blocked_by.id | esc)](\(.blocked_by.url | link)) \(.blocked_by.reason | esc), first merged in "
         + (.blocked_by | commit)
    end)
