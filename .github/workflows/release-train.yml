@@ -6,11 +6,13 @@ name: Release Train (reusable)
 #     picks the Release Candidate, the newest main build whose tickets all
 #     carry QA Passed, walking from the release tag prod runs, and outputs it
 #     (rc_sha, rc_image_tag, rc_tickets, untracked_commits, blocked_by).
-#     Callers trigger it from the event router
-#     (workflow_dispatch with `ticket` + `trigger_id`) plus an hourly schedule.
+#     Callers trigger it from the event router (workflow_dispatch with
+#     `ticket` + `trigger_id`) plus an hourly schedule.
 #     The `promote` job then promotes it to staging (SIG-2764): inside the
-#     deploy window (or with a hotfix ticket) it re-tags the dev image with the
-#     next release version in ECR and git (no rebuild), waits for Flux to run
+#     deploy window (or with a hotfix ticket) it runs the Terraform gate
+#     (SIG-2765: plan and apply the product's stg stack, block on a destroy or
+#     replace, or on a ticket's unapplied Terraform PR), then re-tags the dev
+#     image with the next release version in ECR and git (no rebuild), waits for Flux to run
 #     it on staging, and moves the tickets to On Staging. Outside the window it
 #     reports `deferred` and does nothing; the next hourly run promotes.
 #     Caller template: docs/RELEASE-TRAIN.md.
@@ -162,6 +164,19 @@ on:
         required: false
         type: string
         default: 'main'
+      prodzilla_app_id:
+        description: >-
+          qa-passed: GitHub App id of Prodzilla (ADR 0005). The Terraform gate
+          (SIG-2765) mints a token narrowed to signapse-core-terraform with it
+          to dispatch terraform-deploy.yml before each Promotion.
+        required: false
+        type: string
+        default: ''
+      terraform_timeout_minutes:
+        description: 'qa-passed: limit on the Terraform gate (dispatch, re-dispatches and wait).'
+        required: false
+        type: number
+        default: 45
       on_staging_state:
         description: 'qa-passed: Linear column for tickets running on staging.'
         required: false
@@ -237,10 +252,14 @@ on:
       SENTRY_AUTH_TOKEN:
         required: false
       SLACK_BOT_TOKEN:
-        # Only the ready-for-prod mode posts to Slack.
+        # ready-for-prod: the train alert. qa-passed: the Terraform gate alert
+        # when it stops a Promotion.
         required: false
       READ_APP_PRIVATE_KEY:
         # qa-passed: private key of the read_app_id app.
+        required: false
+      PRODZILLA_APP_PRIVATE_KEY:
+        # qa-passed: private key of the prodzilla_app_id app (Terraform gate).
         required: false
     outputs:
       state:
@@ -303,6 +322,16 @@ on:
       promotion_decision:
         description: 'qa-passed: open | hotfix | deferred | resume (see promotion-plan.sh)'
         value: ${{ jobs.promote.outputs.decision }}
+      terraform_gate:
+        description: >-
+          qa-passed: pass | blocked | failed | unapplied from the staging
+          Terraform gate (empty when it did not run: deferred or resume).
+        value: ${{ jobs.promote.outputs.terraform_gate }}
+      terraform_verdict:
+        description: 'qa-passed: no_changes | safe | blocked | failed from the staging terraform-deploy run.'
+        value: ${{ jobs.promote.outputs.terraform_verdict }}
+      terraform_run_url:
+        value: ${{ jobs.promote.outputs.terraform_run_url }}
 
 # No workflow-level `permissions:` on purpose: each job declares its own. The
 # select job declares none and inherits the caller's grant, because asking for
@@ -440,8 +469,9 @@ jobs:
     needs: select
     if: needs.select.outputs.outcome == 'selected'
     runs-on: ubuntu-latest
-    # Backstop only; staging-deploy-wait.sh enforces staging_deploy_timeout_minutes.
-    timeout-minutes: 90
+    # Backstop only; the Terraform gate enforces terraform_timeout_minutes and
+    # staging-deploy-wait.sh staging_deploy_timeout_minutes.
+    timeout-minutes: 120
     # One Promotion per repo at a time, never cancelled midway (spec
     # "Guardrails", AC5). The name must differ from the caller's workflow-level
     # group (release-train-<repo> in the template), or this job would queue
@@ -459,6 +489,9 @@ jobs:
       release_tag: ${{ steps.tag.outputs.release_tag }}
       image_digest: ${{ steps.tag.outputs.image_digest }}
       promoted: ${{ steps.done.outputs.promoted || 'false' }}
+      terraform_gate: ${{ steps.terraform.outputs.gate }}
+      terraform_verdict: ${{ steps.terraform.outputs.verdict }}
+      terraform_run_url: ${{ steps.terraform.outputs.run_url }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -483,6 +516,8 @@ jobs:
           WATCH_PATHS: ${{ inputs.staging_watch_paths }}
           VERSION_URL: ${{ inputs.staging_version_url }}
           READ_APP_ID: ${{ inputs.read_app_id }}
+          PRODZILLA_APP_ID: ${{ inputs.prodzilla_app_id }}
+          PRODZILLA_KEY_SET: ${{ secrets.PRODZILLA_APP_PRIVATE_KEY != '' }}
         run: |
           set -euo pipefail
           missing=()
@@ -491,6 +526,9 @@ jobs:
           [ -n "$WATCH_PATHS" ] || missing+=(staging_watch_paths)
           [ -n "$VERSION_URL" ] || missing+=(staging_version_url)
           [ -n "$READ_APP_ID" ] || missing+=(read_app_id)
+          [ -n "$PRODZILLA_APP_ID" ] || missing+=(prodzilla_app_id)
+          [ "$PRODZILLA_KEY_SET" = true ] || missing+=("secret PRODZILLA_APP_PRIVATE_KEY")
+          [ -f .signapse/pipeline.yml ] || missing+=(".signapse/pipeline.yml with product:")
           if [ "${#missing[@]}" -gt 0 ]; then
             echo "::error::qa-passed Promotion needs these inputs: ${missing[*]} (see docs/RELEASE-TRAIN.md)"
             exit 1
@@ -528,7 +566,25 @@ jobs:
             esac
           } >> "$GITHUB_STEP_SUMMARY"
 
-      # SIG-2765 adds the staging Terraform gate here, before anything is tagged.
+      # Terraform gate (SIG-2765, ADR 0002): plan and apply the product's stg
+      # stack, and block if a ticket's merged Terraform PR is not applied in
+      # stg, before anything is tagged. On blocked/failed/unapplied it alerts
+      # Slack and fails the job, so nothing below runs. Skipped on resume: the
+      # earlier attempt passed it before tagging, and the image is already out.
+      - name: Terraform gate (stg)
+        id: terraform
+        if: steps.plan.outputs.deferred == 'false' && steps.plan.outputs.decision != 'resume'
+        uses: ./_rw/actions/terraform-gate
+        with:
+          environment: stg
+          tickets: ${{ needs.select.outputs.rc_tickets }}
+          linear_api_key: ${{ secrets.LINEAR_API_KEY }}
+          prodzilla_app_id: ${{ inputs.prodzilla_app_id }}
+          prodzilla_app_private_key: ${{ secrets.PRODZILLA_APP_PRIVATE_KEY }}
+          timeout_minutes: ${{ inputs.terraform_timeout_minutes }}
+          slack_bot_token: ${{ secrets.SLACK_BOT_TOKEN }}
+          slack_channel: ${{ inputs.slack_releases_channel || vars.SLACK_RELEASES_CHANNEL || '#releases' }}
+          context: Promotion of ${{ github.repository }} ${{ needs.select.outputs.rc_image_tag }} to staging
 
       - uses: aws-actions/configure-aws-credentials@v6
         if: steps.plan.outputs.deferred == 'false'
