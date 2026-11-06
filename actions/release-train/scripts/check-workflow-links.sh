@@ -23,9 +23,10 @@ ALLOWLIST="${WORKFLOW_LINKS_ALLOWLIST:-$(dirname "$0")/../workflow-links.allowli
 [ $# -gt 0 ] || set -- .github/workflows actions
 for p in "$@"; do [ -e "$p" ] || die "no such path: $p"; done
 
-links=$(grep -rhoE --exclude-dir=test --exclude-dir=testdata 'https://github\.com/signapse/[A-Za-z0-9._-]+/actions/workflows/[A-Za-z0-9._-]+' "$@" \
+# grep exits 1 for no match (fine) and 2 for a read error (fatal).
+links=$({ grep -rhoE --exclude-dir=test --exclude-dir=testdata 'https://github\.com/signapse/[A-Za-z0-9._-]+/actions/workflows/[A-Za-z0-9._-]+' "$@" || [ $? -eq 1 ]; } \
   | sed -E 's|https://github\.com/signapse/([^/]+)/actions/workflows/(.+)|\1/\2|' \
-  | sort -u || true)
+  | sort -u)
 
 [ -n "$links" ] || { log "no workflow links found"; exit 0; }
 

@@ -30,12 +30,17 @@ jobs:
   # Live check on main only. WORKFLOW_LINKS_TOKEN (Contents: read on every
   # linked repo) must be an environment secret on `workflow-links`, whose
   # deployment branches are restricted to main, so a PR's own copy of this file
-  # cannot read it. Without the secret this falls back to the allow-list.
+  # cannot read it. Without the secret the job fails rather than silently
+  # running the allow-list check the bats job already ran.
   workflow-links-api:
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     environment: workflow-links
     steps:
+      - name: Require token
+        env:
+          GH_TOKEN: ${{ secrets.WORKFLOW_LINKS_TOKEN }}
+        run: '[ -n "$GH_TOKEN" ] || { echo "::error::WORKFLOW_LINKS_TOKEN is not set on the workflow-links environment"; exit 1; }'
       - uses: actions/checkout@v4
       - name: Check workflow links exist (GitHub API)
         env:
