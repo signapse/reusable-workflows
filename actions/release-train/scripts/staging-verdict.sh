@@ -10,7 +10,10 @@
 #
 #   passed  every ticket gets STAGING_PASSED_LABEL, loses STAGING_FAILED_LABEL,
 #           and gets a comment with the run and report links. The column is
-#           not touched (tickets stay On Staging).
+#           not touched (tickets stay On Staging). A ticket already in
+#           QA_FAILED_STATE (an earlier attempt failed, e.g. a re-run that
+#           flips the verdict) keeps staging_passed false: only QA takes it
+#           out of QA Failed.
 #   failed  every ticket gets STAGING_FAILED_LABEL, loses STAGING_PASSED_LABEL,
 #           gets the comment and moves to QA_FAILED_STATE, losing
 #           QA_PASSED_LABEL (qa-failed-tickets.sh: QA approval does not
@@ -29,7 +32,9 @@
 #
 # Every ticket is attempted; any Linear or Slack error fails the script at the
 # end (exit 1), naming the tickets. Stdout: one JSON object
-#   {verdict, staging_passed, reason, tickets, errors}
+#   {verdict, staging_passed, reason, tickets, errors, moves}
+# moves is qa-failed-tickets.sh's {moved, already, kept, failed} on a failure,
+# null on a pass.
 # printed even on failure, so the caller can still read the verdict.
 #
 # Env:
@@ -41,6 +46,7 @@
 #   REPOSITORY, RELEASE_TAG   shown in the comment and alert
 #   STAGING_PASSED_LABEL (Staging Passed), STAGING_FAILED_LABEL (Staging Failed),
 #   QA_FAILED_STATE (QA Failed), QA_PASSED_LABEL (QA Passed), LINEAR_TEAM_KEY
+#   (defaults match release-train.yml's; the workflow does not override them)
 #   SLACK_CHANNEL, SLACK_BOT_TOKEN   required when the verdict is failed
 #   LINEAR_API_KEY     required when there are tickets
 
@@ -65,10 +71,10 @@ REPORT="${REPORT_URL:-}"
 WHAT="${REPOSITORY:-this repo}${RELEASE_TAG:+ \`$RELEASE_TAG\`}"
 
 if [ "$JOB" = success ] && [ "$SUITE" = passed ]; then
-  verdict=passed; add="$PASSED_LABEL"; drop=$(jq -nc --arg a "$FAILED_LABEL" '[$a]')
+  verdict=passed; add="$PASSED_LABEL"; drop="$FAILED_LABEL"
   reason="signapse-e2e passed on staging"
 else
-  verdict=failed; add="$FAILED_LABEL"; drop=$(jq -nc --arg a "$PASSED_LABEL" '[$a]')
+  verdict=failed; add="$FAILED_LABEL"; drop="$PASSED_LABEL"
   case "$JOB" in
     success|failure)
       if [ "$SUITE" = failed ]; then reason="signapse-e2e failed on staging (tests failed or the suite could not run)"
@@ -79,20 +85,23 @@ else
   esac
 fi
 
-tickets=$(jq -nc --arg t "${RC_TICKETS:-}" '$t | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(. != ""))')
+tickets=$(csv_json "${RC_TICKETS:-}")
 errors='[]'
 add_error() { errors=$(jq -nc --argjson e "$errors" --arg m "$1" '$e + [$m]'); log "ERROR: $1"; }
 
 report_line="Report: ${REPORT:-none (the suite produced no report)}"
 if [ "$verdict" = passed ]; then
   comment="**${PASSED_LABEL}**: ${reason} for ${WHAT}. The ticket stays in its column and the pipeline continues to production."
+  # A ticket an earlier attempt sent to QA Failed gets this one instead.
+  comment_qa_failed="**${PASSED_LABEL}**: ${reason} for ${WHAT}. An earlier attempt sent this ticket to **${QA_FAILED}**, so production waits until QA re-passes it."
 else
-  comment="**${FAILED_LABEL}**: ${reason} for ${WHAT}. Every ticket in the Release Candidate moves to **${QA_FAILED}**, because the pipeline cannot tell which ticket caused it. QA triages."
+  comment="**${FAILED_LABEL}**: ${reason} for ${WHAT}. Tickets in the Release Candidate that are not Done move to **${QA_FAILED}**, because the pipeline cannot tell which ticket caused it. QA triages."
 fi
-comment="${comment}
+footer="
 
 Run: ${RUN_URL}
 ${report_line}"
+in_qa_failed='[]'   # passed verdict: tickets already in QA Failed
 
 # "team|name" -> label id, so each team's label is looked up once.
 label_cache='{}'
@@ -124,12 +133,12 @@ mutate() {
   [ "$(jq -r --arg f "$1" '.[$f].success // false' <<< "$data")" = true ] || { echo "$1 did not succeed" >&2; return 1; }
 }
 
-# record_ticket <id>: labels and comment. Returns non-zero on any error. The
-# caller runs it with set -e off, so every step checks its own status.
+# record_ticket <id>: adds the label and comments. Returns non-zero on any
+# error. The caller runs it with set -e off, so every step checks its own status.
 record_ticket() {
-  local id="$1" data uuid team have add_id drop_ids lid
+  local id="$1" data uuid team have add_id body="$comment"
   # shellcheck disable=SC2016 # GraphQL variables, not shell expansion.
-  data=$(linear_gql 'query($id:String!,$run:String!){issue(id:$id){id identifier team{id} labels(first:250){nodes{id name}} comments(first:50,filter:{body:{contains:$run}}){nodes{body}}}}' \
+  data=$(linear_gql 'query($id:String!,$run:String!){issue(id:$id){id identifier team{id} state{name} labels(first:250){nodes{id name}} comments(first:50,filter:{body:{contains:$run}}){nodes{body}}}}' \
     "$(jq -nc --arg id "$id" --arg run "$RUN_URL" '{id:$id, run:$run}')") || return 1
   uuid=$(jq -r '.issue.id // empty' <<< "$data")
   team=$(jq -r '.issue.team.id // empty' <<< "$data")
@@ -145,15 +154,10 @@ record_ticket() {
     log "$id: added '$add'"
   fi
 
-  drop_ids=$(jq -r --argjson n "$drop" '($n | map(ascii_downcase)) as $d
-    | .issue.labels.nodes[] | select((.name | ascii_downcase) as $x | $d | index($x)) | "\(.id)\t\(.name)"' <<< "$data")
-  while IFS=$'\t' read -r lid lname; do
-    [ -n "$lid" ] || continue
-    # shellcheck disable=SC2016 # GraphQL variables, not shell expansion.
-    mutate issueRemoveLabel 'mutation($id:String!,$l:String!){issueRemoveLabel(id:$id,labelId:$l){success}}' \
-      "$(jq -nc --arg id "$uuid" --arg l "$lid" '{id:$id, l:$l}')" || return 1
-    log "$id: removed '$lname'"
-  done <<< "$drop_ids"
+  if [ "$verdict" = passed ] && [ "$(jq -r '.issue.state.name // ""' <<< "$data")" = "$QA_FAILED" ]; then
+    in_qa_failed=$(jq -c --arg id "$id" '. + [$id]' <<< "$in_qa_failed")
+    body="$comment_qa_failed"
+  fi
 
   # Same run, same verdict: already commented (re-run). A re-run with another
   # verdict comments again, because the labels changed.
@@ -163,7 +167,7 @@ record_ticket() {
   else
     # shellcheck disable=SC2016 # GraphQL variables, not shell expansion.
     mutate commentCreate 'mutation($id:String!,$b:String!){commentCreate(input:{issueId:$id,body:$b}){success}}' \
-      "$(jq -nc --arg id "$uuid" --arg b "$comment" '{id:$id, b:$b}')" || return 1
+      "$(jq -nc --arg id "$uuid" --arg b "${body}${footer}" '{id:$id, b:$b}')" || return 1
     log "$id: commented"
   fi
 }
@@ -184,7 +188,15 @@ else
     cat "$errf" >&2
     [ "$rc" -eq 0 ] || add_error "$t: $(grep -v '^\[' "$errf" | tail -n 3 | tr '\n' ' ')"
   done < <(jq -r '.[]' <<< "$tickets")
+  "$(dirname "$0")/ticket-labels-remove.sh" "$drop" "${RC_TICKETS:-}" > /dev/null 2> "$errf" \
+    || add_error "removing '$drop': $(tail -n 1 "$errf")"
+  cat "$errf" >&2
 fi
+if [ "$in_qa_failed" != '[]' ]; then
+  reason="${reason}, but production waits: an earlier attempt left $(jq -r 'join(", ")' <<< "$in_qa_failed") in ${QA_FAILED}"
+fi
+
+moves=null
 
 if [ "$verdict" = failed ]; then
   moves='{"moved":[],"already":[],"kept":[],"failed":[]}'
@@ -226,6 +238,8 @@ if [ "$verdict" = failed ]; then
 fi
 
 ok=$(jq 'length == 0' <<< "$errors")
+# shellcheck disable=SC2016 # jq bindings, not shell expansion.
 jq -nc --arg v "$verdict" --arg r "$reason" --argjson t "$tickets" --argjson e "$errors" --argjson ok "$ok" \
-  '{verdict:$v, staging_passed:($v == "passed" and $ok), reason:$r, tickets:$t, errors:$e}'
+  --argjson q "$in_qa_failed" --argjson m "$moves" \
+  '{verdict:$v, staging_passed:($v == "passed" and $ok and $q == []), reason:$r, tickets:$t, errors:$e, moves:$m}'
 [ "$ok" = true ] || exit 1

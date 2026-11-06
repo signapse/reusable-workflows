@@ -350,7 +350,9 @@ or reports `already_promoted` if the first run already tagged it.
    `failed`) or a skipped job is a failure: an untested build never passes.
    - Pass: every ticket gets `Staging Passed`, loses `Staging Failed`, and
      gets a comment with the run and report links. The column stays On
-     Staging.
+     Staging. A ticket an earlier attempt sent to QA Failed (a re-run that
+     flips the verdict) stays there, and `staging_passed` stays false until
+     QA re-passes it.
    - Fail: every ticket gets `Staging Failed`, loses `Staging Passed`, gets
      the comment and moves to `QA Failed` (ADR 0001: the pipeline cannot
      blame one ticket), losing `QA Passed` (`scripts/qa-failed-tickets.sh`).
@@ -363,7 +365,7 @@ or reports `already_promoted` if the first run already tagged it.
      which stayed where they were, and which Linear could not move. The run
      fails.
 3. **Outputs.** `staging_passed` is `'true'` only on a pass that was recorded
-   on every ticket; `report_url` links the Playwright report. Production
+   on every ticket, with no ticket in QA Failed; `report_url` links the Playwright report. Production
    (SIG-2769) runs only when `staging_passed == 'true'`.
 
 Labels are added and removed one at a time (`issueAddLabel` /
@@ -385,9 +387,9 @@ GitHub resolves every `uses:` workflow when a run is queued, even for jobs
 that will be skipped. Referencing signapse-e2e from `release-train.yml` would
 make every legacy `ready-for-prod` caller depend on it.
 
-Inputs: `tickets` (required), `slack_channel` (required), `release_tag`,
-`staging_passed_label`, `staging_failed_label`, `qa_failed_state`,
-`qa_passed_label`, `linear_team_key`. Secrets:
+Inputs: `tickets` (required), `slack_channel` (required), `release_tag`. The
+label and column names are the defaults `release-train.yml` uses, so the two
+cannot disagree. Secrets:
 `LINEAR_API_KEY`, `SLACK_BOT_TOKEN`, and the four forwarded to the suite
 (`E2E_STAGING_SIGNSTUDIO_ADMIN_API_TOKEN`, `E2E_STAGING_SIGNSTUDIO_USER_EMAIL`,
 `E2E_STAGING_SIGNSTUDIO_USER_PASSWORD`, `E2E_LINEAR_API_KEY`).

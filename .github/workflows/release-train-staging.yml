@@ -10,6 +10,8 @@ name: Release Train staging tests (reusable)
 #   2. the "Staging verdict" job (runs whatever the suite did):
 #      pass  -> every ticket gets Staging Passed (Staging Failed removed) and
 #               a comment with the run and report links; tickets stay On Staging
+#               (staging_passed stays false if one is in QA Failed from an
+#               earlier attempt)
 #      fail, error, cancelled or skipped -> every ticket gets Staging Failed
 #               (Staging Passed and QA Passed removed), a comment, moves to
 #               QA Failed (never out of Done), and a
@@ -68,28 +70,6 @@ on:
         description: 'Repo channel for the failure alert (required: a failure without an alert fails the job).'
         required: true
         type: string
-      staging_passed_label:
-        required: false
-        type: string
-        default: 'Staging Passed'
-      staging_failed_label:
-        required: false
-        type: string
-        default: 'Staging Failed'
-      qa_failed_state:
-        description: 'Linear column every ticket moves to when staging fails.'
-        required: false
-        type: string
-        default: 'QA Failed'
-      qa_passed_label:
-        description: 'Label removed from every ticket that moves to QA Failed (QA approval does not survive a failure).'
-        required: false
-        type: string
-        default: 'QA Passed'
-      linear_team_key:
-        required: false
-        type: string
-        default: 'SIG'
     secrets:
       LINEAR_API_KEY:
         required: true
@@ -106,11 +86,11 @@ on:
         required: false
     outputs:
       staging_passed:
-        description: "'true' only when the suite passed and every ticket was marked Staging Passed. Gate production on it."
+        description: >-
+          'true' only when the suite passed, every ticket was marked Staging
+          Passed, and no ticket is in QA Failed from an earlier attempt. Gate
+          production on it.
         value: ${{ jobs.verdict.outputs.staging_passed || 'false' }}
-      verdict:
-        description: 'passed | failed'
-        value: ${{ jobs.verdict.outputs.verdict || 'failed' }}
       report_url:
         description: 'Playwright report of the staging run (empty if the suite produced none)'
         value: ${{ jobs.staging-tests.outputs.report_url }}
@@ -145,13 +125,14 @@ jobs:
       contents: read
     outputs:
       staging_passed: ${{ steps.verdict.outputs.staging_passed }}
-      verdict: ${{ steps.verdict.outputs.verdict }}
     steps:
       - name: Fetch release-train scripts
         uses: actions/checkout@v4
         with:
           repository: signapse/reusable-workflows
-          ref: ${{ job.workflow_sha }} # scripts from the same commit as this workflow, not mutable main
+          # Scripts from the same commit as this workflow, not mutable main. An
+          # empty workflow_sha would silently check out main, so fail instead.
+          ref: ${{ job.workflow_sha || 'job.workflow_sha-is-empty' }}
           path: _rw
           persist-credentials: false
 
@@ -165,11 +146,6 @@ jobs:
           RC_TICKETS: ${{ inputs.tickets }}
           REPOSITORY: ${{ github.repository }}
           RELEASE_TAG: ${{ inputs.release_tag }}
-          STAGING_PASSED_LABEL: ${{ inputs.staging_passed_label }}
-          STAGING_FAILED_LABEL: ${{ inputs.staging_failed_label }}
-          QA_FAILED_STATE: ${{ inputs.qa_failed_state }}
-          QA_PASSED_LABEL: ${{ inputs.qa_passed_label }}
-          LINEAR_TEAM_KEY: ${{ inputs.linear_team_key }}
           SLACK_CHANNEL: ${{ inputs.slack_channel }}
           LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
@@ -193,9 +169,14 @@ jobs:
             if [ -n "$REPORT_URL" ]; then echo "[Playwright report]($REPORT_URL)"; else echo "No report."; fi
             echo
             if [ "$verdict" = passed ]; then
-              echo "Marked **${STAGING_PASSED_LABEL}**: ${RC_TICKETS:-no tickets}. They stay in their column."
+              echo "Marked **Staging Passed**: ${RC_TICKETS:-no tickets}. They stay in their column."
             else
-              echo "Marked **${STAGING_FAILED_LABEL}** and moved to **${QA_FAILED_STATE}**: ${RC_TICKETS:-no tickets}. Slack: ${SLACK_CHANNEL}."
+              echo "Marked **Staging Failed**: ${RC_TICKETS:-no tickets}. Slack: ${SLACK_CHANNEL}."
+              jq -r '.moves // empty
+                | (if (.moved + .already | length) > 0 then "- In QA Failed: \(.moved + .already | join(", "))" else empty end),
+                  (if (.kept | length) > 0 then "- Left where they are: \(.kept | map("\(.id) (\(.state))") | join(", "))" else empty end),
+                  (if (.failed | length) > 0 then "- NOT moved to QA Failed (Linear failed): \(.failed | join(", "))" else empty end)' \
+                <<< "$res" 2>/dev/null || true
             fi
             errs=$(jq -r '.errors[]? | "- " + .' <<< "$res" 2>/dev/null || true)
             if [ -n "$errs" ]; then echo; echo "**Errors** (production will not run):"; echo "$errs"; fi
@@ -210,5 +191,5 @@ jobs:
       - name: Fail on a staging failure
         if: steps.verdict.outputs.verdict != 'passed'
         run: |
-          echo "::error::Staging tests did not pass; tickets are in QA Failed. Production will not run."
+          echo "::error::Staging tests did not pass; the summary says where each ticket is. Production will not run."
           exit 1
