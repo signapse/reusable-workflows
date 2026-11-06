@@ -5,6 +5,7 @@
 #   $TMP/linear.json   id -> issue node (state, history)
 #   $TMP/prs.json      commit subject -> [{title, head}] merged PRs
 #   $TMP/open-prs      branch names that have an open PR
+#   $TMP/merged-prs    branch names whose PR was merged
 #   $TMP/pr-create-N   args of the Nth `gh pr create` (one per line)
 #   $TMP/comments      Linear commentCreate variables, one JSON per line
 #   $TMP/slack         Slack chat.postMessage bodies, one JSON per line
@@ -21,6 +22,7 @@ setup() {
   echo '{}' > "$TMP/linear.json"
   echo '{}' > "$TMP/prs.json"
   : > "$TMP/open-prs"
+  : > "$TMP/merged-prs"
   : > "$TMP/comments"
   : > "$TMP/slack"
 
@@ -74,9 +76,9 @@ case "$1 $2" in
       "$TMP/prs.json" | jq -c "$filter"
     ;;
   "pr list")
-    head=""; prev=""
-    for a in "$@"; do [ "$prev" = --head ] && head="$a"; prev="$a"; done
-    if grep -qxF "$head" "$TMP/open-prs"; then
+    head=""; st=""; prev=""
+    for a in "$@"; do [ "$prev" = --head ] && head="$a"; [ "$prev" = --state ] && st="$a"; prev="$a"; done
+    if grep -qxF "$head" "$TMP/$st-prs"; then
       echo "https://github.com/o/r/pull/99"
     else
       echo ""
@@ -114,7 +116,7 @@ EOS
 
 teardown() { rm -rf "$TMP"; }
 
-run_revert() { "$SCRIPT" "$@" 2> "$TMP/stderr" < /dev/null; }
+run_revert() { "$SCRIPT" "${@:-1.0.0}" 2> "$TMP/stderr" < /dev/null; }
 # change <file> <content> <message>: commit a file change on main.
 change() { printf '%s\n' "$2" > "$1"; git add "$1"; git commit -q -m "$3"; }
 sha_of() { git log --format='%H %s' | awk -v s="$1" '{h=$1; $1=""; if (substr($0,2)==s) {print h; exit}}'; }
@@ -332,6 +334,25 @@ EOF
   [ "$(wc -l < "$TMP/comments")" -eq 1 ]
 }
 
+@test "merged revert PR with its branch kept -> merged, no branch_exists warning" {
+  change f "one-a" "feat(SIG-1): A"
+  ticket SIG-1 "QA Failed" 25
+  run run_revert
+  [ "$(created)" -eq 1 ]
+  echo "prodzilla/revert-SIG-1" > "$TMP/merged-prs"
+  run run_revert
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.tickets[0] | .action == "merged" and .pr_url == "https://github.com/o/r/pull/99"' > /dev/null
+  ! grep -q WARNING "$TMP/stderr"
+  [ "$(created)" -eq 1 ]
+}
+
+@test "no base -> usage error" {
+  run "$SCRIPT"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"usage: qa-failed-revert.sh <base>"* ]]
+}
+
 @test "commits already reverted by a person are skipped and noted" {
   change f "one-a" "feat(SIG-1): A"
   a=$(sha_of "feat(SIG-1): A")
@@ -386,7 +407,7 @@ EOF
   ticket SIG-2 "On Dev · Ready for QA"
   run run_revert 1.0.0 HEAD
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.last_tag == "1.0.0" and .tickets[0].id == "SIG-1" and .tickets[0].action == "opened"' > /dev/null
+  echo "$output" | jq -e '.base == "1.0.0" and .tickets[0].id == "SIG-1" and .tickets[0].action == "opened"' > /dev/null
 }
 
 @test "every commit already reverted -> no PR, reported" {
@@ -429,14 +450,14 @@ EOF
   grep -q "also carry SIG-3" "$TMP/pr-create-1"
 }
 
-@test "commits before the last Promotion tag are not reverted" {
+@test "commits before the walk base are not reverted" {
   change f "one-a" "feat(SIG-1): A"
   git tag 1.1.0
   change g "g1" "feat(SIG-1): A2"
   ticket SIG-1 "QA Failed" 25
-  run run_revert
+  run run_revert 1.1.0
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.last_tag == "1.1.0" and ([.tickets[0].reverted[].subject] == ["feat(SIG-1): A2"])' > /dev/null
+  echo "$output" | jq -e '.base == "1.1.0" and ([.tickets[0].reverted[].subject] == ["feat(SIG-1): A2"])' > /dev/null
 }
 
 @test "Linear down -> the run fails and opens nothing" {
