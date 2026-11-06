@@ -12,7 +12,10 @@ the "up" direction of migration files and reports:
   warn   - usually safe, but worth a reviewer's look: DROP INDEX,
            DROP CONSTRAINT, RENAME of an index or constraint (the previous
            code's reads and writes still succeed; the risk is an
-           `ON CONFLICT` that names it); DROP FUNCTION/PROCEDURE/SEQUENCE.
+           `ON CONFLICT` that names it); DROP FUNCTION/PROCEDURE/SEQUENCE;
+           ADD ... CHECK (... IS NOT NULL), DROP DEFAULT, DROP IDENTITY
+           (break the previous code's INSERTs when the column is, or becomes,
+           effectively NOT NULL, which this check cannot see).
 
 Usage: sql_safety.py [--format plain|github] FILE...
 Exit:  0 no blocking finding, 1 at least one, 2 usage/IO error.
@@ -221,6 +224,13 @@ def check_alter_table(table, actions):
                 and not re.search(r"\bDEFAULT\s+(?!NULL\b)|\b(GENERATED|(?:SMALL|BIG)?SERIAL)\b", top)):
             yield ("block", "ADD COLUMN NOT NULL", f"{table}.{m.group(1)} (no non-null DEFAULT)", off)
             continue
+        m = re.match(rf"ALTER\s+(?:COLUMN\s+)?({IDENT})\s+DROP\s+(DEFAULT|IDENTITY)\b", a, re.I)
+        if m:
+            yield ("warn", f"DROP {m.group(2).upper()}", f"{table}.{m.group(1)}", off)
+            continue
+        if re.match(r"ADD\b", a, re.I) and re.search(r"\bCHECK\s*\(.*\bIS\s+NOT\s+NULL\b", a, re.I):
+            yield ("warn", "CHECK NOT NULL", table, off)
+            continue
         if re.match(r"SET\s+SCHEMA\b", a, re.I):
             yield ("block", "SET SCHEMA", table, off)
 
@@ -244,6 +254,9 @@ REASONS = {
     "DROP CONSTRAINT": "safe for reads and writes, but breaks an ON CONFLICT ON CONSTRAINT that names it",
     "RENAME CONSTRAINT": "breaks an ON CONFLICT ON CONSTRAINT that names it",
     "RENAME INDEX": "breaks an ON CONFLICT ON CONSTRAINT that names it",
+    "CHECK NOT NULL": "rejects the previous code's INSERTs that leave the column out, like SET NOT NULL (NOT VALID only skips existing rows)",
+    "DROP DEFAULT": "the previous code's INSERTs that leave this column out fail if it is NOT NULL",
+    "DROP IDENTITY": "the previous code's INSERTs that leave this column out fail if it is NOT NULL",
 }
 
 

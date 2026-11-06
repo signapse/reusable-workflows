@@ -150,10 +150,28 @@ sql() { printf '%s\n' "$1" >"$BATS_TEST_TMPDIR/m.up.sql"; run python3 "$SCRIPT" 
   [[ "$output" == *"ADD COLUMN NOT NULL tenants.tenant_id"* ]]
 }
 
-@test "ADD COLUMN NOT NULL DEFAULT NULL fails; CHECK (x IS NOT NULL) passes" {
+@test "ADD COLUMN NOT NULL DEFAULT NULL fails; CHECK (x IS NOT NULL) warns, not blocks" {
   sql 'ALTER TABLE accounts ADD COLUMN region text NOT NULL DEFAULT NULL;'
   [ "$status" -eq 1 ]
   sql 'ALTER TABLE accounts ADD COLUMN region text CHECK (region IS NOT NULL);'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"warn: CHECK NOT NULL accounts"* ]]
+}
+
+@test "equivalents of SET NOT NULL warn: ADD CONSTRAINT CHECK (NOT VALID too), DROP DEFAULT, DROP IDENTITY" {
+  sql 'ALTER TABLE users ADD CONSTRAINT email_nn CHECK (email IS NOT NULL);'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"warn: CHECK NOT NULL users"* ]]
+  sql 'ALTER TABLE users ADD CONSTRAINT email_nn CHECK (email IS NOT NULL) NOT VALID;'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"warn: CHECK NOT NULL users"* ]]
+  sql 'ALTER TABLE users ALTER COLUMN created_at DROP DEFAULT;'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"warn: DROP DEFAULT users.created_at"* ]]
+  sql 'ALTER TABLE users ALTER COLUMN id DROP IDENTITY IF EXISTS;'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"warn: DROP IDENTITY users.id"* ]]
+  sql 'ALTER TABLE users ADD CONSTRAINT age_pos CHECK (age > 0), ALTER COLUMN bio DROP NOT NULL;'
   [ "$status" -eq 0 ]
   [ -z "$output" ]
 }

@@ -17,6 +17,8 @@ name: Migration Safety (reusable)
 #       permissions:
 #         contents: read
 #         pull-requests: read
+#       with:
+#         reusable_workflows_ref: main   # same ref as the @ pin above
 
 on:
   workflow_call:
@@ -32,7 +34,11 @@ on:
         type: string
         default: '(^|/)[A-Za-z0-9_-]*migrations?/.+\.sql$'
       reusable_workflows_ref:
-        description: 'Ref of signapse/reusable-workflows to load the check scripts from.'
+        description: >-
+          Ref of signapse/reusable-workflows to load the check scripts from.
+          Must match the ref in the caller's `uses: ...migration-safety.yml@<ref>`
+          (e.g. `v1`); a workflow call cannot see its own ref, so the default
+          `main` would otherwise run main's rules under a pinned workflow.
         required: false
         type: string
         default: 'main'
