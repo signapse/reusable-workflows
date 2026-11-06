@@ -6,8 +6,8 @@ name: Release Train (reusable)
 #     picks the Release Candidate, the newest main build whose tickets all
 #     carry QA Passed, walking from the release tag prod runs, and outputs it
 #     (rc_sha, rc_image_tag, rc_tickets, untracked_commits, blocked_by).
-#     Callers trigger it from the event router
-#     (workflow_dispatch with `ticket` + `trigger_id`) plus an hourly schedule.
+#     Callers trigger it from the event router (workflow_dispatch with
+#     `ticket` + `trigger_id`) plus an hourly schedule.
 #     The `promote` job then promotes it to staging (SIG-2764): inside the
 #     deploy window (or with a hotfix ticket) it runs the Terraform gate
 #     (SIG-2765: plan and apply the product's stg stack, block on a destroy or
