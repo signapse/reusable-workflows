@@ -477,6 +477,47 @@ jobs:
 | `disable-gitleaks` | boolean | `false` | Disable Gitleaks |
 | `extra-super-linter-env` | string | `''` | Extra Super-Linter env vars |
 
+### 7. Main Push · dev smoke and QA hand-off (`main-push-dev.yml`)
+
+Opt-in companion to `main-push.yml`, called as a second job in the same caller run. It waits for dev to run the new `main-<n>-<sha>` tag, runs signapse-e2e `@smoke` on dev, and moves the build's tickets to `On Dev · Ready for QA` once every PR linked to each ticket, in any repo, is merged and passed its own dev smoke. On build, deploy or smoke failure it leaves tickets alone and comments on the merged PRs (plus Slack when `slack_channel` is set). The full caller example, secrets and the known gap (a ticket whose other linked PR is in a repo without this workflow can stay in In Review; re-run `tickets-to-dev-qa`) are in the header of [`main-push-dev.yml`](.github/workflows/main-push-dev.yml).
+
+```yaml
+jobs:
+  build:
+    uses: signapse/reusable-workflows/.github/workflows/main-push.yml@main
+    # ...
+  dev:
+    needs: build
+    if: ${{ !cancelled() }}
+    uses: signapse/reusable-workflows/.github/workflows/main-push-dev.yml@main
+    permissions:
+      contents: read
+      pull-requests: write
+    with:
+      reusable_workflows_ref: main   # same ref as the @ pin above
+      build_result: ${{ needs.build.result }}
+      dev_watch_paths: workloads/dev/signstream-api/helmrelease-patch.yaml
+      read_app_id: ${{ vars.PIPELINE_READ_APP_ID }}
+    secrets:
+      LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+      READ_APP_PRIVATE_KEY: ${{ secrets.PIPELINE_READ_APP_PRIVATE_KEY }}
+```
+
+| Input | Type | Default | Description |
+|-------|------|---------|-------------|
+| `build_result` | string | required | `needs.<build job>.result`; anything but `success` is a build failure |
+| `dev_watch_paths` | string | required | Files in signapse-core-k8s that Flux rewrites with this repo's dev tags |
+| `read_app_id` | string | required | GitHub App id of the read-only pipeline app (ADR 0005) |
+| `reusable_workflows_ref` | string | `main` | Ref to load the scripts from; match the `uses:` pin |
+| `dev_version_url` / `dev_version_jq` | string | `''` / `.version` | Optional dev endpoint reporting the running build |
+| `dev_settle_seconds` | number | `420` | Fixed wait after the Flux commit when `dev_version_url` is unset |
+| `dev_deploy_timeout_minutes` | number | `20` | Time limit for dev to run the new tag |
+| `smoke_grep` | string | `@smoke` | Playwright grep for the dev run |
+| `linear_team_key` | string | `SIG` | Linear team key |
+| `ticket_from_states` | string | `In Review,PR in Review` | States a ticket may move from |
+| `ticket_target_state` | string | `On Dev · Ready for QA` | State tickets move to |
+| `slack_channel` | string | `''` | Optional Slack channel for failure notices |
+
 ## Conventions
 
 ### Workflow Naming
