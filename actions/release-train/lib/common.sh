@@ -7,3 +7,5 @@ IFS=$'\n\t'
 log()  { printf '[%s] %s\n' "$(date -u +%FT%TZ)" "$*" >&2; }
 die()  { log "ERROR: $*"; exit 1; }
 need() { command -v "$1" > /dev/null 2>&1 || die "missing dependency: $1"; }
+# csv_json <a, b,,c>: ["a","b","c"] (items trimmed, empty ones dropped).
+csv_json() { jq -nc --arg t "$1" '$t | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(. != ""))'; }

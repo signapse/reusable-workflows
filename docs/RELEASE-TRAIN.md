@@ -132,7 +132,8 @@ The `promote` job runs after `select` when `outcome` is `selected`:
    verdict belongs to one tag; without this, a ticket that passed staging in
    an earlier tag would still look passed if this tag's staging tests never
    finished, and prod's resume mode would deploy an untested build. Runs
-   before the tag, so a Linear failure here leaves nothing promoted.
+   before the tag, so a Linear failure here leaves nothing promoted. Skipped
+   on `resume`: the tag already exists, so any verdict is this tag's.
 4. **Tag** (`promotion-tag.sh`): for each repository in `services`,
    `ecr-retag.sh` re-puts the Release Candidate's manifest
    (`main-<n>-<sha>`) under the release tag. No rebuild: the bytes are the
@@ -257,7 +258,7 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: read
+  contents: write        # git tag for the Promotion
   pull-requests: read    # PR title and branch per commit
   actions: read          # main-push runs: which commits are builds
   id-token: write        # ECR role for the re-tag
@@ -301,8 +302,7 @@ Optional inputs: `qa_passed_label`, `qa_failed_state`, `build_workflow`,
 `staging_passed_label`, `staging_failed_label`,
 `staging_deploy_timeout_minutes`, `gitops_repo`, `gitops_ref`,
 `selection_base`, `on_staging_state`, `hotfix_label`. The Linear defaults
-match the board after SIG-2747. `deploy_window_now` fakes the clock for the
-window check and is for testing only.
+match the board after SIG-2747.
 
 ### Note for stages that dispatch other workflows (SIG-2765)
 

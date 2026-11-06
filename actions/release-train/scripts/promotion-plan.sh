@@ -31,7 +31,7 @@ need jq
 HERE="$(dirname "$0")"
 RC_SHA="$1"
 
-tickets=$(jq -nc --arg t "$2" '$t | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(. != ""))')
+tickets=$(csv_json "$2")
 labels='[]'
 if [ "$tickets" != '[]' ]; then
   labels=$(printf '%s' "$tickets" | "$HERE/ticket-labels.sh")

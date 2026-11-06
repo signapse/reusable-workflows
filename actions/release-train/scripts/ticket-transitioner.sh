@@ -28,7 +28,7 @@ need jq
 TEAM_KEY="${LINEAR_TEAM_KEY:-SIG}"
 QA_FAILED="${QA_FAILED_STATE:-QA Failed}"
 DONE="${DONE_STATE:-Done}"
-allowed=$(jq -nc --arg a "${ALLOWED_FROM:-}" '$a | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(. != ""))')
+allowed=$(csv_json "${ALLOWED_FROM:-}")
 
 tickets=$(jq -r '.[]?')
 
