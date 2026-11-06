@@ -190,14 +190,6 @@ on:
         required: false
         type: string
         default: 'hotfix'
-      deploy_window_now:
-        description: >-
-          qa-passed, TESTING ONLY: pretend the time is this (UTC
-          YYYY-MM-DDTHH:MM:SSZ or epoch seconds) for the deploy window check.
-          Leave empty in real callers.
-        required: false
-        type: string
-        default: ''
       linear_team_key:
         description: 'Linear team key, alphanumeric (e.g. SIG)'
         required: false
@@ -478,7 +470,9 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: signapse/reusable-workflows
-          ref: ${{ job.workflow_sha }} # scripts from the same commit as this workflow, not mutable main
+          # Scripts from the same commit as this workflow, not mutable main. An
+          # empty workflow_sha would silently check out main, so fail instead.
+          ref: ${{ job.workflow_sha || 'job.workflow_sha-is-empty' }}
           path: _rw
           persist-credentials: false
 
@@ -511,7 +505,6 @@ jobs:
           LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
           HOTFIX_LABEL: ${{ inputs.hotfix_label }}
           RELEASE_TAG_PATTERN: ${{ inputs.release_tag_pattern }}
-          NOW: ${{ inputs.deploy_window_now }}
         run: |
           set -euo pipefail
           plan=$("$GITHUB_WORKSPACE/_rw/actions/release-train/scripts/promotion-plan.sh" "$RC_SHA" "$RC_TICKETS")
@@ -547,9 +540,11 @@ jobs:
       # Passed / Staging Failed before the new tag exists, so an earlier
       # tag's pass can never vouch for this one if its staging tests never
       # finish (prod resume checks these labels). Before the tag: a failure
-      # here leaves nothing promoted.
+      # here leaves nothing promoted. Not on resume: the commit already
+      # carries the tag, so its labels were cleared before it, and a verdict
+      # staging set since then belongs to this tag.
       - name: Clear earlier staging verdicts
-        if: steps.plan.outputs.deferred == 'false'
+        if: steps.plan.outputs.deferred == 'false' && steps.plan.outputs.decision != 'resume'
         env:
           LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
           RC_TICKETS: ${{ needs.select.outputs.rc_tickets }}
@@ -633,8 +628,15 @@ jobs:
           QA_FAILED_STATE: ${{ inputs.qa_failed_state }}
         run: |
           set -euo pipefail
-          "$GITHUB_WORKSPACE/_rw/actions/release-train/scripts/promotion-tickets.sh" "$STATE" "$RC_TICKETS"
-          echo "Moved to **${STATE}**: ${RC_TICKETS:-no tickets (untracked commits only)}" >> "$GITHUB_STEP_SUMMARY"
+          status=0
+          res=$("$GITHUB_WORKSPACE/_rw/actions/release-train/scripts/promotion-tickets.sh" "$STATE" "$RC_TICKETS") || status=$?
+          {
+            echo
+            echo "Tickets to **${STATE}**:"
+            jq -r 'if length == 0 then "- none (untracked commits only)" else .[]
+              | "- \(.id): \(if .moved then "moved from \(.from)" elif .success then "not moved (\(.reason))" else "failed (\(.error // "unknown"))" end)" end' <<< "${res:-[]}"
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
 
       - name: Promoted
         id: done

@@ -55,7 +55,7 @@ SEMVER='^v?([0-9]+)\.([0-9]+)\.([0-9]+)$'
 [[ "$TAG" =~ $SEMVER ]] || die "TAG must be semver, got '$TAG'"
 WANT="${TAG#v}"
 
-paths=$(printf '%s\n' "${WATCH_PATHS:-}" | tr ',' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | grep -v '^$' || true)
+paths=$(csv_json "${WATCH_PATHS:-}" | jq -r '.[]')
 [ -n "$paths" ] || die "WATCH_PATHS is empty: list the GitOps files Flux updates for this repo's staging services"
 
 # at_least <version>: true when <version> (v optional) is semver >= WANT.
@@ -118,7 +118,7 @@ done
 
 # Phase 2: the cluster has applied it, on every service with a version URL.
 need curl
-pending=$(printf '%s\n' "$VERSION_URL" | tr ',' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | grep -v '^$' || true)
+pending=$(csv_json "$VERSION_URL" | jq -r '.[]')
 while :; do
   still=""
   while IFS= read -r u; do

@@ -21,9 +21,8 @@ source "$(dirname "$0")/../lib/linear.sh"
 
 [ $# -eq 2 ] || die "usage: ticket-labels-remove.sh <labels> <tickets>"
 need jq
-split() { jq -nc --arg t "$1" '$t | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(. != ""))'; }
-names=$(split "$1")
-ids=$(split "$2")
+names=$(csv_json "$1")
+ids=$(csv_json "$2")
 if [ "$ids" = '[]' ] || [ "$names" = '[]' ]; then
   echo '[]'
   exit 0
