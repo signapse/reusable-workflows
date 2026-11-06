@@ -58,7 +58,7 @@ TF_REGION="${TF_REGION:-eu}"
 ORCHESTRATION_WORKFLOW="${ORCHESTRATION_WORKFLOW:-orchestration.yml}"
 case "$ENVIRONMENT" in dev | stg | prod) ;; *) die "ENVIRONMENT must be dev, stg or prod (got '$ENVIRONMENT')" ;; esac
 
-tickets=$(jq -r --arg t "$1" -n '$t | split(",")[] | gsub("^\\s+|\\s+$"; "") | select(. != "")')
+tickets=$(csv_json "$1" | jq -r '.[]')
 
 # ERE-escape the repo for the URL match (only . is special in owner/name).
 repo_re=$(printf '%s' "$TF_REPO" | sed 's/\./\\./g')
