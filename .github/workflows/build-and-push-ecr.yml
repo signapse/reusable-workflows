@@ -60,6 +60,20 @@ on:
         type: boolean
         default: false
 
+      # Attestations (buildx path only). '' keeps build-push-action's default,
+      # which attaches a provenance attestation and pushes an OCI image index.
+      provenance:
+        description: "Buildx provenance attestation ('' = action default). Set 'false' for Lambda container images"
+        required: false
+        type: string
+        default: ''
+
+      sbom:
+        description: "Buildx SBOM attestation ('' = action default). Set 'false' for Lambda container images"
+        required: false
+        type: string
+        default: ''
+
       # Security Scanning
       enable_trivy_scan:
         description: 'Run Trivy vulnerability scan on the built image'
@@ -227,6 +241,8 @@ jobs:
           secrets: |
             ${{ (steps.deps.outputs.token || secrets.private_modules_token) && format('gh_token={0}', steps.deps.outputs.token || secrets.private_modules_token) || '' }}
             ${{ (steps.deps.outputs.token || secrets.private_modules_token) && format('github_token={0}', steps.deps.outputs.token || secrets.private_modules_token) || '' }}
+          provenance: ${{ inputs.provenance }}
+          sbom: ${{ inputs.sbom }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
