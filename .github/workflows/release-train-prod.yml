@@ -149,11 +149,6 @@ on:
         required: false
         type: string
         default: 'Rolling Out,Done'
-      deploy_window_now:
-        description: 'TESTING ONLY: pretend the time is this (UTC YYYY-MM-DDTHH:MM:SSZ or epoch seconds). Leave empty.'
-        required: false
-        type: string
-        default: ''
       gitops_repo:
         required: false
         type: string
@@ -243,9 +238,6 @@ on:
       decision:
         description: 'deploy | hotfix | deferred | already_deployed | nothing | refused'
         value: ${{ jobs.deploy.outputs.decision }}
-      deferred:
-        description: "'true' when outside the deploy window (nothing done; a later run resumes)"
-        value: ${{ jobs.deploy.outputs.deferred }}
       deployed:
         description: "'true' once prod runs release_tag on every service"
         value: ${{ jobs.deploy.outputs.deployed || 'false' }}
@@ -258,18 +250,12 @@ on:
       tickets:
         description: 'Comma-separated tickets in the Deployment'
         value: ${{ jobs.deploy.outputs.tickets }}
-      services:
-        description: 'JSON array of every deploy-prod service of this repo (prod_services)'
-        value: ${{ jobs.deploy.outputs.services }}
       dispatched_services:
         description: 'JSON array of the services this run dispatched (not already on the tag)'
         value: ${{ jobs.deploy.outputs.to_deploy }}
       previous_tags:
         description: 'JSON object service -> tag prod ran before release_tag (for SIG-2771''s rollback)'
         value: ${{ jobs.deploy.outputs.previous_tags }}
-      previous_tag:
-        description: 'The previous tag when every service had the same one, else empty'
-        value: ${{ jobs.deploy.outputs.previous_tag }}
       run_key:
         description: 'Prefix of the deploy-prod run keys; service S was dispatched with <run_key>-<S>'
         value: ${{ jobs.deploy.outputs.run_key }}
@@ -316,16 +302,13 @@ jobs:
       contents: read
     outputs:
       decision: ${{ steps.plan.outputs.decision }}
-      deferred: ${{ steps.plan.outputs.deferred }}
       release_tag: ${{ steps.plan.outputs.release_tag }}
       version: ${{ steps.plan.outputs.version }}
       sha: ${{ steps.plan.outputs.sha }}
       tickets: ${{ steps.plan.outputs.tickets }}
       ticket_details: ${{ steps.plan.outputs.ticket_details }}
-      services: ${{ inputs.prod_services }}
       to_deploy: ${{ steps.plan.outputs.to_deploy }}
       previous_tags: ${{ steps.plan.outputs.previous_tags }}
-      previous_tag: ${{ steps.plan.outputs.previous_tag }}
       run_key: ${{ steps.dispatch.outputs.run_key }}
       deploy_runs: ${{ steps.dispatch.outputs.runs || '[]' }}
       terraform_gate: ${{ steps.terraform.outputs.gate }}
@@ -344,7 +327,9 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: signapse/reusable-workflows
-          ref: ${{ job.workflow_sha }} # scripts from the same commit as this workflow, not mutable main
+          # Scripts from the same commit as this workflow, not mutable main. An
+          # empty workflow_sha would silently check out main, so fail instead.
+          ref: ${{ job.workflow_sha || 'job.workflow_sha-is-empty' }}
           path: _rw
           persist-credentials: false
 
@@ -393,7 +378,6 @@ jobs:
           STAGING_PASSED_LABEL: ${{ inputs.staging_passed_label }}
           STAGING_FAILED_LABEL: ${{ inputs.staging_failed_label }}
           QA_FAILED_STATE: ${{ inputs.qa_failed_state }}
-          NOW: ${{ inputs.deploy_window_now }}
           LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
           LINEAR_TEAM_KEY: ${{ inputs.linear_team_key }}
           GITOPS_REPO: ${{ inputs.gitops_repo }}
@@ -407,7 +391,7 @@ jobs:
           eof="EOF_$(openssl rand -hex 8)"
           {
             echo "decision=$d"
-            echo "deferred=$([ "$d" = deferred ] && echo true || echo false)"
+            echo "reason=$(jq -r .reason <<< "$plan" | tr '\n' ' ')"
             echo "go=$go"
             echo "dispatch=$dispatch"
             echo "release_tag=$(jq -r .release_tag <<< "$plan")"
@@ -416,7 +400,6 @@ jobs:
             echo "tickets=$(jq -r '.tickets | join(",")' <<< "$plan")"
             echo "to_deploy=$(jq -c .to_deploy <<< "$plan")"
             echo "previous_tags=$(jq -c .previous_tags <<< "$plan")"
-            echo "previous_tag=$(jq -r .previous_tag <<< "$plan")"
             echo "ticket_details<<$eof"
             jq -c .ticket_details <<< "$plan"
             echo "$eof"
@@ -597,13 +580,15 @@ jobs:
             *) echo "${reason}." >> "$GITHUB_STEP_SUMMARY" ;;
           esac
 
-      # The Terraform gate alerts on its own failures; this covers the flag
-      # guard, the deploy-prod runs and the final check.
+      # The Terraform gate alerts on its own failures; this covers a refused
+      # plan, the flag guard, the deploy-prod runs and the final check.
       - name: Alert Slack
         if: >-
-          failure() && steps.plan.outputs.go == 'true' &&
-          (steps.terraform.outcome == 'skipped' || steps.terraform.outputs.gate == 'pass')
+          failure() && (steps.plan.outputs.decision == 'refused' || (steps.plan.outputs.go == 'true' &&
+          (steps.terraform.outcome == 'skipped' || steps.terraform.outputs.gate == 'pass')))
         env:
+          DECISION: ${{ steps.plan.outputs.decision }}
+          REASON: ${{ steps.plan.outputs.reason }}
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_CHANNEL: ${{ inputs.slack_channel || inputs.slack_releases_channel || vars.SLACK_RELEASES_CHANNEL || '#releases' }}
           TAG: ${{ steps.plan.outputs.release_tag }}
@@ -617,6 +602,10 @@ jobs:
           # shellcheck source=/dev/null
           source "$GITHUB_WORKSPACE/_rw/actions/release-train/lib/slack.sh"
           text=":rotating_light: Dark Deployment of \`${GITHUB_REPOSITORY}\` \`${TAG}\` to prod failed. <${RUN_URL}|Run>"
+          if [ "$DECISION" = refused ]; then
+            # Later resume runs report `nothing` quietly for the same reason.
+            text=":no_entry: Dark Deployment of \`${GITHUB_REPOSITORY}\` \`${TAG}\` to prod refused: ${REASON}. Prod is unchanged; nothing reaches prod until this is resolved. <${RUN_URL}|Run>"
+          fi
           runs_text=""
           if [ -n "${RUNS:-}" ] && [ "$RUNS" != '[]' ]; then
             runs_text="; deploy-prod: $(jq -r 'map("<\(.run_url)|\(.service)>: \(.conclusion | if . == "" then "not finished" else . end)") | join(", ")' <<< "$RUNS")"
@@ -713,11 +702,14 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: signapse/reusable-workflows
-          ref: ${{ job.workflow_sha }} # scripts from the same commit as this workflow, not mutable main
+          # Scripts from the same commit as this workflow, not mutable main. An
+          # empty workflow_sha would silently check out main, so fail instead.
+          ref: ${{ job.workflow_sha || 'job.workflow_sha-is-empty' }}
           path: _rw
           persist-credentials: false
 
       - name: Feature flags still QA Cohort only (AC5)
+        id: guard
         if: steps.smoke.outputs.passed == 'true'
         env:
           DETAILS: ${{ needs.deploy.outputs.ticket_details }}
@@ -736,6 +728,7 @@ jobs:
           fi
 
       - name: Move tickets to ${{ inputs.on_prod_state }} (AC4)
+        id: move
         if: steps.smoke.outputs.passed == 'true'
         env:
           LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
@@ -746,16 +739,26 @@ jobs:
           QA_FAILED_STATE: ${{ inputs.qa_failed_state }}
         run: |
           set -euo pipefail
-          "$GITHUB_WORKSPACE/_rw/actions/release-train/scripts/promotion-tickets.sh" "$STATE" "$TICKETS"
-          echo "Moved to **${STATE}**: ${TICKETS:-no tickets (untracked commits only)}" >> "$GITHUB_STEP_SUMMARY"
+          status=0
+          res=$("$GITHUB_WORKSPACE/_rw/actions/release-train/scripts/promotion-tickets.sh" "$STATE" "$TICKETS") || status=$?
+          {
+            echo
+            echo "Tickets to **${STATE}**:"
+            jq -r 'if length == 0 then "- none (untracked commits only)" else .[]
+              | "- \(.id): \(if .moved then "moved from \(.from)" elif .success then "not moved (\(.reason))" else "failed (\(.error // "unknown"))" end)" end' <<< "${res:-[]}"
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
 
-      # The smoke passed but a check after it failed: a Feature flag left the
-      # QA Cohort during the Deployment, or prod no longer runs the tag.
-      # Users may see an unreviewed feature, so Releasers hear about it now.
-      # No rollback: the flag is a PostHog change a rollback does not undo.
+      # The smoke passed but the flag guard failed: a Feature flag left the
+      # QA Cohort during the Deployment. Users may see an unreviewed
+      # feature, so Releasers hear about it now. No rollback: the flag is a
+      # PostHog change a rollback does not undo. A failed ticket move gets a
+      # plain alert.
       - name: Alert Slack (checks after a passed smoke)
-        if: failure() && steps.smoke.outputs.passed == 'true'
+        if: failure() && (steps.guard.outcome == 'failure' || steps.move.outcome == 'failure')
         env:
+          GUARD: ${{ steps.guard.outcome }}
+          STATE: ${{ inputs.on_prod_state }}
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_CHANNEL: ${{ inputs.slack_channel || inputs.slack_releases_channel || vars.SLACK_RELEASES_CHANNEL || '#releases' }}
           TAG: ${{ needs.deploy.outputs.release_tag }}
@@ -765,7 +768,11 @@ jobs:
           if [ -z "$SLACK_BOT_TOKEN" ]; then echo "::error::No SLACK_BOT_TOKEN: the alert was not posted."; exit 0; fi
           # shellcheck source=/dev/null
           source "$GITHUB_WORKSPACE/_rw/actions/release-train/lib/slack.sh"
-          text=":rotating_light: <!channel> \`${GITHUB_REPOSITORY}\` \`${TAG}\` passed the prod smoke, but a check after it failed (a Feature flag is on beyond the QA Cohort, or prod no longer runs the tag). Tickets were not moved. Check PostHog now. <${RUN_URL}|Run>"
+          if [ "$GUARD" = failure ]; then
+            text=":rotating_light: <!channel> \`${GITHUB_REPOSITORY}\` \`${TAG}\` passed the prod smoke, but a Feature flag is on beyond the QA Cohort. Tickets were not moved. Check PostHog now. <${RUN_URL}|Run>"
+          else
+            text=":warning: \`${GITHUB_REPOSITORY}\` \`${TAG}\` passed the prod smoke, but moving its tickets to ${STATE} failed (Linear). Prod is fine; re-run failed jobs or move them by hand. <${RUN_URL}|Run>"
+          fi
           resp=$(jq -nc --arg c "$SLACK_CHANNEL" --arg t "$text" '{channel: $c, text: $t}' | slack_post) || resp='{"ok":false}'
           [ "$(jq -r .ok <<< "$resp")" = true ] || echo "::error::Slack alert failed: $resp"
 

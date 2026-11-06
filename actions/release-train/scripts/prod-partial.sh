@@ -63,9 +63,9 @@ out() { # out <state> <moved-json> <reason>
 # 1. Follow unfinished runs until they finish or the wait runs out.
 runs="$RUNS"
 clock=0
-while :; do
-  open=$(jq -r '.[] | select((.run_id // "" | tostring) != "" and (.conclusion // "") == "") | .run_id | tostring' <<< "$runs")
-  [ -n "$open" ] || break
+open_runs() { jq -r '.[] | select((.run_id // "" | tostring) != "" and (.conclusion // "") == "") | .run_id | tostring' <<< "$runs"; }
+open=$(open_runs)
+while [ -n "$open" ]; do
   for id in $open; do
     if st=$(gh api "repos/${K8S_REPO}/actions/runs/${id}" --jq '[.status, (.conclusion // "")] | join(" ")' 2> /dev/null); then
       if [ "${st%% *}" = completed ]; then
@@ -75,8 +75,8 @@ while :; do
       fi
     fi
   done
-  [ "$clock" -lt "$WAIT_SECONDS" ] || break
-  [ -n "$(jq -r '.[] | select((.run_id // "" | tostring) != "" and (.conclusion // "") == "") | .run_id' <<< "$runs")" ] || break
+  open=$(open_runs)
+  [ -n "$open" ] && [ "$clock" -lt "$WAIT_SECONDS" ] || break
   sleep "$POLL_SECONDS"
   clock=$((clock + POLL_SECONDS))
 done

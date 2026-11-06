@@ -36,8 +36,10 @@
 #   nothing           resume only: no candidate, prod already runs it, or its
 #                     staging pass is not on record (see reason)
 #   refused           fresh only: the tag was rolled back from in prod before
-#                     (the train never re-deploys it by itself), or a ticket
-#                     in the range has no staging pass on record
+#                     (the train never re-deploys it by itself), a service
+#                     runs a release tag the candidate does not contain
+#                     (deploying would undo it, e.g. a hand-deployed hotfix),
+#                     or a ticket in the range has no staging pass on record
 #
 # Env:
 #   RELEASE_TAG, RESUME_TAG, TICKETS (comma-separated), PROD_SERVICES (JSON array),
@@ -49,7 +51,7 @@
 # Runs in a full checkout (tags and history) of the product repo.
 # Stdout: {mode, decision, reason, release_tag, version, sha, base,
 #          services: [...prod-tags.sh], to_deploy: [...], previous_tags: {svc: tag},
-#          previous_tag, tickets: [ids found in Linear], ticket_details: [...],
+#          tickets: [ids found in Linear], ticket_details: [...],
 #          local_time?, next_open?}
 
 # shellcheck source=SCRIPTDIR/../lib/common.sh
@@ -79,7 +81,7 @@ emit() {
   # shellcheck disable=SC2016 # jq bindings, not shell expansion.
   jq -nc --arg m "$mode" --arg d "$1" --arg r "$2" --arg t "$tag" --argjson p "$plan" --argjson x "$extra" '
     {release_tag: $t, version: ($t | sub("^v"; "")),
-     sha: "", base: "", services: [], to_deploy: [], previous_tags: {}, previous_tag: "",
+     sha: "", base: "", services: [], to_deploy: [], previous_tags: {},
      tickets: [], ticket_details: []} + $p + $x + {mode: $m, decision: $d, reason: $r}'
   exit 0
 }
@@ -101,8 +103,7 @@ plan=$(jq -c --arg sha "$sha" '{
   sha: $sha,
   services: .,
   to_deploy: [.[] | select(.on_tag | not) | .service],
-  previous_tags: (map({key: .service, value: (if .on_tag then .deployed_previous else .current_tag end)}) | from_entries)}
-  | .previous_tag = ([.previous_tags[]] | unique | if length == 1 then .[0] else "" end)' <<< "$services")
+  previous_tags: (map({key: .service, value: (if .on_tag then .deployed_previous else .current_tag end)}) | from_entries)}' <<< "$services")
 
 rolled=$(jq -r '[.services[] | select(.rolled_back) | .service] | join(", ")' <<< "$plan")
 if [ -n "$rolled" ]; then
@@ -110,6 +111,20 @@ if [ -n "$rolled" ]; then
     emit refused "$tag was rolled back from in prod before ($rolled); the train does not deploy it again. Fix forward with a new Release Candidate, or deploy it by hand"
   fi
   emit nothing "the newest release tag $tag was rolled back from in prod ($rolled); waiting for a new Release Candidate"
+fi
+
+# Never deploy over a release tag the candidate does not contain: an older
+# candidate (or one beside it) would silently undo it.
+ahead=""
+while IFS=$'\t' read -r s c; do
+  [ -n "$s" ] || continue
+  printf '%s\n' "$c" | grep -qE "$RELEASE_TAG_PATTERN" || continue
+  b=$(git rev-parse --verify -q "${c}^{commit}") || continue
+  git merge-base --is-ancestor "$b" "$sha" || ahead="${ahead:+$ahead, }$s runs $c"
+done < <(jq -r '.services[] | select(.on_tag | not) | "\(.service)\t\(.current_tag)"' <<< "$plan")
+if [ -n "$ahead" ]; then
+  [ "$mode" = fresh ] && emit refused "prod runs release tags that $tag does not contain ($ahead); deploying $tag would undo them. Promote a newer Release Candidate, or deploy by hand"
+  emit nothing "prod runs release tags that $tag does not contain ($ahead); waiting for a newer Release Candidate"
 fi
 
 all_on=$(jq -r '.to_deploy | length == 0' <<< "$plan")
