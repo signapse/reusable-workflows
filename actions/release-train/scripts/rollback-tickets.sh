@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # rollback-tickets.sh
 #
-# After a failed prod smoke (SIG-2771, AC4, AC5): every ticket in the
-# Deployment gets a comment with the run and moves to QA_FAILED_STATE (the
+# After a failed prod smoke or a partial Deployment (SIG-2771, AC4, AC5):
+# every ticket in the Deployment gets a comment with the run and moves to
+# QA_FAILED_STATE (the
 # pipeline cannot tell which ticket broke prod), losing QA Passed
 # (qa-failed-tickets.sh: never out of Done; a Done ticket keeps QA Passed).
 # Then a Slack alert goes to the repo's channel, naming which tickets are in
@@ -10,7 +11,8 @@
 # When the rollback did not restore every service, the alert is critical
 # (<!channel>) and names each service and why.
 #
-# Idempotent: a ticket that already has a comment with the marker and a
+# Idempotent: a ticket that already has a comment with the fixed marker
+# ("**Prod Deployment failed**", whatever CAUSE says) and a
 # "Run: <RUN_URL>" line equal to this run's is not commented again, and
 # moving a ticket to the column it is in is a no-op. The Slack alert is posted again on a re-run (Slack has no
 # idempotency key); its text says which attempt it is.
@@ -29,7 +31,9 @@
 #   NOTES               extra lines for the alert (failed Release or incident steps)
 #   LINEAR_API_KEY      required when there are tickets
 #   SLACK_CHANNEL, SLACK_BOT_TOKEN   required
-# Stdout: {ok, tickets, critical, errors}. Exit 1 when anything failed.
+# Stdout: {ok, tickets, critical, errors, moves}; moves is
+# qa-failed-tickets.sh's {moved, already, kept, failed}. Exit 1 when anything
+# failed.
 
 # shellcheck source=SCRIPTDIR/../lib/common.sh
 source "$(dirname "$0")/../lib/common.sh"
@@ -49,9 +53,9 @@ RESULTS="${ROLLBACK_RESULTS:-}"
 jq -e 'type == "array"' <<< "$RESULTS" > /dev/null 2>&1 || RESULTS='[]'
 critical=true
 [ "${ROLLBACK_OK:-false}" = true ] && critical=false
-MARKER="**Prod smoke failed**"
+MARKER="**Prod Deployment failed**"
 
-tickets=$(jq -nc --arg t "${TICKETS:-}" '$t | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(. != ""))')
+tickets=$(csv_json "${TICKETS:-}")
 n=$(jq length <<< "$tickets")
 errors='[]'
 add_error() { errors=$(jq -nc --argjson e "$errors" --arg m "$1" '$e + [$m]'); log "ERROR: $1"; }
@@ -61,7 +65,7 @@ if [ "$critical" = false ]; then
 else
   outcome="The automatic rollback did NOT restore every service, so prod may still run this build: $(jq -r 'map("`\(.service)`: \(.reason)") | join("; ")' <<< "$RESULTS")."
 fi
-comment="${MARKER} after ${WHAT} was deployed. ${outcome} Every ticket in the Deployment moves to **${QA_FAILED}**, because the pipeline cannot tell which ticket caused it. QA triages.
+comment="${MARKER}: ${CAUSE:-Prod smoke failed} after ${WHAT} was deployed. ${outcome} Tickets in the Deployment move to **${QA_FAILED}** (Done tickets stay Done), because the pipeline cannot tell which ticket caused it. QA triages.
 
 Run: ${RUN_URL}
 Report: ${REPORT_URL:-none}${INCIDENT_URL:+
@@ -146,6 +150,6 @@ else
 fi
 
 ok=$(jq 'length == 0' <<< "$errors")
-jq -nc --argjson t "$tickets" --argjson e "$errors" --argjson ok "$ok" --argjson c "$critical" \
-  '{ok: $ok, tickets: $t, critical: $c, errors: $e}'
+jq -nc --argjson t "$tickets" --argjson e "$errors" --argjson ok "$ok" --argjson c "$critical" --argjson m "$moves" \
+  '{ok: $ok, tickets: $t, critical: $c, errors: $e, moves: $m}'
 [ "$ok" = true ] || exit 1

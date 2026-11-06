@@ -417,7 +417,7 @@ prod (caller job, needs: [train, staging])
   verdict   pass: flag guard again, tickets -> On Prod (only from on_prod_from)
             fail: prod_smoke_passed=false, run red
             unknown: prod_smoke_passed empty, run red, smoke-unknown alerts
-  rollback  only on a failed smoke (SIG-2771): see "Automatic rollback" below
+  rollback  after a failed smoke or a partial Deployment (SIG-2771): see "Automatic rollback" below
 ```
 
 ### Every ticket since prod's tag must have passed staging (both modes)
@@ -479,8 +479,10 @@ from deploying an earlier tag that already passed staging.
   read.
 - If the flag guard fails after a passed smoke, tickets do not move and a
   critical Slack alert (`<!channel>`) goes out. Nothing is rolled back: a
-  widened flag is a PostHog change that an image rollback does not undo. A
-  failed ticket move after a passed smoke gets a plain alert.
+  widened flag is a PostHog change that an image rollback does not undo. If
+  prod no longer runs the tag after a passed smoke (a rollback or a hand
+  deploy replaced it), or the ticket move fails, tickets stay put and a plain
+  alert goes out.
 - A `refused` plan (no staging pass on record, a tag rolled back from
   before, or prod runs a release tag the candidate does not contain) alerts
   Slack too: later resume runs report `nothing` for the same reason.
@@ -578,8 +580,9 @@ rollback
   nothing is dispatched, every service is reported `missing_workflow` with a
   reason naming the workflow, the incident is Major and the Slack alert is
   critical (`<!channel>`). The run ends red.
-- **Waiting.** Bounded by `rollback_timeout_minutes` (default 30) for all
-  services together. A run still going at the limit is not cancelled.
+- **Waiting.** Bounded by `rollback_timeout_minutes` (default 30, at most
+  60 so the 90-minute job always reaches the incident and Slack steps) for
+  all services together. A run still going at the limit is not cancelled.
 - **Cancelled.** A rollback that ends `cancelled` was displaced in the
   per-service concurrency queue. It is dispatched again with the same key, up
   to `rollback_max_attempts` (default 3) dispatches in all.
@@ -594,7 +597,8 @@ rollback
   restored, else `incident_io_major_severity_id` (default P2). The workspace
   has P1-P4 and no "Minor"/"Major". The Cause field is set to Deployment
   (dora-metrics counts it), and the run URL goes in the summary and the
-  `incident_io_link_field_id` link field. `incident_io_mode: test` opens a
+  "Where did you find it? (URL)" link field. The Cause and link field ids are
+  constants of Signapse's workspace in `rollback-incident.sh`. `incident_io_mode: test` opens a
   test incident instead, for trying the path out.
 - **Release.** `linear_release_id` from the release job; if recording the
   Release failed, the Release is looked up by version in the pipeline.

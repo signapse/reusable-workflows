@@ -48,7 +48,6 @@
 #                     (result not_current), so a rollback never undoes it
 #   DEPLOY_RUN_KEY    the deploy job's run key; service S's deploy-prod key is
 #                     DEPLOY_RUN_KEY-S and its rollback key DEPLOY_RUN_KEY-S-rollback (required)
-#   ENVIRONMENT       rollback.yml environment (default prod)
 #   K8S_REPO          default signapse/signapse-core-k8s
 #   ROLLBACK_WORKFLOW default rollback.yml
 #   K8S_REF           default main (rollback.yml refuses any other ref)
@@ -72,7 +71,6 @@ need jq
 : "${DEPLOY_RUN_KEY:?DEPLOY_RUN_KEY not set}"
 PREVIOUS_TAGS="${PREVIOUS_TAGS:-}"
 [ -n "$PREVIOUS_TAGS" ] || PREVIOUS_TAGS='{}'
-ENVIRONMENT="${ENVIRONMENT:-prod}"
 K8S_REPO="${K8S_REPO:-signapse/signapse-core-k8s}"
 ROLLBACK_WORKFLOW="${ROLLBACK_WORKFLOW:-rollback.yml}"
 K8S_REF="${K8S_REF:-main}"
@@ -86,7 +84,6 @@ for n in "$TIMEOUT_SECONDS" "$FIND_TIMEOUT_SECONDS" "$MAX_ATTEMPTS" "$POLL_SECON
 done
 [ "$POLL_SECONDS" -gt 0 ] || die "POLL_SECONDS must be > 0"
 [ "$MAX_ATTEMPTS" -gt 0 ] || die "MAX_ATTEMPTS must be > 0"
-case "$ENVIRONMENT" in prod | stg) ;; *) die "ENVIRONMENT must be prod or stg (got '$ENVIRONMENT')" ;; esac
 CURRENT_TAGS="${CURRENT_TAGS:-}"
 [ -z "$CURRENT_TAGS" ] || jq -e 'type == "array"' <<< "$CURRENT_TAGS" > /dev/null 2>&1 || die "CURRENT_TAGS must be prod-tags.sh's JSON array (got '$CURRENT_TAGS')"
 jq -e 'type == "object"' <<< "$PREVIOUS_TAGS" > /dev/null 2>&1 || die "PREVIOUS_TAGS must be a JSON object (got '$PREVIOUS_TAGS')"
@@ -120,11 +117,11 @@ runs_for_key() {
 dispatch() { # dispatch <svc>
   local svc="$1" key body
   key=$(st "$svc" key)
-  body=$(jq -nc --arg ref "$K8S_REF" --arg s "$svc" --arg e "$ENVIRONMENT" --arg k "$key" \
-    '{ref: $ref, inputs: {service: $s, environment: $e, run_key: $k}}')
+  body=$(jq -nc --arg ref "$K8S_REF" --arg s "$svc" --arg k "$key" \
+    '{ref: $ref, inputs: {service: $s, environment: "prod", run_key: $k}}')
   gh api -X POST "repos/${K8S_REPO}/actions/workflows/${ROLLBACK_WORKFLOW}/dispatches" --input - <<< "$body" > /dev/null 2> "$work/err" || return 1
   st_set "$svc" '.attempts += 1 | .run_id = "" | .run_url = "" | .status = "dispatched" | .dispatched_at = $now' --argjson now "$clock"
-  log "${svc}: dispatched ${ROLLBACK_WORKFLOW} (${ENVIRONMENT}, run key ${key}, attempt $(st "$svc" attempts))"
+  log "${svc}: dispatched ${ROLLBACK_WORKFLOW} (prod, run key ${key}, attempt $(st "$svc" attempts))"
 }
 
 finish() { # finish <svc> <conclusion> <result> <ok> <reason>

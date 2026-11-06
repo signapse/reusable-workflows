@@ -12,16 +12,21 @@
 #     failure rate (the spec's "tagged `deployment`");
 #   - a link to the failing run, in the summary and, when LINK_FIELD_ID is set,
 #     in that link custom field;
-#   - idempotency_key = IDEMPOTENCY_KEY (the deploy run key), so a re-run never
-#     opens a second incident. A 409, or a 422 naming the idempotency key, means
+#   - idempotency_key = IDEMPOTENCY_KEY (the workflow sends
+#     <repo>-<run id>-<release tag>-prod, the same on every attempt of the run),
+#     so a re-run never opens a second incident. A 409, or a 422 naming the idempotency key, means
 #     an earlier attempt opened it: ok, created=false.
 #
 # Env:
 #   INCIDENT_IO_API_KEY   key allowed to create incidents (required)
 #   IDEMPOTENCY_KEY       required
 #   ROLLBACK_OK           true | false (false = Major)
-#   MINOR_SEVERITY_ID, MAJOR_SEVERITY_ID, CAUSE_FIELD_ID, CAUSE_OPTION_ID   required
-#   LINK_FIELD_ID         optional link custom field for the run URL
+#   MINOR_SEVERITY_ID, MAJOR_SEVERITY_ID   required
+#   CAUSE_FIELD_ID        custom field "Cause" (dora-metrics counts "deployment");
+#                         default: Signapse's workspace
+#   CAUSE_OPTION_ID       option id of Cause = Deployment; default: Signapse's
+#   LINK_FIELD_ID         link custom field for the run URL ("Where did you find
+#                         it? (URL)"); default: Signapse's; empty = summary only
 #   INCIDENT_TYPE_ID      optional; empty = the organisation's default type
 #   INCIDENT_MODE         standard (default) | test (for trying the path out)
 #   REPOSITORY, RELEASE_TAG, RUN_URL (required), REPORT_URL, RELEASE_URL, TICKETS
@@ -59,8 +64,13 @@ out() { # out <ok> <created> <reason> [incident-json]
   exit 0
 }
 
+# Constants of the one incident.io workspace.
+CAUSE_FIELD_ID="${CAUSE_FIELD_ID:-01KMN86DXJM034939Z59W0N3FZ}"
+CAUSE_OPTION_ID="${CAUSE_OPTION_ID:-01KMN86DXJQTS7EKKVKXZ6TD8C}"
+LINK_FIELD_ID="${LINK_FIELD_ID-01JXHXVMVDKV9YC2VG7BA6CVVQ}"
+
 missing=()
-for v in INCIDENT_IO_API_KEY IDEMPOTENCY_KEY CAUSE_FIELD_ID CAUSE_OPTION_ID; do
+for v in INCIDENT_IO_API_KEY IDEMPOTENCY_KEY; do
   [ -n "${!v:-}" ] || missing+=("$v")
 done
 [ -n "$sev_id" ] || missing+=("$([ "$sev" = minor ] && echo MINOR_SEVERITY_ID || echo MAJOR_SEVERITY_ID)")

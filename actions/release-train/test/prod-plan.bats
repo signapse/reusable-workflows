@@ -347,3 +347,15 @@ field() { tail -n1 <<< "$output" | jq -r "$@"; }
   [ "$(field .decision)" = deploy ]
   [ "$(field -c .tickets)" = '["SIG-1","SIG-2"]' ]
 }
+
+@test "prod-tags.sh --require-all: silent when every service runs the tag, else names the others" {
+  export PROD_SERVICES='["svc-a","svc-b"]'
+  prod_tag svc-a 1.1.0
+  prod_tag svc-b 1.1.0
+  run "$S/prod-tags.sh" --require-all 1.1.0
+  [ "$status" -eq 0 ] && [ -z "$output" ]
+  prod_tag svc-b 1.0.0
+  run "$S/prod-tags.sh" --require-all 1.1.0
+  [ "$status" -eq 2 ]
+  [ "$(tail -n1 <<< "$output")" = "svc-b runs 1.0.0" ]
+}

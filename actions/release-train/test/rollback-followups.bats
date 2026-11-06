@@ -88,7 +88,7 @@ incident_env() {
     LINK_FIELD_ID=field-link TICKETS=SIG-1,SIG-2 REPORT_URL=https://report
 }
 
-@test "AC3: rolled back: Minor severity, Cause = Deployment, link to the failing run, idempotency key = deploy run key" {
+@test "AC3: rolled back: Minor severity, Cause = Deployment, link to the failing run, idempotency key from the caller" {
   incident_env
   ROLLBACK_OK=true ROLLBACK_RESULTS="$OK_RESULTS" run "$S/rollback-incident.sh"
   [ "$status" -eq 0 ]
@@ -204,11 +204,16 @@ tickets_env() {
   [[ "$text" != *"<!channel>"* ]]
 }
 
-@test "partial Deployment: the Slack alert names the cause" {
+@test "partial Deployment: the Slack alert and the ticket comment name the cause" {
   tickets_env
   CAUSE="Prod deploy failed part-way" ROLLBACK_OK=true ROLLBACK_RESULTS="$OK_RESULTS" run "$S/rollback-tickets.sh"
   [ "$status" -eq 0 ]
   [[ "$(jq -r .text "$TMP/slack.log")" == *"Prod deploy failed part-way for"*"rolled back"* ]]
+  b=$(linear_calls commentCreate | head -1 | jq -r .variables.b)
+  [[ "$b" == "**Prod Deployment failed**: Prod deploy failed part-way after"* ]]
+  [[ "$b" != *"smoke"* ]]
+  [[ "$b" == *"(Done tickets stay Done)"* ]]
+  [ "$(field -c .moves.moved)" = '["SIG-1","SIG-2"]' ]
 }
 
 @test "AC4: a Done ticket (follow-up commit in the Deployment) is not moved out of Done" {
@@ -226,7 +231,7 @@ tickets_env() {
 
 @test "AC4: a run whose URL extends this one's (run 421 vs 42) does not count as commented" {
   tickets_env
-  jq -nc --arg b "**Prod smoke failed** after ...
+  jq -nc --arg b "**Prod Deployment failed**: Prod smoke failed after ...
 
 Run: ${RUN}1" '[$b]' > "$TMP/comments-SIG-1"
   ROLLBACK_OK=true ROLLBACK_RESULTS="$OK_RESULTS" run "$S/rollback-tickets.sh"
@@ -236,7 +241,7 @@ Run: ${RUN}1" '[$b]' > "$TMP/comments-SIG-1"
 
 @test "AC4: re-run: tickets already commented for this run are not commented again" {
   tickets_env
-  jq -nc --arg b "**Prod smoke failed** after ...
+  jq -nc --arg b "**Prod Deployment failed**: Prod smoke failed after ...
 
 Run: ${RUN}
 Report: none" '[$b]' > "$TMP/comments-SIG-1"
