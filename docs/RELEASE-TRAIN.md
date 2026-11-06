@@ -330,6 +330,70 @@ or reports `already_promoted` if the first run already tagged it.
   `already_promoted` and do nothing, by design: the hourly run must never move
   tickets back to On Staging after staging tests or prod have moved them on.
 
+## Staging tests (SIG-2767)
+
+`release-train-staging.yml` verifies a promoted Release Candidate on staging
+(spec step 5). The caller runs it after the `train` job when `promoted` is
+`'true'` (see the template below).
+
+1. **Suite.** It calls signapse-e2e (`playwright.yml@main`, ADR 0002) with
+   `environment: staging` and `tickets` = the train's `rc_tickets`: every
+   live ticket from the tag prod runs to the Release Candidate, not only the
+   ones new since the last Promotion. A tag that passed staging but has not
+   reached prod is tested again with the new one, and the verdict lands on
+   the same set prod deploys. On staging the suite runs those tickets' tests,
+   `@smoke`, and the product suites the tickets' Linear labels point at, not
+   the whole suite.
+2. **Verdict** (job "Staging verdict", runs whatever the suite did,
+   `scripts/staging-verdict.sh`). Pass means the suite job succeeded *and*
+   reported `passed`. A failure, an error, a cancelled run (the suite reports
+   `failed`) or a skipped job is a failure: an untested build never passes.
+   - Pass: every ticket gets `Staging Passed`, loses `Staging Failed`, and
+     gets a comment with the run and report links. The column stays On
+     Staging. A ticket an earlier attempt sent to QA Failed (a re-run that
+     flips the verdict) stays there, and `staging_passed` stays false until
+     QA re-passes it.
+   - Fail: every ticket gets `Staging Failed`, loses `Staging Passed`, gets
+     the comment and moves to `QA Failed` (ADR 0001: the pipeline cannot
+     blame one ticket), losing `QA Passed` (`scripts/qa-failed-tickets.sh`).
+     QA approval does not survive QA Failed (spec "Board and labels"):
+     without this, a fix merged later would be selectable on the old
+     approval. A ticket in `Done` (a follow-up commit) stays in Done and
+     keeps `QA Passed`, since it never went back to QA. A ticket whose move
+     failed loses `QA Passed` anyway, so it still blocks the line. A Slack
+     alert goes to `slack_channel`, naming which tickets are in QA Failed,
+     which stayed where they were, and which Linear could not move. The run
+     fails.
+3. **Outputs.** `staging_passed` is `'true'` only on a pass that was recorded
+   on every ticket, with no ticket in QA Failed; `report_url` links the Playwright report. Production
+   (SIG-2769) runs only when `staging_passed == 'true'`.
+
+Labels are added and removed one at a time (`issueAddLabel` /
+`issueRemoveLabel`), so a ticket's other labels stay. The label to add is
+looked up by name in the ticket's team, then in the workspace, once per team
+and label. The comment is not repeated when the ticket already has one with
+the same verdict and the same `Run:` line (exact match). Any Linear or
+Slack error fails the job (and leaves `staging_passed` false) after every
+ticket was attempted.
+
+**Re-runs.** "Re-run failed jobs" re-runs the suite and the verdict. Labels
+already right are left alone, the move to QA Failed is a no-op, and a ticket
+that already has a comment for this run URL and verdict gets no second one. A
+re-run that flips the verdict swaps the labels and comments the new verdict.
+A failure alert goes to Slack on every failed attempt.
+
+It is a separate workflow file, not jobs in `release-train.yml`, because
+GitHub resolves every `uses:` workflow when a run is queued, even for jobs
+that will be skipped. Referencing signapse-e2e from `release-train.yml` would
+make every legacy `ready-for-prod` caller depend on it.
+
+Inputs: `tickets` (required), `slack_channel` (required), `release_tag`. The
+label and column names are the defaults `release-train.yml` uses, so the two
+cannot disagree. Secrets:
+`LINEAR_API_KEY`, `SLACK_BOT_TOKEN`, and the four forwarded to the suite
+(`E2E_STAGING_SIGNSTUDIO_ADMIN_API_TOKEN`, `E2E_STAGING_SIGNSTUDIO_USER_EMAIL`,
+`E2E_STAGING_SIGNSTUDIO_USER_PASSWORD`, `E2E_LINEAR_API_KEY`).
+
 ## Caller template (`.github/workflows/release-train.yml` in the product repo)
 
 The event router (SIG-2758) dispatches this file with `ticket` and
@@ -405,6 +469,26 @@ jobs:
       READ_APP_PRIVATE_KEY: ${{ secrets.READ_APP_PRIVATE_KEY }}
       PRODZILLA_APP_PRIVATE_KEY: ${{ secrets.PRODZILLA_APP_PRIVATE_KEY }}
       SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}   # Terraform gate alerts
+
+  # Verify on staging (SIG-2767). Production (SIG-2769) needs
+  # needs.staging.outputs.staging_passed == 'true'.
+  staging:
+    needs: train
+    if: needs.train.outputs.promoted == 'true'
+    uses: signapse/reusable-workflows/.github/workflows/release-train-staging.yml@main
+    permissions:
+      contents: read     # every job inside needs only this; do not hand it the train's writes
+    with:
+      tickets: ${{ needs.train.outputs.rc_tickets }}
+      release_tag: ${{ needs.train.outputs.release_tag }}
+      slack_channel: '#signstream-releases'   # the repo's channel for failure alerts
+    secrets:
+      LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+      SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+      E2E_STAGING_SIGNSTUDIO_ADMIN_API_TOKEN: ${{ secrets.E2E_STAGING_SIGNSTUDIO_ADMIN_API_TOKEN }}
+      E2E_STAGING_SIGNSTUDIO_USER_EMAIL: ${{ secrets.E2E_STAGING_SIGNSTUDIO_USER_EMAIL }}
+      E2E_STAGING_SIGNSTUDIO_USER_PASSWORD: ${{ secrets.E2E_STAGING_SIGNSTUDIO_USER_PASSWORD }}
+      E2E_LINEAR_API_KEY: ${{ secrets.E2E_LINEAR_API_KEY }}
 ```
 
 `prod_services` and `read_app_id` (with secret `READ_APP_PRIVATE_KEY`) are
