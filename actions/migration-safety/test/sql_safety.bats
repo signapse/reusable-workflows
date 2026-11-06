@@ -167,6 +167,9 @@ sql() { printf '%s\n' "$1" >"$BATS_TEST_TMPDIR/m.up.sql"; run python3 "$SCRIPT" 
   [[ "$output" == *"BLOCK: CHECK NOT NULL users"* ]]
   sql 'ALTER TABLE users ADD CONSTRAINT c CHECK ((coalesce(a, 0) > 0) AND (b IS NOT NULL));'
   [ "$status" -eq 1 ]
+  sql 'ALTER TABLE users ADD CONSTRAINT c CHECK (email IS NOT NULL OR channel = 1);'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"warn: CHECK NOT NULL users"* ]]
   # IS NOT NULL outside the CHECK expression is not a CHECK NOT NULL.
   sql 'ALTER TABLE users ADD COLUMN x boolean CHECK (x) DEFAULT (1 IS NOT NULL);'
   [ "$status" -eq 0 ]
@@ -189,6 +192,10 @@ sql() { printf '%s\n' "$1" >"$BATS_TEST_TMPDIR/m.up.sql"; run python3 "$SCRIPT" 
   run python3 "$SCRIPT" "$BATS_TEST_TMPDIR/m.up.sql"
   [ "$status" -eq 1 ]
   [[ "$output" == *":2: BLOCK: DROP DEFAULT accounts.tier"* ]]
+  printf '%s\n' 'ALTER TABLE accounts ADD COLUMN tier text NOT NULL DEFAULT '"'"'free'"'"';' \
+    'ALTER TABLE accounts ALTER COLUMN tier DROP NOT NULL, ALTER COLUMN tier DROP DEFAULT;' > "$BATS_TEST_TMPDIR/m.up.sql"
+  run python3 "$SCRIPT" "$BATS_TEST_TMPDIR/m.up.sql"
+  [ "$status" -eq 0 ]
 }
 
 @test "quoted identifier with an escaped quote is still parsed" {
