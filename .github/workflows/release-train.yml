@@ -52,7 +52,7 @@ on:
         description: 'Deploy-to-Prod workflow link used in the post-publish prompt.'
         required: false
         type: string
-        default: 'https://github.com/signapse/signapse-core-k8s/actions/workflows/deploy-to-prod.yml'
+        default: 'https://github.com/signapse/signapse-core-k8s/actions/workflows/deploy-prod.yml'
     secrets:
       LINEAR_API_KEY:
         required: true
