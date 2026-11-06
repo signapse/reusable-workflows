@@ -150,21 +150,24 @@ sql() { printf '%s\n' "$1" >"$BATS_TEST_TMPDIR/m.up.sql"; run python3 "$SCRIPT" 
   [[ "$output" == *"ADD COLUMN NOT NULL tenants.tenant_id"* ]]
 }
 
-@test "ADD COLUMN NOT NULL DEFAULT NULL fails; CHECK (x IS NOT NULL) warns, not blocks" {
+@test "ADD COLUMN NOT NULL DEFAULT NULL fails; so does ADD COLUMN ... CHECK (x IS NOT NULL)" {
   sql 'ALTER TABLE accounts ADD COLUMN region text NOT NULL DEFAULT NULL;'
   [ "$status" -eq 1 ]
   sql 'ALTER TABLE accounts ADD COLUMN region text CHECK (region IS NOT NULL);'
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"warn: CHECK NOT NULL accounts"* ]]
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"BLOCK: CHECK NOT NULL accounts"* ]]
 }
 
-@test "equivalents of SET NOT NULL warn: ADD CONSTRAINT CHECK (NOT VALID too), DROP DEFAULT, DROP IDENTITY" {
+@test "ADD CONSTRAINT CHECK (x IS NOT NULL) blocks like SET NOT NULL, NOT VALID too" {
   sql 'ALTER TABLE users ADD CONSTRAINT email_nn CHECK (email IS NOT NULL);'
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"warn: CHECK NOT NULL users"* ]]
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"BLOCK: CHECK NOT NULL users"* ]]
   sql 'ALTER TABLE users ADD CONSTRAINT email_nn CHECK (email IS NOT NULL) NOT VALID;'
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"warn: CHECK NOT NULL users"* ]]
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"BLOCK: CHECK NOT NULL users"* ]]
+}
+
+@test "DROP DEFAULT / DROP IDENTITY warn; DROP DEFAULT on a column just added NOT NULL blocks" {
   sql 'ALTER TABLE users ALTER COLUMN created_at DROP DEFAULT;'
   [ "$status" -eq 0 ]
   [[ "$output" == *"warn: DROP DEFAULT users.created_at"* ]]
@@ -174,6 +177,12 @@ sql() { printf '%s\n' "$1" >"$BATS_TEST_TMPDIR/m.up.sql"; run python3 "$SCRIPT" 
   sql 'ALTER TABLE users ADD CONSTRAINT age_pos CHECK (age > 0), ALTER COLUMN bio DROP NOT NULL;'
   [ "$status" -eq 0 ]
   [ -z "$output" ]
+  # account-service-api 017's shape: add NOT NULL with a default, then drop it.
+  printf '%s\n' 'ALTER TABLE accounts ADD COLUMN tier text NOT NULL DEFAULT '"'"'free'"'"';' \
+    'ALTER TABLE accounts ALTER COLUMN tier DROP DEFAULT;' > "$BATS_TEST_TMPDIR/m.up.sql"
+  run python3 "$SCRIPT" "$BATS_TEST_TMPDIR/m.up.sql"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *":2: BLOCK: DROP DEFAULT accounts.tier"* ]]
 }
 
 @test "quoted identifier with an escaped quote is still parsed" {

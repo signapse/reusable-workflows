@@ -7,15 +7,16 @@ the "up" direction of migration files and reports:
 
   block  - the previous code would break: DROP TABLE/VIEW/SCHEMA, DROP COLUMN,
            RENAME of a table/view/column/type/enum value, ALTER COLUMN ... TYPE,
-           SET NOT NULL, ADD COLUMN ... NOT NULL / PRIMARY KEY without a
-           non-null DEFAULT, SET SCHEMA, DROP TYPE/DOMAIN ... CASCADE.
+           SET NOT NULL, ADD ... CHECK (... IS NOT NULL), ADD COLUMN ...
+           NOT NULL / PRIMARY KEY without a non-null DEFAULT, DROP DEFAULT /
+           IDENTITY on a column added NOT NULL earlier in the same migration,
+           SET SCHEMA, DROP TYPE/DOMAIN ... CASCADE.
   warn   - usually safe, but worth a reviewer's look: DROP INDEX,
            DROP CONSTRAINT, RENAME of an index or constraint (the previous
            code's reads and writes still succeed; the risk is an
            `ON CONFLICT` that names it); DROP FUNCTION/PROCEDURE/SEQUENCE;
-           ADD ... CHECK (... IS NOT NULL), DROP DEFAULT, DROP IDENTITY
-           (break the previous code's INSERTs when the column is, or becomes,
-           effectively NOT NULL, which this check cannot see).
+           other DROP DEFAULT / DROP IDENTITY (break the previous code's
+           INSERTs if the column is NOT NULL, which this check cannot see).
 
 Usage: sql_safety.py [--format plain|github] FILE...
 Exit:  0 no blocking finding, 1 at least one, 2 usage/IO error.
@@ -182,8 +183,12 @@ def bare(name):
     return name.replace('"', "")
 
 
-def check_alter_table(table, actions):
-    """Yield (severity, kind, detail, offset) for each action of one ALTER TABLE."""
+def check_alter_table(table, actions, notnull):
+    """Yield (severity, kind, detail, offset) for each action of one ALTER TABLE.
+
+    notnull collects (table, column) added NOT NULL in this migration, so a
+    later DROP DEFAULT on one is known to break the previous code's INSERTs.
+    """
     for off, a in actions:
         u = a.upper()
         m = re.match(rf"RENAME\s+CONSTRAINT\s+({IDENT})\s+TO\s+({IDENT})", a, re.I)
@@ -224,12 +229,15 @@ def check_alter_table(table, actions):
                 and not re.search(r"\bDEFAULT\s+(?!NULL\b)|\b(GENERATED|(?:SMALL|BIG)?SERIAL)\b", top)):
             yield ("block", "ADD COLUMN NOT NULL", f"{table}.{m.group(1)} (no non-null DEFAULT)", off)
             continue
+        if m and m.group(1).upper() not in ADD_NOT_A_COLUMN and re.search(r"\bNOT\s+NULL\b", top):
+            notnull.add((table.lower(), bare(m.group(1)).lower()))
         m = re.match(rf"ALTER\s+(?:COLUMN\s+)?({IDENT})\s+DROP\s+(DEFAULT|IDENTITY)\b", a, re.I)
         if m:
-            yield ("warn", f"DROP {m.group(2).upper()}", f"{table}.{m.group(1)}", off)
+            sev = "block" if (table.lower(), bare(m.group(1)).lower()) in notnull else "warn"
+            yield (sev, f"DROP {m.group(2).upper()}", f"{table}.{m.group(1)}", off)
             continue
         if re.match(r"ADD\b", a, re.I) and re.search(r"\bCHECK\s*\(.*\bIS\s+NOT\s+NULL\b", a, re.I):
-            yield ("warn", "CHECK NOT NULL", table, off)
+            yield ("block", "CHECK NOT NULL", table, off)
             continue
         if re.match(r"SET\s+SCHEMA\b", a, re.I):
             yield ("block", "SET SCHEMA", table, off)
@@ -292,6 +300,7 @@ def analyse(sql):
     masked = mask(text)
     findings = []
     created = set()
+    notnull = set()
     for off, stmt in statements(masked):
         for m in re.finditer(CREATE_TABLE, stmt, re.I):
             # IF NOT EXISTS may be a no-op on a table the previous code uses.
@@ -303,7 +312,7 @@ def analyse(sql):
             table = bare(m.group(1))
             if table.lower() not in created:
                 base = off + m.end()
-                for sev, kind, detail, aoff in check_alter_table(table, split_actions(stmt[m.end():])):
+                for sev, kind, detail, aoff in check_alter_table(table, split_actions(stmt[m.end():]), notnull):
                     findings.append((sev, kind, bare(detail), base + aoff))
             continue
 
