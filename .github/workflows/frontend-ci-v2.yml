@@ -232,7 +232,10 @@ jobs:
       - name: Lint
         id: lint
         if: ${{ inputs.run-lint }}
-        run: ${{ inputs.lint-command }}
+        env:
+          LINT_COMMAND: ${{ inputs.lint-command }}
+        # Caller-supplied command, executed as shell code by design.
+        run: eval "${LINT_COMMAND}"
 
       # ── TypeScript type check ──
       - name: Type check
@@ -244,7 +247,10 @@ jobs:
       - name: Run tests
         id: tests
         if: ${{ inputs.run-tests && !inputs.coverage-enabled }}
-        run: ${{ inputs.test-command }}
+        env:
+          TEST_COMMAND: ${{ inputs.test-command }}
+        # Caller-supplied command, executed as shell code by design.
+        run: eval "${TEST_COMMAND}"
 
       - name: Run tests with coverage
         id: tests-coverage
@@ -252,24 +258,30 @@ jobs:
         env:
           COVERAGE_ARGS: ${{ inputs.coverage-args }}
           THRESHOLD: ${{ inputs.coverage-threshold }}
+          TEST_COMMAND: ${{ inputs.test-command }}
         run: |
           set -euo pipefail
           # An array, not a string: the Jest default embeds double quotes that
           # have to survive as literal characters inside a single argv entry,
           # which word-splitting an unquoted string cannot guarantee.
+          # shellcheck disable=SC2034  # args is expanded inside the eval below
           if [ -n "$COVERAGE_ARGS" ]; then
             read -r -a args <<< "$COVERAGE_ARGS"
           else
             # Jest's flag syntax — this workflow's long-standing default.
             args=(--coverage "--coverageThreshold={\"global\":{\"lines\":${THRESHOLD},\"branches\":${THRESHOLD},\"functions\":${THRESHOLD},\"statements\":${THRESHOLD}}}")
           fi
-          ${{ inputs.test-command }} -- "${args[@]}"
+          # Caller-supplied command, executed as shell code by design.
+          eval "${TEST_COMMAND} -- \"\${args[@]}\""
 
       # ── Build ──
       - name: Build
         id: build
         if: ${{ inputs.run-build }}
-        run: ${{ inputs.build-command }}
+        env:
+          BUILD_COMMAND: ${{ inputs.build-command }}
+        # Caller-supplied command, executed as shell code by design.
+        run: eval "${BUILD_COMMAND}"
 
       # ── Security audit ──
       - name: Security audit (npm)
@@ -322,6 +334,19 @@ jobs:
       # ── Summary ──
       - name: CI Summary
         if: always()
+        env:
+          LINT_OUTCOME: ${{ steps.lint.outcome }}
+          TYPECHECK_OUTCOME: ${{ steps.typecheck.outcome }}
+          BUILD_OUTCOME: ${{ steps.build.outcome }}
+          TESTS_OUTCOME: ${{ steps.tests.outcome }}
+          TESTS_COVERAGE_OUTCOME: ${{ steps.tests-coverage.outcome }}
+          SECURITY_NPM_OUTCOME: ${{ steps.security-npm.outcome }}
+          SECURITY_YARN_OUTCOME: ${{ steps.security-yarn.outcome }}
+          SECURITY_PNPM_OUTCOME: ${{ steps.security-pnpm.outcome }}
+          COVERAGE_ENABLED: ${{ inputs.coverage-enabled }}
+          COVERAGE_THRESHOLD: ${{ inputs.coverage-threshold }}
+          NODE_VERSION: ${{ inputs.node-version }}
+          PACKAGE_MANAGER: ${{ inputs.package-manager }}
         run: |
           status() {
             local outcome="$1"
@@ -333,27 +358,27 @@ jobs:
             esac
           }
 
-          LINT_STATUS=$(status "${{ steps.lint.outcome }}")
-          TYPECHECK_STATUS=$(status "${{ steps.typecheck.outcome }}")
-          BUILD_STATUS=$(status "${{ steps.build.outcome }}")
+          LINT_STATUS=$(status "${LINT_OUTCOME}")
+          TYPECHECK_STATUS=$(status "${TYPECHECK_OUTCOME}")
+          BUILD_STATUS=$(status "${BUILD_OUTCOME}")
 
           # Tests: either with or without coverage
-          TEST_OUTCOME="${{ steps.tests.outcome }}${{ steps.tests-coverage.outcome }}"
+          TEST_OUTCOME="${TESTS_OUTCOME}${TESTS_COVERAGE_OUTCOME}"
           TESTS_STATUS=$(status "$(echo "$TEST_OUTCOME" | grep -o 'success\|failure' | head -1)")
-          if [ -z "${{ steps.tests.outcome }}${{ steps.tests-coverage.outcome }}" ]; then
+          if [ -z "${TESTS_OUTCOME}${TESTS_COVERAGE_OUTCOME}" ]; then
             TESTS_STATUS="⏭️ Skipped"
           fi
 
           # Security: whichever package manager step ran
-          SEC_OUTCOME="${{ steps.security-npm.outcome }}${{ steps.security-yarn.outcome }}${{ steps.security-pnpm.outcome }}"
+          SEC_OUTCOME="${SECURITY_NPM_OUTCOME}${SECURITY_YARN_OUTCOME}${SECURITY_PNPM_OUTCOME}"
           SECURITY_STATUS=$(status "$(echo "$SEC_OUTCOME" | grep -o 'success\|failure' | head -1)")
-          if [ -z "${{ steps.security-npm.outcome }}${{ steps.security-yarn.outcome }}${{ steps.security-pnpm.outcome }}" ]; then
+          if [ -z "${SECURITY_NPM_OUTCOME}${SECURITY_YARN_OUTCOME}${SECURITY_PNPM_OUTCOME}" ]; then
             SECURITY_STATUS="⏭️ Skipped"
           fi
 
           # Coverage row
-          if [ "${{ inputs.coverage-enabled }}" = "true" ] && [ -n "${{ steps.tests-coverage.outcome }}" ]; then
-            COVERAGE_ROW="| **Coverage Threshold** | ${{ inputs.coverage-threshold }}% |"
+          if [ "${COVERAGE_ENABLED}" = "true" ] && [ -n "${TESTS_COVERAGE_OUTCOME}" ]; then
+            COVERAGE_ROW="| **Coverage Threshold** | ${COVERAGE_THRESHOLD}% |"
           else
             COVERAGE_ROW="| **Coverage Threshold** | Disabled |"
           fi
@@ -362,8 +387,8 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Check | Status |" >> $GITHUB_STEP_SUMMARY
           echo "|-------|--------|" >> $GITHUB_STEP_SUMMARY
-          echo "| **Node Version** | ${{ inputs.node-version }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| **Package Manager** | ${{ inputs.package-manager }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Node Version** | ${NODE_VERSION} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Package Manager** | ${PACKAGE_MANAGER} |" >> $GITHUB_STEP_SUMMARY
           echo "| **Lint** | ${LINT_STATUS} |" >> $GITHUB_STEP_SUMMARY
           echo "| **Type Check** | ${TYPECHECK_STATUS} |" >> $GITHUB_STEP_SUMMARY
           echo "| **Tests** | ${TESTS_STATUS} |" >> $GITHUB_STEP_SUMMARY

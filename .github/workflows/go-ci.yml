@@ -458,6 +458,8 @@ jobs:
       - name: Build Docker image
         env:
           DOCKER_BUILDKIT: 1
+          DOCKERFILE_PATH: ${{ inputs.dockerfile_path }}
+          DOCKER_CONTEXT: ${{ inputs.docker_context }}
           # App token when minted, else the legacy PAT.
           DEPS_TOKEN: ${{ steps.deps.outputs.token || secrets.github_pat }}
           USE_APP: ${{ steps.app.outputs.use_app }}
@@ -478,9 +480,9 @@ jobs:
           fi
 
           docker build "${BUILD_ARGS[@]}" "${SECRET_ARGS[@]}" \
-            -f ${{ inputs.dockerfile_path }} \
-            -t ci-build-test:${{ github.sha }} \
-            ${{ inputs.docker_context }}
+            -f "${DOCKERFILE_PATH}" \
+            -t "ci-build-test:${GITHUB_SHA}" \
+            "${DOCKER_CONTEXT}"
 
   docker-lint:
     if: ${{ inputs.run_docker_lint }}

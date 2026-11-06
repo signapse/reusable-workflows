@@ -51,24 +51,31 @@ jobs:
 
       - name: Parse extra env vars
         if: ${{ inputs.extra-super-linter-env != '' }}
+        env:
+          EXTRA_SUPER_LINTER_ENV: ${{ inputs.extra-super-linter-env }}
         run: |
           while IFS= read -r line; do
             [ -z "$line" ] && continue
             echo "$line" >> "$GITHUB_ENV"
-          done <<< "${{ inputs.extra-super-linter-env }}"
+          done <<< "${EXTRA_SUPER_LINTER_ENV}"
 
       - name: Set linter overrides
+        env:
+          DISABLE_CHECKOV: ${{ inputs.disable-checkov }}
+          DISABLE_JSCPD: ${{ inputs.disable-jscpd }}
+          DISABLE_GITLEAKS: ${{ inputs.disable-gitleaks }}
+          DISABLE_ESLINT: ${{ inputs.disable-eslint }}
         run: |
-          if [ "${{ inputs.disable-checkov }}" = "true" ]; then
+          if [ "${DISABLE_CHECKOV}" = "true" ]; then
             echo "VALIDATE_CHECKOV=false" >> "$GITHUB_ENV"
           fi
-          if [ "${{ inputs.disable-jscpd }}" = "true" ]; then
+          if [ "${DISABLE_JSCPD}" = "true" ]; then
             echo "VALIDATE_JSCPD=false" >> "$GITHUB_ENV"
           fi
-          if [ "${{ inputs.disable-gitleaks }}" = "true" ]; then
+          if [ "${DISABLE_GITLEAKS}" = "true" ]; then
             echo "VALIDATE_GITLEAKS=false" >> "$GITHUB_ENV"
           fi
-          if [ "${{ inputs.disable-eslint }}" = "true" ]; then
+          if [ "${DISABLE_ESLINT}" = "true" ]; then
             echo "VALIDATE_JAVASCRIPT_ES=false" >> "$GITHUB_ENV"
             echo "VALIDATE_JSX=false" >> "$GITHUB_ENV"
             echo "VALIDATE_TYPESCRIPT_ES=false" >> "$GITHUB_ENV"
@@ -79,13 +86,15 @@ jobs:
 
       - name: Set JSCPD threshold
         if: ${{ inputs.jscpd-threshold > 0 && !inputs.disable-jscpd }}
+        env:
+          JSCPD_THRESHOLD: ${{ inputs.jscpd-threshold }}
         run: |
           if [ ! -f .jscpd.json ]; then
-            echo '{"threshold": ${{ inputs.jscpd-threshold }}}' > .jscpd.json
+            printf '{"threshold": %s}\n' "${JSCPD_THRESHOLD}" > .jscpd.json
           else
             # Update threshold in existing config
             tmp=$(mktemp)
-            jq '.threshold = ${{ inputs.jscpd-threshold }}' .jscpd.json > "$tmp" && mv "$tmp" .jscpd.json
+            jq --argjson threshold "${JSCPD_THRESHOLD}" '.threshold = $threshold' .jscpd.json > "$tmp" && mv "$tmp" .jscpd.json
           fi
 
       - name: Run Super-Linter
