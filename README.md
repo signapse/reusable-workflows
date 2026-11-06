@@ -51,6 +51,7 @@ Builds Docker images and pushes them to Amazon ECR with configurable build argum
 - `dockerfile_path` (optional): Path to Dockerfile (default: `./Dockerfile`)
 - `docker_context` (optional): Docker build context (default: `.`)
 - `push_latest` (optional): Push `:latest` tag (default: `true`)
+- `provenance` / `sbom` (optional, `use_buildx: true` only): Passed to `docker/build-push-action`. Empty (the default) keeps the action's default, which attaches a provenance attestation and pushes an OCI image index. Set `'false'` for Lambda container images, because Lambda rejects image indexes
 
 **Outputs/Artifacts**:
 - `deploy_info-{image_tag}`: JSON artifact containing deployment metadata (image URIs, version, commit SHA, etc.)
