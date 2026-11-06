@@ -5,8 +5,8 @@ name: Release Train (reusable)
 #   qa-passed (ADR 0001, the Autonomous Delivery Pipeline): the `select` job
 #     picks the Release Candidate, the newest main build whose tickets all
 #     carry QA Passed, walking from the release tag prod runs, and outputs it
-#     (rc_sha, rc_image_tag, rc_tickets, untracked_commits, blocked_by,
-#     staged_tag). Callers trigger it from the event router
+#     (rc_sha, rc_image_tag, rc_tickets, untracked_commits, blocked_by).
+#     Callers trigger it from the event router
 #     (workflow_dispatch with `ticket` + `trigger_id`) plus an hourly schedule.
 #     Caller template: docs/RELEASE-TRAIN.md.
 #
@@ -195,17 +195,6 @@ on:
       selection_base:
         description: 'qa-passed: where the walk started: the release tag prod runs (or selection_base)'
         value: ${{ jobs.select.outputs.selection_base }}
-      rc_release_tag:
-        description: 'qa-passed: release tag already on the Release Candidate (outcome already_promoted), else empty'
-        value: ${{ jobs.select.outputs.rc_release_tag }}
-      staged_tag:
-        description: >-
-          qa-passed: newest selectable build that already carries a release
-          tag (what staging runs and prod may resume), empty when none
-        value: ${{ jobs.select.outputs.staged_tag }}
-      staged_tickets:
-        description: 'qa-passed: comma-separated tickets from selection_base to staged_tag'
-        value: ${{ jobs.select.outputs.staged_tickets }}
       selection:
         description: 'qa-passed: full selection JSON (see actions/release-train/scripts/release-candidate.sh)'
         value: ${{ jobs.select.outputs.selection }}
@@ -240,9 +229,6 @@ jobs:
       blocked_by: ${{ steps.select.outputs.blocked_by }}
       selection: ${{ steps.select.outputs.selection }}
       selection_base: ${{ steps.base.outputs.base }}
-      rc_release_tag: ${{ steps.select.outputs.rc_release_tag }}
-      staged_tag: ${{ steps.select.outputs.staged_tag }}
-      staged_tickets: ${{ steps.select.outputs.staged_tickets }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -256,7 +242,9 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: signapse/reusable-workflows
-          ref: ${{ job.workflow_sha }} # scripts from the same commit as this workflow, not mutable main
+          # Scripts from the same commit as this workflow, not mutable main. An
+          # empty workflow_sha would silently check out main, so fail instead.
+          ref: ${{ job.workflow_sha || 'job.workflow_sha-is-empty' }}
           path: _rw
           persist-credentials: false
 
@@ -333,9 +321,6 @@ jobs:
             echo "rc_tickets=$(jq -r '[.tickets[].id] | join(",")' <<< "$sel")"
             echo "untracked_commits=$(jq -c .untracked_commits <<< "$sel")"
             echo "blocked_by=$(jq -r '.blocked_by.id // ""' <<< "$sel")"
-            echo "rc_release_tag=$(jq -r '.rc.release_tag // ""' <<< "$sel")"
-            echo "staged_tag=$(jq -r '.staged.release_tag // ""' <<< "$sel")"
-            echo "staged_tickets=$(jq -r '.staged.tickets // [] | join(",")' <<< "$sel")"
             echo "selection<<$eof"
             echo "$sel"
             echo "$eof"
@@ -491,7 +476,9 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: signapse/reusable-workflows
-          ref: ${{ job.workflow_sha }} # scripts from the same commit as this workflow, not mutable main
+          # Scripts from the same commit as this workflow, not mutable main. An
+          # empty workflow_sha would silently check out main, so fail instead.
+          ref: ${{ job.workflow_sha || 'job.workflow_sha-is-empty' }}
           path: _rw
           persist-credentials: false
 

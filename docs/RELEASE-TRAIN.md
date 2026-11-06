@@ -69,9 +69,7 @@ does nothing then.
 
 `rc_tickets` are all the live tickets from prod's tag to the Release
 Candidate, not only the ones new since the last Promotion. Staging tests and
-prod act on that same set. `staged_tag` and `staged_tickets` name the newest
-selectable build that already carries a release tag (and its tickets from
-prod's tag): what prod deploys when a run promotes nothing new.
+prod act on that same set.
 
 ### Why a successful main-push run, not an ECR lookup
 
@@ -94,9 +92,6 @@ prod's tag): what prod deploys when a run promotes nothing new.
 | `untracked_commits` | `[{"sha":"…","subject":"chore(deps): …"}, {"sha":"…","subject":"Revert …","revert":true}]` | Commits riding along without a ticket check: ticketless commits, and revert commits (`revert: true`) even when their message, PR title or branch names a ticket |
 | `blocked_by` | `SIG-3` | Ticket that stopped the line, empty when none |
 | `selection_base` | `1.2.40` | Where the walk started: the release tag prod runs |
-| `rc_release_tag` | `1.2.44` | Release tag already on the Release Candidate (`already_promoted`), else empty |
-| `staged_tag` | `1.2.44` | Newest selectable build already carrying a release tag, empty when none |
-| `staged_tickets` | `SIG-1,SIG-2` | Tickets from `selection_base` to `staged_tag` |
 | `selection` | JSON | Everything above plus every walked commit, its tickets and build, and the blocking commit (`blocked_by.sha`) |
 
 The job summary shows the same data with links.
@@ -139,9 +134,8 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: write        # tags for the Promotion (SIG-2764)
+  contents: read
   pull-requests: read    # PR title and branch per commit
-  checks: read
   actions: read          # main-push runs: which commits are builds
 
 jobs:

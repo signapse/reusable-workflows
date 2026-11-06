@@ -41,14 +41,11 @@
 # only; the train always passes the prod tag. <head-ref> defaults to HEAD.
 #
 # Output:
-#   {base, last_tag (= base), last_release_tag, head_sha, outcome, already_promoted,
+#   {base, last_release_tag, head_sha, outcome, already_promoted,
 #    rc: {sha, image_tag, run_number, run_url, release_tag} | null,
 #    tickets: [{id, title, url, state}],          # every live ticket from <base> to the RC
 #    untracked_commits: [{sha, subject, revert?}],# ticketless and revert commits up to the RC
 #    reverted: [{sha, subject, tickets, reverted_by}],  # reverted commits walked
-#    staged: {sha, image_tag, release_tag, tickets: [ids]} | null,
-#                       # newest build up to the RC that already carries a
-#                       # release tag: what prod may deploy (resume mode)
 #    blocked_by: {id, title, url, state, reason, sha, subject} | null,
 #    commits: [{sha, subject, tickets, build, kind}]}   # every commit walked
 # outcome: selected | already_promoted (the RC already carries a release tag:
@@ -171,7 +168,6 @@ tickets_pending='[]'
 reverted='[]'
 holes='[]'   # live reverting commits not walked yet: no build is selectable
 rc='null'
-staged='null'
 blocked='null'
 
 while IFS= read -r sha; do
@@ -254,11 +250,6 @@ while IFS= read -r sha; do
     untracked=$(jq -nc --argjson a "$untracked" --argjson b "$untracked_pending" '$a + $b')
     tickets_pending='[]'
     untracked_pending='[]'
-    if [ -n "$tag" ]; then
-      # shellcheck disable=SC2016 # jq bindings, not shell expansion.
-      staged=$(jq -nc --argjson rc "$rc" --argjson t "$tickets" \
-        '{sha: $rc.sha, image_tag: $rc.image_tag, release_tag: $rc.release_tag, tickets: [$t[].id]}')
-    fi
   elif [ "$build" != 'null' ]; then
     log "build of ${sha:0:7} is not selectable: it still contains reverted code (revert not merged yet)"
   fi
@@ -285,10 +276,9 @@ jq -nc \
   --argjson tickets "$tickets" \
   --argjson untracked "$untracked" \
   --argjson reverted "$reverted" \
-  --argjson staged "$staged" \
   --argjson blocked "$blocked" \
   --argjson commits "$commits" \
-  '{base: $base, last_tag: $base, last_release_tag: $last_release, head_sha: $head_sha,
+  '{base: $base, last_release_tag: $last_release, head_sha: $head_sha,
     outcome: $outcome, already_promoted: $already,
     rc: $rc, tickets: $tickets, untracked_commits: $untracked, reverted: $reverted,
-    staged: $staged, blocked_by: $blocked, commits: $commits}'
+    blocked_by: $blocked, commits: $commits}'

@@ -265,7 +265,7 @@ a_then_b() {
 @test "nothing since the last Promotion -> outcome none" {
   run select_rc
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.outcome == "none" and .rc == null and .last_tag == "1.0.0"' > /dev/null
+  echo "$output" | jq -e '.outcome == "none" and .rc == null and .base == "1.0.0"' > /dev/null
 }
 
 @test "walks from the nearest release tag, ignoring other tags" {
@@ -276,7 +276,7 @@ a_then_b() {
   ticket SIG-2 "On Dev · Ready for QA" "QA Passed"
   run select_rc
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.last_tag == "1.0.1" and [.tickets[].id] == ["SIG-2"]' > /dev/null
+  echo "$output" | jq -e '.base == "1.0.1" and [.tickets[].id] == ["SIG-2"]' > /dev/null
   run ! grep -qx SIG-1 "$TMP/linear-calls"
 }
 
@@ -291,7 +291,7 @@ a_then_b() {
   ticket SIG-1 "On Dev · Ready for QA" "QA Passed"
   run select_rc
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.last_tag == "1.0.0" and [.tickets[].id] == ["SIG-1"]' > /dev/null
+  echo "$output" | jq -e '.base == "1.0.0" and [.tickets[].id] == ["SIG-1"]' > /dev/null
   echo "$output" | jq -e --arg m "$(sha_of "Merge side")" '.rc.sha == $m' > /dev/null
 }
 
@@ -304,7 +304,7 @@ a_then_b() {
   ticket SIG-3 "On Dev · Ready for QA" "QA Passed"
   run select_rc
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e '.last_tag == "2.0.0" and [.tickets[].id] == ["SIG-3"]' > /dev/null
+  echo "$output" | jq -e '.base == "2.0.0" and [.tickets[].id] == ["SIG-3"]' > /dev/null
 }
 
 @test "Linear errors next to issue data fail the run" {
@@ -401,9 +401,6 @@ a_then_b() {
   run select_rc 1.0.0
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.outcome == "selected" and [.tickets[].id] == ["SIG-1","SIG-2"]' > /dev/null
-  # The newest build that already carries a release tag is what prod may resume.
-  echo "$output" | jq -e --arg a "$(sha_of "feat(SIG-1): A")" \
-    '.staged == {sha: $a, image_tag: "main-11-\($a)", release_tag: "1.0.1", tickets: ["SIG-1"]}' > /dev/null
 }
 
 @test "already_promoted: the newest selectable build is the tag on staging" {
@@ -415,7 +412,7 @@ a_then_b() {
   run select_rc 1.0.0
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.outcome == "already_promoted" and .rc.release_tag == "1.0.1"' > /dev/null
-  echo "$output" | jq -e '.staged.release_tag == "1.0.1" and .blocked_by.id == "SIG-2"' > /dev/null
+  echo "$output" | jq -e '.blocked_by.id == "SIG-2"' > /dev/null
 }
 
 @test "a base that is not on the branch is an error" {
