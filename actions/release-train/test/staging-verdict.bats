@@ -300,10 +300,13 @@ fail() { export SUITE_JOB_RESULT=failure SUITE_RESULT=failed; }
   run verdict
   [ "$status" -eq 0 ]
   # The flip records the pass, but the fail already sent the ticket to QA
-  # Failed without its QA Passed: only QA takes it out (prod refuses it).
+  # Failed without its QA Passed: only QA takes it out, so prod must not run.
   [ "$(labels SIG-1)" = '["Feature","Staging Passed"]' ]
   [ "$(state SIG-1)" = "QA Failed" ]
   [ "$(comments SIG-1)" -eq 2 ]
+  echo "$output" | jq -e '.verdict == "passed" and .staging_passed == false
+    and (.reason | contains("left SIG-1, SIG-2 in QA Failed"))' > /dev/null
+  [[ "$(comment SIG-1)" == *"An earlier attempt sent this ticket to **QA Failed**"* ]]
 }
 
 @test "a comment from another run does not count as already commented" {

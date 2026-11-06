@@ -29,7 +29,7 @@ HERE="$(dirname "$0")"
 QA_FAILED="${QA_FAILED_STATE:-QA Failed}"
 QA_PASSED="${QA_PASSED_LABEL:-QA Passed}"
 
-ids=$(jq -nc --arg t "$1" '$t | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(. != ""))')
+ids=$(csv_json "$1")
 errors='[]'
 add_error() { errors=$(jq -nc --argjson e "$errors" --arg m "$1" '$e + [$m]'); log "ERROR: $1"; }
 
