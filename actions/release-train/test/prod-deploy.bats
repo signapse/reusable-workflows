@@ -38,6 +38,7 @@ add_run() { # add_run <title>
 if [ "$1" = -X ]; then
   body=$(cat)
   [ -f "$TMP/dispatch-403" ] && { echo "gh: Resource not accessible by integration (HTTP 403)" >&2; exit 1; }
+  [ -f "$TMP/dispatch-502" ] && { echo "gh: Bad Gateway (HTTP 502)" >&2; exit 1; }
   if jq -e '.inputs.run_key' <<< "$body" > /dev/null && [ ! -f "$TMP/key-ok" ]; then
     echo 'gh: Unexpected inputs provided: ["run_key"] (HTTP 422)' >&2; exit 1
   fi
@@ -159,6 +160,14 @@ field() { tail -n1 <<< "$output" | jq -r "$@"; }
   [ "$(field .ok)" = false ]
   [[ "$(field .reason)" == *"HTTP 403"* ]]
   [ ! -s "$TMP/dispatched" ]
+  [ "$(field -c .runs)" = '[]' ]
+}
+
+@test "a 5xx on the dispatch may have started a run: the service is recorded without a run id" {
+  touch "$TMP/dispatch-502"
+  deploy
+  [ "$(field .ok)" = false ]
+  [ "$(field -c '[.runs[] | {service, run_id}]')" = '[{"service":"signstream-api","run_id":""}]' ]
 }
 
 @test "no run shows up: fails after the find timeout" {

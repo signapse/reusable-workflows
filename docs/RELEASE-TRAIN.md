@@ -70,7 +70,9 @@ does nothing then.
 
 `rc_tickets` are all the live tickets from prod's tag to the Release
 Candidate, not only the ones new since the last Promotion. Staging tests and
-prod act on that same set.
+prod act on that same set. `staged_tag` and `staged_tickets` name the newest
+selectable build that already carries a release tag (and its tickets from
+prod's tag): what prod deploys when a run promotes nothing new.
 
 ### Why a successful main-push run, not an ECR lookup
 
@@ -93,6 +95,8 @@ prod act on that same set.
 | `untracked_commits` | `[{"sha":"…","subject":"chore(deps): …"}, {"sha":"…","subject":"Revert …","revert":true}]` | Commits riding along without a ticket check: ticketless commits, and revert commits (`revert: true`) even when their message, PR title or branch names a ticket |
 | `blocked_by` | `SIG-3` | Ticket that stopped the line, empty when none |
 | `selection_base` | `1.2.40` | Where the walk started: the release tag prod runs |
+| `staged_tag` | `1.2.44` | Newest selectable build already carrying a release tag, empty when none (prod resume, SIG-2769) |
+| `staged_tickets` | `SIG-1,SIG-2` | Tickets from `selection_base` to `staged_tag` |
 | `selection` | JSON | Everything above plus every walked commit, its tickets and build, and the blocking commit (`blocked_by.sha`) |
 
 The job summary shows the same data with links.
@@ -428,6 +432,10 @@ add no tickets (`lib/revert.sh`, the same rule as the selection).
   prod inside a newer tag: its tickets are still in `QA Failed`.
 - **Resume**: the same check gives `nothing`.
 
+Neither mode deploys over a release tag the candidate does not contain (for
+example a newer tag deployed by hand with deploy-prod.yml): fresh refuses,
+resume gives `nothing`.
+
 `Staging Passed` is cleared at every Promotion (SIG-2764), so it always
 belongs to the newest tag's staging run.
 
@@ -467,10 +475,13 @@ from deploying an earlier tag that already passed staging.
   created by SIG-2749). Another cohort, or no `qa_cohort_id` with Feature
   tickets to check, fails the guard. Every page of PostHog's flag search is
   read.
-- If the guard or the "prod still runs the tag" check fails after a passed
-  smoke, tickets do not move and a critical Slack alert (`<!channel>`) goes
-  out. Nothing is rolled back: a widened flag is a PostHog change that an
-  image rollback does not undo.
+- If the flag guard fails after a passed smoke, tickets do not move and a
+  critical Slack alert (`<!channel>`) goes out. Nothing is rolled back: a
+  widened flag is a PostHog change that an image rollback does not undo. A
+  failed ticket move after a passed smoke gets a plain alert.
+- A `refused` plan (no staging pass on record, a tag rolled back from
+  before, or prod runs a release tag the candidate does not contain) alerts
+  Slack too: later resume runs report `nothing` for the same reason.
 - If a deploy-prod run or the final "prod runs the tag" check fails or times
   out, `scripts/prod-partial.sh` waits (up to 10 minutes) for any deploy-prod
   run still going (it pushes the tag before its rollout check), then re-reads
@@ -509,9 +520,8 @@ rollback.yml.
 
 ### Outputs (for SIG-2771)
 
-`decision`, `deferred`, `deployed`, `release_tag`, `version`, `sha`,
-`tickets`, `services` (prod_services), `dispatched_services`,
-`previous_tags` (`{service: tag}`), `previous_tag` (when all services agree),
+`decision`, `deployed`, `release_tag`, `version`, `sha`,
+`tickets`, `dispatched_services`, `previous_tags` (`{service: tag}`),
 `run_key` (service S was dispatched with `<run_key>-<S>`), `deploy_runs`,
 `terraform_gate`, `terraform_run_url`, `linear_release_id`,
 `linear_release_url`, `prod_smoke_passed` (`true`/`false` once deployed;

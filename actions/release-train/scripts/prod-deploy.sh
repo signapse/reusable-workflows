@@ -90,7 +90,9 @@ list_runs() {
 }
 
 # dispatch: tries the richest request first and drops what the API rejects.
-# Sets run_id (when the API returned it) and key_sent.
+# Sets run_id (when the API returned it) and key_sent. Returns 2 on an HTTP
+# 4xx (nothing started), 1 on any other failure (a 5xx or a timeout may still
+# have started a run).
 dispatch() {
   local with_key with_details body resp
   for variant in "key details" "details" "key" ""; do
@@ -109,10 +111,10 @@ dispatch() {
       log "dispatched ${DEPLOY_WORKFLOW} ${svc} ${TAG} (run_key input: ${with_key}, run id returned: ${run_id:-no})"
       return 0
     fi
-    grep -q 'HTTP 422' "$work/err" || return 1
+    grep -q 'HTTP 422' "$work/err" || { grep -q 'HTTP 4[0-9][0-9]' "$work/err" && return 2; return 1; }
     log "dispatch rejected without starting a run (${variant:-plain}): $(cat "$work/err"); trying a simpler request"
   done
-  return 1
+  return 2
 }
 
 # find_run: sets run_id, run_url, correlated_by.
@@ -190,7 +192,12 @@ while IFS= read -r svc; do
   listed=$(list_runs) || result false "could not list ${DEPLOY_WORKFLOW} runs on ${K8S_REPO} before dispatching ${svc}: $(cat "$work/err")"
   jq -c '[.workflow_runs[]?.id]' <<< "$listed" > "$work/before"
 
-  dispatch || result false "could not dispatch ${DEPLOY_WORKFLOW} for ${svc} on ${K8S_REPO}: $(cat "$work/err")"
+  if dispatch; then :; else
+    # Not a 4xx: the request may have started a run. Record the service with
+    # no run id, so prod-partial.sh reports it as unknown, not unchanged.
+    [ "$?" -eq 2 ] || record
+    result false "could not dispatch ${DEPLOY_WORKFLOW} for ${svc} on ${K8S_REPO}: $(cat "$work/err")"
+  fi
   if ! find_run; then
     record
     result false "no ${DEPLOY_WORKFLOW} run for ${svc} showed up within ${FIND_TIMEOUT_SECONDS}s of the dispatch; check ${K8S_REPO} Actions before re-running"

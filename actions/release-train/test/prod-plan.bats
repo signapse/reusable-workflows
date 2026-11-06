@@ -110,7 +110,6 @@ field() { tail -n1 <<< "$output" | jq -r "$@"; }
   [ "$(field .sha)" = "$(git rev-parse 1.1.0)" ]
   [ "$(field -c .to_deploy)" = '["svc-a"]' ]
   [ "$(field -c .previous_tags)" = '{"svc-a":"1.0.0"}' ]
-  [ "$(field .previous_tag)" = 1.0.0 ]
   [ "$(field .base)" = 1.0.0 ]
 }
 
@@ -147,7 +146,6 @@ field() { tail -n1 <<< "$output" | jq -r "$@"; }
   [ "$status" -eq 0 ]
   [ "$(field .decision)" = already_deployed ]
   [ "$(field -c .to_deploy)" = '[]' ]
-  [ "$(field .previous_tag)" = 1.0.0 ]
   [ "$(field -c .tickets)" = '["SIG-1","SIG-2"]' ]
 }
 
@@ -316,6 +314,22 @@ field() { tail -n1 <<< "$output" | jq -r "$@"; }
   unset RESUME_TAG
   plan
   [ "$(field .release_tag)" = 1.2.0 ]
+  [ "$(field .decision)" = nothing ]
+}
+
+@test "never deploys an older tag over a newer one prod runs (hand-deployed hotfix)" {
+  git commit -q --allow-empty -m "SIG-1 hotfix"
+  git tag 1.2.0
+  prod_tag svc-a 1.2.0
+  export RELEASE_TAG=1.1.0 TICKETS=SIG-1
+  plan
+  [ "$status" -eq 0 ]
+  [ "$(field .decision)" = refused ]
+  [[ "$(field .reason)" == *"svc-a runs 1.2.0"* ]]
+  unset RELEASE_TAG
+  export RESUME_TAG=1.1.0
+  plan
+  [ "$status" -eq 0 ]
   [ "$(field .decision)" = nothing ]
 }
 
