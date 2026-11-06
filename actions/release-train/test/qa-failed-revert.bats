@@ -43,6 +43,7 @@ case "$url" in
     ;;
   *linear.app*)
     [ -f "$TMP/linear-down" ] && { printf 'boom\n500'; exit 0; }
+    [ -f "$TMP/linear-errors" ] && { printf '{"errors":[{"message":"Rate limit exceeded"}],"data":null}\n200'; exit 0; }
     if echo "$body" | jq -e '.query | test("commentCreate")' > /dev/null; then
       [ -f "$TMP/comment-down" ] && { printf 'boom\n500'; exit 0; }
       echo "$body" | jq -c .variables >> "$TMP/comments"
@@ -340,11 +341,18 @@ EOF
   run run_revert
   [ "$(created)" -eq 1 ]
   echo "prodzilla/revert-SIG-1" > "$TMP/merged-prs"
+  git revert --no-edit HEAD > /dev/null   # the revert PR merged
   run run_revert
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.tickets[0] | .action == "merged" and .pr_url == "https://github.com/o/r/pull/99"' > /dev/null
   ! grep -q WARNING "$TMP/stderr"
   [ "$(created)" -eq 1 ]
+  # The fix re-lands and fails QA again: the merged PR no longer covers it.
+  change g "g1" "feat(SIG-1): fix"
+  run run_revert
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.tickets[0].action == "branch_exists"' > /dev/null
+  grep -q WARNING "$TMP/stderr"
 }
 
 @test "no base -> usage error" {
@@ -464,6 +472,15 @@ EOF
   change f "one-a" "feat(SIG-1): A"
   ticket SIG-1 "QA Failed" 25
   touch "$TMP/linear-down"
+  run run_revert
+  [ "$status" -ne 0 ]
+  [ "$(created)" -eq 0 ]
+}
+
+@test "a Linear error reply with no issue fails the run instead of skipping the ticket" {
+  change f "one-a" "feat(SIG-1): A"
+  ticket SIG-1 "QA Failed" 25
+  touch "$TMP/linear-errors"
   run run_revert
   [ "$status" -ne 0 ]
   [ "$(created)" -eq 0 ]
