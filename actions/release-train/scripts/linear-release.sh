@@ -58,12 +58,7 @@ CONFIG="${PIPELINE_CONFIG:-.signapse/pipeline.yml}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
 # --- 1. pipeline ---------------------------------------------------------
-pipeline_name="${LINEAR_PIPELINE:-}"
-if [ -z "$pipeline_name" ]; then
-  [ -f "$CONFIG" ] || die "no linear_pipeline input and no $CONFIG; add 'linear_pipeline: <name>' to $CONFIG"
-  pipeline_name=$("$HERE/pipeline-config.sh" linear_pipeline "$CONFIG")
-  [ -n "$pipeline_name" ] || die "$CONFIG has no linear_pipeline key"
-fi
+pipeline_name="${LINEAR_PIPELINE:-$("$HERE/pipeline-config.sh" linear_pipeline --required "$CONFIG")}"
 
 # gql <query> <vars-json> → .data, or die with Linear's error message.
 gql() {
@@ -91,7 +86,7 @@ release=$(jq -c '.releases.nodes[0] // empty' <<<"$existing")
 # --- 3. commit range ------------------------------------------------------
 # On a re-run the range must end where this Release's own predecessor ended,
 # not at a newer Release, so look only at Releases created before it.
-git rev-parse --verify -q "${UNTIL}^{commit}" > /dev/null || die "unknown ref: $UNTIL"
+UNTIL=$(git rev-parse --verify -q "${UNTIL}^{commit}") || die "unknown ref: $2"
 if [ -z "$SINCE" ]; then
   before=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   [ -z "$release" ] || before=$(jq -r '.createdAt' <<<"$release")
@@ -105,11 +100,9 @@ if [ -z "$SINCE" ]; then
       | select(.version | ltrimstr($p) | test("^v?[0-9]"))] | max_by(.createdAt) // empty' <<<"$prev")
   [ -n "$latest" ] || die "pipeline '$pipeline_name' has no earlier Release with a commit; pass 'since' (the last commit deployed to prod) for the first Deployment"
   SINCE=$(jq -r '.commitSha' <<<"$latest")
-  git rev-parse --verify -q "${SINCE}^{commit}" > /dev/null \
-    || die "latest Release $(jq -r '.version' <<<"$latest") points at $SINCE, which is not in this repo; pass 'since'"
   log "range starts after Release $(jq -r '.version' <<<"$latest") ($SINCE)"
 fi
-git rev-parse --verify -q "${SINCE}^{commit}" > /dev/null || die "unknown ref: $SINCE"
+git rev-parse --verify -q "${SINCE}^{commit}" > /dev/null || die "since $SINCE is not a commit in this repo; pass 'since'"
 
 # --- 4. tickets + untracked commits ---------------------------------------
 tickets=$(LINEAR_TEAM_KEY="$TEAM_KEY" "$HERE/ticket-extractor.sh" "$SINCE" "$UNTIL" < /dev/null)
@@ -133,7 +126,7 @@ untracked=$(
 
 describe() { # <unresolved-json>
   local repo="${GITHUB_REPOSITORY:-}" sha
-  sha=$(git rev-parse --short "${UNTIL}^{commit}")
+  sha=$(git rev-parse --short "$UNTIL")
   jq -rn --arg v "$VERSION" --arg repo "$repo" --arg sha "$sha" \
     --argjson t "$tickets" --argjson u "$untracked" --argjson n "$1" '
     "Deployment of \($v)" + (if $repo != "" then " (\($repo)@\($sha))" else " (\($sha))" end) + ".\n\n"
@@ -187,7 +180,7 @@ fi
 
 # --- 7. finalise: description (true to what is attached) and commitSha ------
 out=$(gql 'mutation($id:String!,$input:ReleaseUpdateInput!){ releaseUpdate(id:$id, input:$input){ success } }' \
-  "$(jq -nc --arg id "$release_id" --arg d "$(describe "$unresolved")" --arg sha "$(git rev-parse "${UNTIL}^{commit}")" \
+  "$(jq -nc --arg id "$release_id" --arg d "$(describe "$unresolved")" --arg sha "$UNTIL" \
     '{id:$id, input:{description:$d, commitSha:$sha}}')")
 [ "$(jq -r '.releaseUpdate.success // false' <<<"$out")" = "true" ] || die "releaseUpdate (description, commitSha) failed"
 

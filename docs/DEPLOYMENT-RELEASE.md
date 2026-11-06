@@ -36,7 +36,7 @@ sentry_project: signstream    # Sentry project slug; omit for no Sentry release 
 
 The Release lists tickets from commits in `since..sha`. By default `since` is the `commitSha` of the latest Release in the pipeline from **this repo** (same version prefix), ignoring this version and Releases in a canceled stage (`Rolled back`). In other words, it's the last commit that actually reached prod. It deliberately isn't the previous git tag: a Release Candidate that failed staging is tagged but never deployed, so its tickets belong in the next Release. A pipeline's first Deployment has no earlier Release, so pass `since` explicitly there. On a re-run of a version that already has a Release, only Releases created before it count, so the range stays the same even if newer Deployments exist. A range with more than 250 ticket refs is refused before anything is created (usually a wrong `since`). A new Release gets its `commitSha` only after every ticket is attached, so a run that fails half-way is never used as the starting point; re-running the same version finishes it.
 
-Runs for the same repository and version are serialised (`concurrency`), so concurrent calls can't create two Releases.
+Runs for the same repository and version are serialised (`concurrency`), so concurrent calls can't create two Releases. GitHub keeps only one pending run per group: a third run for the same version cancels the one still waiting, so that caller's Deployment shows a cancelled job. That is not a failure; the run that went ahead records the same Release.
 
 ## Inputs
 
@@ -79,10 +79,10 @@ The Sentry job checks out `sha` (or the `version` tag), so `set_commits: auto` a
 ## Failure modes
 
 - Pipeline not found: `Linear release pipeline '<name>' not found. Create it in Linear (Settings > Releases) or fix linear_pipeline in .signapse/pipeline.yml.`
-- No pipeline name anywhere: `no linear_pipeline input and no .signapse/pipeline.yml`.
+- No pipeline name anywhere: `.signapse/pipeline.yml not found: the repo must declare its pipeline config there (see docs)` (or `.signapse/pipeline.yml has no 'linear_pipeline:' value`).
 - Stage missing: `stage 'Deployed' not found in pipeline 'SignStream' (has: Released)`.
 - No earlier Release in the pipeline and no `since`: `pipeline '<name>' has no earlier Release with a commit; pass 'since'` (first Deployment).
-- Latest Release's commit not in this repo: pass `since`.
+- `since` (passed in, or the latest Release's commit) not in this repo: `since <sha> is not a commit in this repo; pass 'since'`.
 
 ## Why the GraphQL API and not `linear-release-action`
 
@@ -92,7 +92,7 @@ The spec names `linear/linear-release-action`. It does not fit this pipeline's R
 - Creating in the completed stage fires Linear's "release completed" status automations, which could move tickets to Done at Deployment time instead of after the Stability Window.
 - It authenticates with a per-pipeline access key (one secret per product pipeline), and it computes its own commit range from the pipeline's last Release rather than the Release Candidate's range.
 
-So the step calls the Linear GraphQL API with the workspace `LINEAR_API_KEY` the release train already uses: `releasePipelines` (by name) → `releases` (latest non-canceled, for the range start) → `releases` (by pipeline + version) → `releaseCreate` (with `stageId`) → `issues` (team key + numbers) → `issueUpdate(addedReleaseIds)` per found issue. Tickets come from `ticket-extractor.sh`, the same extractor the release train uses.
+So the step calls the Linear GraphQL API with the workspace `LINEAR_API_KEY` the release train already uses: `releasePipelines` (by name) → `releases` (by pipeline + version; its `createdAt` bounds the next lookup on a re-run) → `releases` (latest non-canceled with a commit, created before it, for the range start) → `releaseCreate` (with `stageId`) → `issues` (team key + numbers) → `issueUpdate(addedReleaseIds)` per found issue → `releaseUpdate(description, commitSha)`. The `commitSha` is set last, so a run that fails half-way never becomes the default `since`. Tickets come from `ticket-extractor.sh`, the same extractor the release train uses.
 
 ## Linear pipeline setup (SIG-2748)
 

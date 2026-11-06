@@ -103,7 +103,9 @@ jobs:
   linear-release:
     runs-on: ubuntu-latest
     # Serialise runs for one version so two can't both miss the lookup and
-    # create two Releases. Never cancel: a queued run is a no-op re-run.
+    # create two Releases. The running job is never cancelled, but GitHub keeps
+    # one pending run per group: a third run cancels the one waiting. That
+    # cancelled job is not a failure; it would have been a no-op re-run.
     concurrency:
       group: deployment-release-${{ github.repository }}-${{ inputs.release_prefix }}-${{ inputs.version }}
       cancel-in-progress: false
@@ -153,14 +155,8 @@ jobs:
             echo "since=$(jq -r '.since' <<<"$out")"
             echo "release_version=$(jq -r '.version' <<<"$out")"
           } >> "$GITHUB_OUTPUT"
-          {
-            echo "### Linear Release $(jq -r '.version' <<<"$out")"
-            echo "$(jq -r '.url' <<<"$out") (stage $(jq -r '.stage' <<<"$out"), created: $(jq -r '.created' <<<"$out"))"
-            echo
-            echo "Tickets: $(jq -r '.tickets | join(", ")' <<<"$out")"
-            echo "Untracked commits: $(jq -r '.untracked | length' <<<"$out")"
-            echo "Not found in Linear: $(jq -r '.unresolved | join(", ")' <<<"$out")"
-          } >> "$GITHUB_STEP_SUMMARY"
+          jq -r '"### Linear Release \(.version)\n\(.url) (stage \(.stage), created: \(.created))\n\nTickets: \(.tickets | join(", "))\nUntracked commits: \(.untracked | length)\nNot found in Linear: \(.unresolved | join(", "))"' \
+            <<<"$out" >> "$GITHUB_STEP_SUMMARY"
 
   sentry-release:
     runs-on: ubuntu-latest

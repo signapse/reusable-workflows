@@ -161,7 +161,7 @@ teardown() { rm -rf "$TMP"; }
   rm .signapse/pipeline.yml
   run "$SCRIPT" v0.0.1 v0.0.1 v0.0.0
   [ "$status" -ne 0 ]
-  [[ "$output" == *"no linear_pipeline input and no .signapse/pipeline.yml"* ]]
+  [[ "$output" == *".signapse/pipeline.yml not found"* ]]
 }
 
 @test "missing stage: error lists the pipeline's stages (SignStream today has only Released)" {
