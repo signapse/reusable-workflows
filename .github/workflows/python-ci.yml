@@ -128,10 +128,12 @@ jobs:
 
       - name: Install dependencies (pip)
         if: ${{ inputs.dependency_manager == 'pip' }}
+        env:
+          REQUIREMENTS_FILE: ${{ inputs.requirements_file }}
         run: |
           python -m pip install --upgrade pip
-          if [ -f "${{ inputs.requirements_file }}" ]; then
-            pip install -r ${{ inputs.requirements_file }}
+          if [ -f "${REQUIREMENTS_FILE}" ]; then
+            pip install -r "${REQUIREMENTS_FILE}"
           fi
           if [ -f "requirements-dev.txt" ]; then
             pip install -r requirements-dev.txt
@@ -151,13 +153,22 @@ jobs:
 
       - name: Run tests (pytest)
         if: ${{ inputs.test_framework == 'pytest' }}
+        env:
+          TEST_ARGS: ${{ inputs.test_args }}
         run: |
           pip install pytest pytest-cov
-          pytest --cov --cov-report=html:coverage-report --cov-report=term -v ${{ inputs.test_args }}
+          # Split like the shell would (honouring quotes) without executing anything.
+          mapfile -d '' -t test_args < <(python3 -c 'import os, shlex, sys; sys.stdout.write("".join(a + "\0" for a in shlex.split(os.environ["TEST_ARGS"])))')
+          pytest --cov --cov-report=html:coverage-report --cov-report=term -v "${test_args[@]}"
 
       - name: Run tests (unittest)
         if: ${{ inputs.test_framework == 'unittest' }}
-        run: python -m unittest discover -s tests -p "*.py" -v ${{ inputs.test_args }}
+        env:
+          TEST_ARGS: ${{ inputs.test_args }}
+        run: |
+          # Split like the shell would (honouring quotes) without executing anything.
+          mapfile -d '' -t test_args < <(python3 -c 'import os, shlex, sys; sys.stdout.write("".join(a + "\0" for a in shlex.split(os.environ["TEST_ARGS"])))')
+          python -m unittest discover -s tests -p "*.py" -v "${test_args[@]}"
 
       - name: Upload coverage report
         if: ${{ inputs.test_framework == 'pytest' }}
@@ -203,11 +214,14 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Build Docker image
+        env:
+          DOCKERFILE_PATH: ${{ inputs.dockerfile_path }}
+          DOCKER_CONTEXT: ${{ inputs.docker_context }}
         run: |
           docker build \
-            -f ${{ inputs.dockerfile_path }} \
-            -t ci-build-test:${{ github.sha }} \
-            ${{ inputs.docker_context }}
+            -f "${DOCKERFILE_PATH}" \
+            -t "ci-build-test:${GITHUB_SHA}" \
+            "${DOCKER_CONTEXT}"
 
   docker-lint:
     if: ${{ inputs.run_docker_lint }}

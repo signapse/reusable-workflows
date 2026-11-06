@@ -80,8 +80,8 @@ runs:
         STAGING_CHECK_PATTERN: ${{ inputs.staging_check_pattern }}
       run: |
         set -euo pipefail
-        echo "action_path=${{ github.action_path }}" >> "$GITHUB_OUTPUT"
-        HERE="${{ github.action_path }}/scripts"
+        echo "action_path=${GITHUB_ACTION_PATH}" >> "$GITHUB_OUTPUT"
+        HERE="${GITHUB_ACTION_PATH}/scripts"
         last_tag="${LAST_TAG:-$(git describe --tags --abbrev=0)}"
         state=$("$HERE/train-composer.sh" "$last_tag" HEAD)
         {

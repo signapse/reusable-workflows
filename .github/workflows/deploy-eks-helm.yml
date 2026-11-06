@@ -156,17 +156,20 @@ jobs:
           version: 'latest'
 
       - name: Configure kubectl for EKS
+        env:
+          CLUSTER_NAME: ${{ inputs.cluster_name }}
+          AWS_REGION: ${{ inputs.aws_region }}
         run: |
           echo "=========================================="
           echo "🔧 Configuring kubectl for EKS"
           echo "=========================================="
-          echo "Cluster: ${{ inputs.cluster_name }}"
-          echo "Region: ${{ inputs.aws_region }}"
+          echo "Cluster: ${CLUSTER_NAME}"
+          echo "Region: ${AWS_REGION}"
           echo "=========================================="
 
           aws eks update-kubeconfig \
-            --name "${{ inputs.cluster_name }}" \
-            --region "${{ inputs.aws_region }}"
+            --name "${CLUSTER_NAME}" \
+            --region "${AWS_REGION}"
 
           echo "✅ kubectl configured"
 
@@ -178,30 +181,38 @@ jobs:
 
       - name: Create namespace
         if: inputs.create_namespace
+        env:
+          NAMESPACE: ${{ inputs.namespace }}
         run: |
-          echo "🔧 Ensuring namespace exists: ${{ inputs.namespace }}"
-          kubectl create namespace ${{ inputs.namespace }} --dry-run=client -o yaml | kubectl apply -f -
+          echo "🔧 Ensuring namespace exists: ${NAMESPACE}"
+          kubectl create namespace "${NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
           echo "✅ Namespace ready"
 
       - name: Add Helm repository
         if: inputs.helm_repo_name != '' && inputs.helm_repo_url != ''
+        env:
+          HELM_REPO_NAME: ${{ inputs.helm_repo_name }}
+          HELM_REPO_URL: ${{ inputs.helm_repo_url }}
         run: |
           echo "📦 Adding Helm repository"
-          helm repo add ${{ inputs.helm_repo_name }} ${{ inputs.helm_repo_url }}
+          helm repo add "${HELM_REPO_NAME}" "${HELM_REPO_URL}"
           helm repo update
           echo "✅ Helm repository added and updated"
 
       - name: Prepare Helm values
         id: prepare-values
+        env:
+          VALUES_INLINE: ${{ inputs.values_inline }}
+          IMAGE_URI: ${{ inputs.image_uri }}
+          INPUT_IMAGE_TAG: ${{ inputs.image_tag }}
+          SET_VALUES: ${{ inputs.set_values }}
         run: |
           echo "🔧 Preparing Helm values"
 
           # Create temporary values file for inline values
-          if [ -n "${{ inputs.values_inline }}" ]; then
+          if [ -n "${VALUES_INLINE}" ]; then
             echo "Creating inline values file..."
-            cat <<'EOF' > /tmp/values-inline.yaml
-          ${{ inputs.values_inline }}
-          EOF
+            printf '%s\n' "${VALUES_INLINE}" > /tmp/values-inline.yaml
             echo "inline_values_file=/tmp/values-inline.yaml" >> $GITHUB_OUTPUT
           else
             echo "inline_values_file=" >> $GITHUB_OUTPUT
@@ -211,25 +222,25 @@ jobs:
           SET_ARGS=""
 
           # Add image URI if provided
-          if [ -n "${{ inputs.image_uri }}" ]; then
+          if [ -n "${IMAGE_URI}" ]; then
             # Parse repository and tag from full URI
-            IMAGE_REPO=$(echo "${{ inputs.image_uri }}" | cut -d: -f1)
-            IMAGE_TAG=$(echo "${{ inputs.image_uri }}" | cut -d: -f2)
+            IMAGE_REPO=$(echo "${IMAGE_URI}" | cut -d: -f1)
+            IMAGE_TAG=$(echo "${IMAGE_URI}" | cut -d: -f2)
             SET_ARGS="$SET_ARGS --set image.repository=$IMAGE_REPO --set image.tag=$IMAGE_TAG"
           fi
 
           # Add image tag if provided separately
-          if [ -n "${{ inputs.image_tag }}" ]; then
-            SET_ARGS="$SET_ARGS --set image.tag=${{ inputs.image_tag }}"
+          if [ -n "${INPUT_IMAGE_TAG}" ]; then
+            SET_ARGS="$SET_ARGS --set image.tag=${INPUT_IMAGE_TAG}"
           fi
 
           # Add custom --set values
-          if [ -n "${{ inputs.set_values }}" ]; then
+          if [ -n "${SET_VALUES}" ]; then
             while IFS= read -r line; do
               if [ -n "$line" ]; then
                 SET_ARGS="$SET_ARGS --set $line"
               fi
-            done <<< "${{ inputs.set_values }}"
+            done <<< "${SET_VALUES}"
           fi
 
           echo "set_args=$SET_ARGS" >> $GITHUB_OUTPUT
@@ -239,9 +250,20 @@ jobs:
             echo "Set arguments: $SET_ARGS"
           fi
 
+      # The helm commands are built as arrays rather than strings passed to
+      # eval, so input values are never re-parsed as shell code. set_args is
+      # still word-split, as before.
       - name: Helm diff (dry-run preview)
         if: inputs.dry_run == false
         continue-on-error: true
+        env:
+          RELEASE_NAME: ${{ inputs.release_name }}
+          CHART_PATH: ${{ inputs.chart_path }}
+          NAMESPACE: ${{ inputs.namespace }}
+          VALUES_FILE: ${{ inputs.values_file }}
+          INLINE_VALUES_FILE: ${{ steps.prepare-values.outputs.inline_values_file }}
+          SET_ARGS: ${{ steps.prepare-values.outputs.set_args }}
+          CHART_VERSION: ${{ inputs.chart_version }}
         run: |
           echo "=========================================="
           echo "📊 Helm Diff Preview"
@@ -254,101 +276,119 @@ jobs:
           fi
 
           # Build helm upgrade command for diff
-          HELM_CMD="helm diff upgrade ${{ inputs.release_name }} ${{ inputs.chart_path }}"
-          HELM_CMD="$HELM_CMD --namespace ${{ inputs.namespace }}"
-          HELM_CMD="$HELM_CMD --allow-unreleased"
+          HELM_CMD=(helm diff upgrade "${RELEASE_NAME}" "${CHART_PATH}")
+          HELM_CMD+=(--namespace "${NAMESPACE}")
+          HELM_CMD+=(--allow-unreleased)
 
           # Add values file
-          if [ -n "${{ inputs.values_file }}" ]; then
-            HELM_CMD="$HELM_CMD --values ${{ inputs.values_file }}"
+          if [ -n "${VALUES_FILE}" ]; then
+            HELM_CMD+=(--values "${VALUES_FILE}")
           fi
 
           # Add inline values
-          if [ -n "${{ steps.prepare-values.outputs.inline_values_file }}" ]; then
-            HELM_CMD="$HELM_CMD --values ${{ steps.prepare-values.outputs.inline_values_file }}"
+          if [ -n "${INLINE_VALUES_FILE}" ]; then
+            HELM_CMD+=(--values "${INLINE_VALUES_FILE}")
           fi
 
           # Add set arguments
-          if [ -n "${{ steps.prepare-values.outputs.set_args }}" ]; then
-            HELM_CMD="$HELM_CMD ${{ steps.prepare-values.outputs.set_args }}"
+          if [ -n "${SET_ARGS}" ]; then
+            read -r -a SET_ARGS_ARR <<< "${SET_ARGS}"
+            HELM_CMD+=("${SET_ARGS_ARR[@]}")
           fi
 
           # Add chart version if specified
-          if [ -n "${{ inputs.chart_version }}" ]; then
-            HELM_CMD="$HELM_CMD --version ${{ inputs.chart_version }}"
+          if [ -n "${CHART_VERSION}" ]; then
+            HELM_CMD+=(--version "${CHART_VERSION}")
           fi
 
-          echo "Running: $HELM_CMD"
-          eval $HELM_CMD || echo "⚠️  Diff preview failed (this may be expected for new releases)"
+          echo "Running: ${HELM_CMD[*]}"
+          "${HELM_CMD[@]}" || echo "⚠️  Diff preview failed (this may be expected for new releases)"
 
           echo "=========================================="
 
       - name: Deploy with Helm
         id: helm-deploy
+        env:
+          RELEASE_NAME: ${{ inputs.release_name }}
+          CHART_PATH: ${{ inputs.chart_path }}
+          NAMESPACE: ${{ inputs.namespace }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          VALUES_FILE: ${{ inputs.values_file }}
+          INLINE_VALUES_FILE: ${{ steps.prepare-values.outputs.inline_values_file }}
+          SET_ARGS: ${{ steps.prepare-values.outputs.set_args }}
+          CHART_VERSION: ${{ inputs.chart_version }}
+          ATOMIC: ${{ inputs.atomic }}
+          WAIT: ${{ inputs.wait }}
+          FORCE: ${{ inputs.force }}
+          TIMEOUT: ${{ inputs.timeout }}
         run: |
           echo "=========================================="
           echo "🚀 Deploying with Helm"
           echo "=========================================="
-          echo "Release: ${{ inputs.release_name }}"
-          echo "Chart: ${{ inputs.chart_path }}"
-          echo "Namespace: ${{ inputs.namespace }}"
-          echo "Dry-run: ${{ inputs.dry_run }}"
+          echo "Release: ${RELEASE_NAME}"
+          echo "Chart: ${CHART_PATH}"
+          echo "Namespace: ${NAMESPACE}"
+          echo "Dry-run: ${DRY_RUN}"
           echo "=========================================="
 
           # Build helm upgrade command
-          HELM_CMD="helm upgrade --install ${{ inputs.release_name }} ${{ inputs.chart_path }}"
-          HELM_CMD="$HELM_CMD --namespace ${{ inputs.namespace }}"
+          HELM_CMD=(helm upgrade --install "${RELEASE_NAME}" "${CHART_PATH}")
+          HELM_CMD+=(--namespace "${NAMESPACE}")
 
           # Add values file
-          if [ -n "${{ inputs.values_file }}" ]; then
-            HELM_CMD="$HELM_CMD --values ${{ inputs.values_file }}"
+          if [ -n "${VALUES_FILE}" ]; then
+            HELM_CMD+=(--values "${VALUES_FILE}")
           fi
 
           # Add inline values
-          if [ -n "${{ steps.prepare-values.outputs.inline_values_file }}" ]; then
-            HELM_CMD="$HELM_CMD --values ${{ steps.prepare-values.outputs.inline_values_file }}"
+          if [ -n "${INLINE_VALUES_FILE}" ]; then
+            HELM_CMD+=(--values "${INLINE_VALUES_FILE}")
           fi
 
           # Add set arguments
-          if [ -n "${{ steps.prepare-values.outputs.set_args }}" ]; then
-            HELM_CMD="$HELM_CMD ${{ steps.prepare-values.outputs.set_args }}"
+          if [ -n "${SET_ARGS}" ]; then
+            read -r -a SET_ARGS_ARR <<< "${SET_ARGS}"
+            HELM_CMD+=("${SET_ARGS_ARR[@]}")
           fi
 
           # Add chart version if specified
-          if [ -n "${{ inputs.chart_version }}" ]; then
-            HELM_CMD="$HELM_CMD --version ${{ inputs.chart_version }}"
+          if [ -n "${CHART_VERSION}" ]; then
+            HELM_CMD+=(--version "${CHART_VERSION}")
           fi
 
           # Add deployment options
-          if [ "${{ inputs.atomic }}" == "true" ]; then
-            HELM_CMD="$HELM_CMD --atomic"
+          if [ "${ATOMIC}" == "true" ]; then
+            HELM_CMD+=(--atomic)
           fi
 
-          if [ "${{ inputs.wait }}" == "true" ]; then
-            HELM_CMD="$HELM_CMD --wait"
+          if [ "${WAIT}" == "true" ]; then
+            HELM_CMD+=(--wait)
           fi
 
-          if [ "${{ inputs.force }}" == "true" ]; then
-            HELM_CMD="$HELM_CMD --force"
+          if [ "${FORCE}" == "true" ]; then
+            HELM_CMD+=(--force)
           fi
 
-          if [ "${{ inputs.dry_run }}" == "true" ]; then
-            HELM_CMD="$HELM_CMD --dry-run"
+          if [ "${DRY_RUN}" == "true" ]; then
+            HELM_CMD+=(--dry-run)
           fi
 
-          HELM_CMD="$HELM_CMD --timeout ${{ inputs.timeout }}"
+          HELM_CMD+=(--timeout "${TIMEOUT}")
 
           # Execute helm command
           echo ""
-          echo "Executing: $HELM_CMD"
+          echo "Executing: ${HELM_CMD[*]}"
           echo ""
-          eval $HELM_CMD
+          "${HELM_CMD[@]}"
 
           echo ""
           echo "✅ Helm deployment completed"
 
       - name: Verify deployment
         if: inputs.dry_run == false && inputs.wait == true
+        env:
+          RELEASE_NAME: ${{ inputs.release_name }}
+          NAMESPACE: ${{ inputs.namespace }}
         run: |
           echo "=========================================="
           echo "🔍 Verifying Deployment"
@@ -356,67 +396,81 @@ jobs:
 
           # Get Helm release status
           echo "📋 Helm Release Status:"
-          helm status ${{ inputs.release_name }} --namespace ${{ inputs.namespace }}
+          helm status "${RELEASE_NAME}" --namespace "${NAMESPACE}"
 
           echo ""
           echo "📋 Kubernetes Resources:"
 
           # Get all resources for this release
-          kubectl get all -n ${{ inputs.namespace }} -l app.kubernetes.io/instance=${{ inputs.release_name }} || \
-          kubectl get all -n ${{ inputs.namespace }} -l app=${{ inputs.release_name }} || \
-          kubectl get all -n ${{ inputs.namespace }}
+          kubectl get all -n "${NAMESPACE}" -l "app.kubernetes.io/instance=${RELEASE_NAME}" || \
+          kubectl get all -n "${NAMESPACE}" -l "app=${RELEASE_NAME}" || \
+          kubectl get all -n "${NAMESPACE}"
 
           echo "=========================================="
 
       - name: Run post-deployment command
         if: inputs.post_deploy_command != '' && inputs.dry_run == false
+        env:
+          POST_DEPLOY_COMMAND: ${{ inputs.post_deploy_command }}
         run: |
           echo "=========================================="
           echo "🔧 Running post-deployment command"
           echo "=========================================="
-          echo "Command: ${{ inputs.post_deploy_command }}"
+          echo "Command: ${POST_DEPLOY_COMMAND}"
           echo ""
 
-          ${{ inputs.post_deploy_command }}
+          # The caller-supplied command is executed as shell code by design.
+          eval "${POST_DEPLOY_COMMAND}"
 
           echo "✅ Post-deployment command completed"
 
       - name: Get Pod logs (on failure)
         if: failure() && inputs.dry_run == false
         continue-on-error: true
+        env:
+          RELEASE_NAME: ${{ inputs.release_name }}
+          NAMESPACE: ${{ inputs.namespace }}
         run: |
           echo "=========================================="
           echo "📋 Fetching Pod logs for debugging"
           echo "=========================================="
 
           # Try different label selectors
-          kubectl get pods -n ${{ inputs.namespace }} -l app.kubernetes.io/instance=${{ inputs.release_name }} -o name | while read pod; do
+          kubectl get pods -n "${NAMESPACE}" -l "app.kubernetes.io/instance=${RELEASE_NAME}" -o name | while read pod; do
             echo ""
             echo "Logs for $pod:"
-            kubectl logs $pod -n ${{ inputs.namespace }} --tail=50 || true
+            kubectl logs $pod -n "${NAMESPACE}" --tail=50 || true
           done
 
-          kubectl get pods -n ${{ inputs.namespace }} -l app=${{ inputs.release_name }} -o name | while read pod; do
+          kubectl get pods -n "${NAMESPACE}" -l "app=${RELEASE_NAME}" -o name | while read pod; do
             echo ""
             echo "Logs for $pod:"
-            kubectl logs $pod -n ${{ inputs.namespace }} --tail=50 || true
+            kubectl logs $pod -n "${NAMESPACE}" --tail=50 || true
           done
 
           echo "=========================================="
 
       - name: Deployment Summary
         if: always()
+        env:
+          RELEASE_NAME: ${{ inputs.release_name }}
+          CHART_PATH: ${{ inputs.chart_path }}
+          NAMESPACE: ${{ inputs.namespace }}
+          CLUSTER_NAME: ${{ inputs.cluster_name }}
+          AWS_REGION: ${{ inputs.aws_region }}
+          IMAGE_URI: ${{ inputs.image_uri }}
+          DRY_RUN: ${{ inputs.dry_run }}
         run: |
           echo ""
           echo "=========================================="
           echo "✨ Deployment Summary"
           echo "=========================================="
-          echo "Release Name: ${{ inputs.release_name }}"
-          echo "Chart: ${{ inputs.chart_path }}"
-          echo "Namespace: ${{ inputs.namespace }}"
-          echo "Cluster: ${{ inputs.cluster_name }}"
-          echo "Region: ${{ inputs.aws_region }}"
-          echo "Image URI: ${{ inputs.image_uri }}"
-          echo "Dry-run: ${{ inputs.dry_run }}"
+          echo "Release Name: ${RELEASE_NAME}"
+          echo "Chart: ${CHART_PATH}"
+          echo "Namespace: ${NAMESPACE}"
+          echo "Cluster: ${CLUSTER_NAME}"
+          echo "Region: ${AWS_REGION}"
+          echo "Image URI: ${IMAGE_URI}"
+          echo "Dry-run: ${DRY_RUN}"
           echo "Timestamp: $(date -u +"%Y-%m-%d %H:%M:%S UTC")"
           echo "=========================================="

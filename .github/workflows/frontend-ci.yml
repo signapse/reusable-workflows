@@ -81,23 +81,38 @@ jobs:
 
       - name: Run lint
         if: inputs.run-lint
-        run: ${{ inputs.lint-command }}
+        env:
+          LINT_COMMAND: ${{ inputs.lint-command }}
+        # Caller-supplied command, executed as shell code by design.
+        run: eval "${LINT_COMMAND}"
 
       - name: Run tests
         if: inputs.run-tests
-        run: ${{ inputs.test-command }}
+        env:
+          TEST_COMMAND: ${{ inputs.test-command }}
+        # Caller-supplied command, executed as shell code by design.
+        run: eval "${TEST_COMMAND}"
 
       - name: Run build
         if: inputs.run-build
-        run: ${{ inputs.build-command }}
+        env:
+          BUILD_COMMAND: ${{ inputs.build-command }}
+        # Caller-supplied command, executed as shell code by design.
+        run: eval "${BUILD_COMMAND}"
 
       - name: CI Summary
         if: always()
+        env:
+          NODE_VERSION: ${{ inputs.node-version }}
+          PACKAGE_MANAGER: ${{ inputs.package-manager }}
+          LINT_STATUS: ${{ inputs.run-lint && '✅ Ran' || '⏭️ Skipped' }}
+          TESTS_STATUS: ${{ inputs.run-tests && '✅ Ran' || '⏭️ Skipped' }}
+          BUILD_STATUS: ${{ inputs.run-build && '✅ Ran' || '⏭️ Skipped' }}
         run: |
           echo "## Frontend CI Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "- **Node Version**: ${{ inputs.node-version }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Package Manager**: ${{ inputs.package-manager }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Lint**: ${{ inputs.run-lint && '✅ Ran' || '⏭️ Skipped' }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Tests**: ${{ inputs.run-tests && '✅ Ran' || '⏭️ Skipped' }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Build**: ${{ inputs.run-build && '✅ Ran' || '⏭️ Skipped' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Node Version**: ${NODE_VERSION}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Package Manager**: ${PACKAGE_MANAGER}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Lint**: ${LINT_STATUS}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Tests**: ${TESTS_STATUS}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Build**: ${BUILD_STATUS}" >> $GITHUB_STEP_SUMMARY
