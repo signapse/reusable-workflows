@@ -133,9 +133,13 @@ concurrency:
   group: release-train-${{ github.repository }}
   cancel-in-progress: false
 
+# GitHub checks every job of the called workflow against this grant before
+# any `if:` runs, so it must cover the legacy jobs too (compose requests
+# contents: write and checks: read), even though qa-passed mode skips them.
 permissions:
-  contents: read
+  contents: write
   pull-requests: read    # PR title and branch per commit
+  checks: read
   actions: read          # main-push runs: which commits are builds
 
 jobs:
