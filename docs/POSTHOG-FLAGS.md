@@ -2,7 +2,7 @@
 
 Every Feature ticket gets one PostHog flag, created by Prodzilla when the ticket moves to In Progress (SIG-2762). The flag is on for everyone in dev and staging, on for the QA Cohort only in prod (a Dark Deployment), and the QA team raises it from there in a Rollout (SIG-2768, SIG-2770). This page is the single definition of that flag. Code that creates or changes these flags must produce exactly what is written here.
 
-Spec: ADR 0004 (`docs/adr/0004-dark-deployment-qa-owned-rollout.md`), architecture doc "PostHog", steps 1 and 8. Ticket: SIG-2749.
+Spec: ADR 0004 "Dark Deployment, QA-owned Rollout" and the Autonomous Delivery Pipeline architecture doc ("PostHog", steps 1 and 8). Ticket: SIG-2749.
 
 ## The PostHog project
 
@@ -23,56 +23,19 @@ A PostHog flag buckets either persons or one group type, never both, and cohorts
 2. **The QA Cohort can then be an ordinary cohort**, maintained by the QA team in the PostHog UI, and referenced by id from every flag. A group-based design would instead have to repeat a group-property condition in every flag.
 3. **`environment` is a fact about the running deployment, not about the person.** Dev and prod share one project, so the same person (same distinct_id) can appear in more than one environment, and a stored person property would be last-write-wins. Apps therefore pass `environment` as a **person property override at evaluation time** (`setPersonPropertiesForFlags` in posthog-js, `personProperties` in server SDKs, `person_properties` on `/flags`). The `environment` super property apps already register is an *event* property and is not used by flag evaluation.
 
-Consequence: the Rollout percentage counts users, not customer accounts. During 10% and 50%, two users of the same customer organisation can see different behaviour. If a product needs whole-account consistency later, see "Account-group variant" at the end.
+Consequence: the Rollout percentage counts users, not customer accounts. During 10% and 50%, two users of the same customer organisation can see different behaviour. Whole-account consistency would need a group-aggregated flag, which cannot use a cohort; design it when a product needs it.
 
 ## The template
 
-`QA_COHORT_ID` is the numeric id of the QA Cohort (manual step 1 in SIG-2749). Body of `POST /api/projects/256388/feature_flags/`:
-
-```json
-{
-  "key": "sig-<n>-<slug>",
-  "name": "SIG-<n>: <ticket title> (<ticket url>). Created by Prodzilla; conditions follow reusable-workflows docs/POSTHOG-FLAGS.md, change only the last condition's percentage.",
-  "active": true,
-  "ensure_experience_continuity": false,
-  "filters": {
-    "aggregation_group_type_index": null,
-    "multivariate": null,
-    "payloads": {},
-    "groups": [
-      {
-        "properties": [
-          { "key": "environment", "type": "person", "operator": "exact", "value": ["dev", "development", "staging"] }
-        ],
-        "rollout_percentage": 100,
-        "variant": null
-      },
-      {
-        "properties": [
-          { "key": "id", "type": "cohort", "operator": "in", "value": QA_COHORT_ID }
-        ],
-        "rollout_percentage": 100,
-        "variant": null
-      },
-      {
-        "properties": [
-          { "key": "environment", "type": "person", "operator": "exact", "value": ["prod", "production"] }
-        ],
-        "rollout_percentage": 0,
-        "variant": null
-      }
-    ]
-  }
-}
-```
-
-`actions/release-train/scripts/posthog-flag-payload.sh SIG-123 "<title>" [url]` (with `QA_COHORT_ID` set) prints this payload; its tests are `actions/release-train/test/posthog-flag.bats`. The Prodzilla event router is Go, so SIG-2762 ports it; keep the bats tests' expectations as the reference.
+`QA_COHORT_ID` is the numeric id of the QA Cohort (manual step 1 in SIG-2749). The body of `POST /api/projects/256388/feature_flags/` is what `actions/release-train/scripts/posthog-flag-payload.sh SIG-123 "<title>" [url]` prints with `QA_COHORT_ID` set: key `sig-<n>-<slug>` (see Naming), name `SIG-<n>: <ticket title> (<ticket url>). Created by Prodzilla; ...`, `active: true`, `ensure_experience_continuity: false`, person aggregation (`aggregation_group_type_index: null`), no variants, and these three conditions in this order:
 
 | Index | Condition | Percentage | Who changes it |
 |---|---|---|---|
-| `groups[0]` | `environment` is `dev`, `development` or `staging` | 100 | Nobody |
-| `groups[1]` | person in the QA Cohort | 100 | Nobody |
-| `groups[2]` | `environment` is `prod` or `production` | **the Rollout percentage**: 0, 10, 50, 100 | Prodzilla only |
+| `groups[0]` | person property `environment` `exact` `["dev", "development", "staging"]` | 100 | Nobody |
+| `groups[1]` | cohort `id` `in` `QA_COHORT_ID` | 100 | Nobody |
+| `groups[2]` | person property `environment` `exact` `["prod", "production"]` | **the Rollout percentage**: 0, 10, 50, 100 | Prodzilla only |
+
+**Which copy wins.** This page defines the flag. `posthog-flag-payload.sh` and its tests (`actions/release-train/test/posthog-flag.bats`) are the executable form of this section; if they ever disagree with this page, the page wins and the script is the bug. SIG-2762 ports the script to Go (the Prodzilla event router) and should port those test expectations with it.
 
 Conditions are OR'd, so a person matching any condition gets the flag.
 
@@ -136,7 +99,7 @@ For every product that checks a Feature flag:
 | `environment` event super property | the same value | `posthog.register({ environment })` (already done in sign-stream-platform and auth-service) |
 | project token | `256388`'s token in every environment | env file / config |
 
-The account group (`groups: { account: <organisation id> }`) is not needed for targeting today. Sending it is harmless and useful for analytics; if a product does, use the group type name `account` so the variant below can be adopted without renaming.
+The account group (`groups: { account: <organisation id> }`) is not needed for targeting today. Sending it is harmless and useful for analytics; if a product does, use the group type name `account`.
 
 posthog-js example:
 
@@ -180,20 +143,18 @@ if err != nil {
 
 1. Create a test flag from the template (key `sig-2749-posthog-qa-cohort-and-environment`), prod condition at 0.
 2. `PROD_PERCENT=0 posthog-flag-check.sh sig-2749-posthog-qa-cohort-and-environment`
-   - AC2: on in `dev`, `development`, `staging` for both accounts; off in `prod` for the other account; 0 of 100 synthetic ids on.
-   - AC3: on in `prod` (and `production`) for the QA account.
+   - AC2: on in `dev`, `development`, `staging` for both accounts; off in `prod` and `production` for the other account; 0 of 100 synthetic ids on.
+   - AC3: on in `prod` for the QA account.
    - Fail dark: off for the other account with an empty or unknown `environment`, and for every synthetic id with an unknown one.
 3. Set `groups[2].rollout_percentage` to 10 (UI: the third condition set; or the PATCH above).
 4. `PROD_PERCENT=10 posthog-flag-check.sh sig-2749-posthog-qa-cohort-and-environment`
-   - AC4: about 10 of 100 synthetic non-cohort ids on (accepted 1 to 19, three standard deviations); QA account still on. The script refuses a `SAMPLE` too small for the band to exclude 0 and all.
+   - AC4: about 10 of 100 synthetic non-cohort ids on (accepted 1 to 19, three standard deviations); QA account still on. Synthetic ids alternate between `prod` and `production`. The script refuses a `SAMPLE` too small for the band to exclude 0 and all.
 5. Set it back to 0 and re-run step 2 (the abort path).
-6. AC5: compare the flag's JSON in PostHog with the template above.
+6. AC5: compare the flag's JSON in PostHog with the output of `posthog-flag-payload.sh`.
+
+At 0% a flag missing `production` from `groups[2]` looks the same as a correct one (both are off). For the test flag, also run the check at `PROD_PERCENT=100`, where the other account must be on in both `prod` and `production`; for a real flag, step 6's comparison covers it.
 
 Synthetic ids (`sig-flag-check-<key>-<i>`) are only evaluated, never captured, so they create no persons.
-
-## Account-group variant (not adopted)
-
-If a product needs a Rollout to bucket customer organisations instead of users: create group type `account`, have the app send `groups: { account: <organisation id> }` on every evaluation, and use a flag with `aggregation_group_type_index` set to that type's index on every condition. The QA Cohort then cannot be a cohort; it becomes a group property (for example `qa_cohort = true`, set on the QA organisations) in `groups[1]`, and `environment` is passed as a group property override (`groupProperties`). Every flag of that product would use this variant, so decide per product before its first Feature flag.
 
 ## Gaps (as of 2026-11-03)
 

@@ -8,7 +8,9 @@
 #
 #   dev, development, staging  -> on for the QA account and the other account
 #   prod                       -> on for the QA account
-#   prod, SAMPLE synthetic ids -> on for about PROD_PERCENT% of them
+#   prod, production           -> other account off at 0, on at 100
+#   SAMPLE synthetic ids       -> on for about PROD_PERCENT% of them, half
+#                                 evaluated as prod and half as production
 #                                 (exactly none at 0, exactly all at 100)
 #   empty/unknown environment   -> off for the other account; unknown -> off for every
 #                                 synthetic id, at any percentage
@@ -69,12 +71,13 @@ for env in dev development staging; do
   expect true "$OTHER_DISTINCT_ID" "$env" "AC2 $env, non-cohort account"
 done
 expect true "$QA_DISTINCT_ID" prod "AC3 prod, QA Cohort account"
-expect true "$QA_DISTINCT_ID" production "AC3 production (legacy value), QA Cohort account"
-if [ "$PERCENT" -eq 0 ]; then
-  expect false "$OTHER_DISTINCT_ID" prod "AC2 prod at 0%, non-cohort account"
-elif [ "$PERCENT" -eq 100 ]; then
-  expect true "$OTHER_DISTINCT_ID" prod "prod at 100%, non-cohort account"
-fi
+for env in prod production; do
+  if [ "$PERCENT" -eq 0 ]; then
+    expect false "$OTHER_DISTINCT_ID" "$env" "AC2 $env at 0%, non-cohort account"
+  elif [ "$PERCENT" -eq 100 ]; then
+    expect true "$OTHER_DISTINCT_ID" "$env" "$env at 100%, non-cohort account"
+  fi
+done
 expect false "$OTHER_DISTINCT_ID" "" "fail dark, empty environment, non-cohort account"
 expect false "$OTHER_DISTINCT_ID" unknown "fail dark, unknown environment, non-cohort account"
 
@@ -90,13 +93,16 @@ if [ "$PERCENT" -gt 0 ] && [ "$PERCENT" -lt 100 ] && { [ "$lo" -eq 0 ] || [ "$hi
   die "SAMPLE=$N is too small to tell ${PERCENT}% from 0% or 100%; raise SAMPLE"
 fi
 
-# AC4: share of synthetic non-cohort ids that get the flag in prod.
+# AC4: share of synthetic non-cohort ids that get the flag in prod. Odd ids
+# send the legacy `production`, which today's apps still send.
 # The same ids with an unknown environment must all stay off, whatever the
 # percentage, so a catch-all prod condition cannot hide behind one account.
 on=0
 leaked=0
 for i in $(seq 1 "$N"); do
-  r=$(evaluate "sig-flag-check-${KEY}-${i}" prod)
+  env=prod
+  [ $((i % 2)) -eq 0 ] || env=production
+  r=$(evaluate "sig-flag-check-${KEY}-${i}" "$env")
   if [ "$r" = true ]; then on=$((on + 1)); fi
   r=$(evaluate "sig-flag-check-${KEY}-${i}" unknown)
   if [ "$r" = true ]; then leaked=$((leaked + 1)); fi

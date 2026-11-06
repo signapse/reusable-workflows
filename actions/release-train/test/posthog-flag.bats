@@ -81,6 +81,7 @@ teardown() { rm -rf "$TMP"; }
 # dev/development/staging, on for the QA id, and in prod/production on for
 # synthetic ids whose trailing number mod 100 is below STUB_PERCENT.
 # STUB_CATCH_ALL=1 imitates the rejected catch-all prod condition.
+# STUB_PROD_ENVS lists the values in the prod condition (default "prod production").
 
 stub_curl() {
   mkdir -p "$TMP/bin"
@@ -99,7 +100,11 @@ on=false
 case "$env" in dev|development|staging) on=true ;; esac
 [ "$id" = "qa-user" ] && on=true
 prod=false
-case "$env" in prod|production) prod=true ;; dev|development|staging) ;; *) [ -n "${STUB_CATCH_ALL:-}" ] && prod=true ;; esac
+if [ -n "$env" ] && [[ " ${STUB_PROD_ENVS:-prod production} " == *" $env "* ]]; then
+  prod=true
+else
+  case "$env" in prod|production|dev|development|staging) ;; *) [ -n "${STUB_CATCH_ALL:-}" ] && prod=true ;; esac
+fi
 if [ "$prod" = true ]; then
   if [[ "$id" =~ -([0-9]+)$ ]] && [ $(( BASH_REMATCH[1] % 100 )) -lt "${STUB_PERCENT:-0}" ]; then on=true; fi
   if [ "$id" = "other-user" ] && [ "${STUB_PERCENT:-0}" -ge 100 ]; then on=true; fi
@@ -116,6 +121,7 @@ EOF
   STUB_PERCENT=0 PROD_PERCENT=0 SAMPLE=20 run "$CHECK" sig-1-thing
   [ "$status" -eq 0 ]
   [[ "$output" == *"PASS AC2 prod at 0%, non-cohort account: false"* ]]
+  [[ "$output" == *"PASS AC2 production at 0%, non-cohort account: false"* ]]
   [[ "$output" == *"PASS AC3 prod, QA Cohort account: true"* ]]
   [[ "$output" == *"0/20 synthetic"* ]]
 }
@@ -139,6 +145,15 @@ EOF
   STUB_PERCENT=100 PROD_PERCENT=100 SAMPLE=10 run "$CHECK" sig-1-thing
   [ "$status" -eq 0 ]
   [[ "$output" == *"10/10 synthetic"* ]]
+}
+
+@test "check: a prod condition without the legacy production value fails at 100%" {
+  stub_curl
+  STUB_PROD_ENVS=prod STUB_PERCENT=100 PROD_PERCENT=100 SAMPLE=10 run "$CHECK" sig-1-thing
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"PASS prod at 100%, non-cohort account: true"* ]]
+  [[ "$output" == *"FAIL production at 100%, non-cohort account: want true, got false"* ]]
+  [[ "$output" == *"FAIL AC4 prod at 100%, 5/10"* ]]
 }
 
 @test "check: a catch-all prod condition fails the fail-dark check at 100%" {
