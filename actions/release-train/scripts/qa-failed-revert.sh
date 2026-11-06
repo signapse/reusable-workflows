@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2016 # $names in single quotes are jq and GraphQL variables.
-# qa-failed-revert.sh [<last-tag>] [<head-ref>]
+# qa-failed-revert.sh <base> [<head-ref>]
 #
 # Opens a revert PR for every ticket that has sat in QA Failed for at least
 # THRESHOLD_HOURS (SIG-2766, ADR 0001): a QA Failed ticket stops its repo's
@@ -9,7 +9,7 @@
 # Stateless; everything is re-read from git, GitHub and Linear on every run, so
 # the caller runs it hourly.
 #
-#   1. Walk main's first-parent commits in <last-tag>..<head-ref>. The caller
+#   1. Walk main's first-parent commits in <base>..<head-ref>. The caller
 #      passes the tag prod runs (selection-base.sh), the same base the
 #      Release Candidate walk uses: a ticket that failed staging sits in an
 #      already-tagged commit, and must still be reverted (review fix). A
@@ -24,7 +24,8 @@
 #      there. It is due once that is at least THRESHOLD_HOURS ago.
 #   3. Dedupe: skip when an open PR from prodzilla/revert-<ticket> exists (and
 #      post the PR link on the ticket if an earlier run failed to), or the
-#      branch exists on the remote.
+#      branch exists on the remote (quietly when its PR was merged: the revert
+#      worked and the ticket waits in QA Failed for the fix).
 #   4. On branch prodzilla/revert-<ticket> from <head-ref>, git revert the
 #      ticket's commits newest first (merge commits with -m 1). A commit is
 #      skipped as already reverted when a later revert of it is still live
@@ -43,13 +44,13 @@
 # All tickets are commits already reverted: nothing is opened; the run says so.
 #
 # Output (stdout, one compact JSON object; logs go to stderr):
-#   {last_tag, head_sha, threshold_hours,
+#   {base, head_sha, threshold_hours,
 #    tickets: [{id, title, url, entered_at, age_hours, action, branch,
 #               pr_url, reverted: [{sha, subject}], skipped: [{sha, subject,
 #               reason}], conflict: {sha, subject, files} | null,
 #               not_attempted: [{sha, subject}] (older commits after a conflict),
 #               shared_with: [ids], error}]}
-#   action: waiting | open_pr_exists | branch_exists | already_reverted |
+#   action: waiting | open_pr_exists | merged | branch_exists | already_reverted |
 #           opened | opened_draft_conflict | no_history | failed
 # Exits 1 after processing every ticket when any ticket's action is failed.
 #
@@ -62,7 +63,6 @@
 #   QA_FAILED_STATE      default "QA Failed"
 #   THRESHOLD_HOURS      default 24; decimals allowed (0.1 = 6 minutes)
 #   BRANCH               base branch of the revert PR (default main)
-#   RELEASE_TAG_PATTERN  ERE for Promotion tags (default ^v?[0-9]+\.[0-9]+\.[0-9]+$)
 #   REMOTE               git remote to push to (default origin)
 #   SLACK_CHANNEL        optional; conflict alerts go here (needs SLACK_BOT_TOKEN)
 #   RUN_URL              optional; linked from PR bodies and comments
@@ -77,13 +77,11 @@ source "$(dirname "$0")/../lib/common.sh"
 source "$(dirname "$0")/../lib/linear.sh"
 # shellcheck source=SCRIPTDIR/../lib/slack.sh
 source "$(dirname "$0")/../lib/slack.sh"
-# shellcheck source=SCRIPTDIR/../lib/release-tag.sh
-source "$(dirname "$0")/../lib/release-tag.sh"
 # shellcheck source=SCRIPTDIR/../lib/revert.sh
 source "$(dirname "$0")/../lib/revert.sh"
 
-[ $# -le 2 ] || die "usage: qa-failed-revert.sh [<last-tag>] [<head-ref>]"
-LAST_TAG="${1:-}"
+[ $# -ge 1 ] && [ $# -le 2 ] && [ -n "$1" ] || die "usage: qa-failed-revert.sh <base> [<head-ref>]"
+LAST_TAG="$1"
 HEAD_REF="${2:-HEAD}"
 
 need git
@@ -97,7 +95,6 @@ need curl
 QA_FAILED_STATE="${QA_FAILED_STATE:-QA Failed}"
 THRESHOLD_HOURS="${THRESHOLD_HOURS:-24}"
 BRANCH="${BRANCH:-main}"
-RELEASE_TAG_PATTERN="${RELEASE_TAG_PATTERN:-^v?[0-9]+\.[0-9]+\.[0-9]+$}"
 REMOTE="${REMOTE:-origin}"
 SLACK_CHANNEL="${SLACK_CHANNEL:-}"
 RUN_URL="${RUN_URL:-}"
@@ -114,15 +111,18 @@ fi
 [ -z "$(git status --porcelain --untracked-files=no)" ] || die "working tree has uncommitted changes"
 
 head_sha=$(git rev-parse --verify "${HEAD_REF}^{commit}") || die "unknown ref: $HEAD_REF"
-if [ -z "$LAST_TAG" ]; then
-  LAST_TAG=$(last_release_tag "$head_sha" "$RELEASE_TAG_PATTERN")
-  [ -n "$LAST_TAG" ] || die "no tag matching $RELEASE_TAG_PATTERN on $HEAD_REF's first-parent history; seed one (git tag 0.0.0 <sha>)"
-fi
 git rev-parse --verify -q "${LAST_TAG}^{commit}" > /dev/null || die "unknown tag: $LAST_TAG"
 git merge-base --is-ancestor "$LAST_TAG" "$head_sha" || die "walk base $LAST_TAG is not in $HEAD_REF's history"
 log "walk base: $LAST_TAG; threshold ${THRESHOLD_HOURS}h"
 # Live reverts in the range (a revert that was itself reverted does not count).
 units=$(revert_units "$LAST_TAG" "$head_sha")
+
+# link_comment <pr-url>: the ticket comment for an opened revert PR. A retry
+# posts the same text.
+link_comment() {
+  printf '%s\n\n%s' "Prodzilla opened a revert PR for this ticket's commits: $1" \
+    "This ticket has been in $QA_FAILED_STATE for over ${THRESHOLD_HOURS}h, which stops the line for ${GITHUB_REPOSITORY}. Merge the revert to unblock it, or close it if the fix lands and QA re-passes the ticket."
+}
 
 # merged_prs <sha>: [{title, head}] of the merged PRs GitHub associates with <sha>.
 merged_prs() {
@@ -131,7 +131,7 @@ merged_prs() {
     || die "cannot read PRs for ${1:0:7} (token needs pull_requests:read)"
 }
 
-# --- 1. Walk the commits since the last Promotion --------------------------
+# --- 1. Walk the commits since the walk base -------------------------------
 commits='[]'
 while IFS= read -r sha; do
   [ -z "$sha" ] && continue
@@ -296,9 +296,7 @@ while IFS= read -r id <&3; do
       set_r '.action = "failed" | .error = "could not read the ticket comments"'
       failed=1
     elif [ "$has" != true ]; then
-      if linear_comment "$uuid" "Prodzilla opened a revert PR for this ticket's commits: $existing
-
-This ticket has been in $QA_FAILED_STATE for over ${THRESHOLD_HOURS}h, which stops the line for ${GITHUB_REPOSITORY}. Merge the revert to unblock it, or close it if the fix lands and QA re-passes the ticket."; then
+      if linear_comment "$uuid" "$(link_comment "$existing")"; then
         log "$id: posted the PR link the earlier run did not"
       else
         set_r '.action = "failed" | .error = "Linear comment failed"'
@@ -310,6 +308,14 @@ This ticket has been in $QA_FAILED_STATE for over ${THRESHOLD_HOURS}h, which sto
   fi
   remote_branch=$(git ls-remote --heads "$REMOTE" "refs/heads/$br") || die "cannot list $REMOTE branches"
   if [ -n "$remote_branch" ]; then
+    merged=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$br" --state merged --json url --jq '.[0].url // ""') \
+      || die "cannot list PRs for $br"
+    if [ -n "$merged" ]; then
+      log "$id: revert PR merged: $merged"
+      set_r --arg u "$merged" '.action = "merged" | .pr_url = $u'
+      finish
+      continue
+    fi
     log "WARNING: $id: branch $br exists with no open PR; open one from it or delete it to let Prodzilla retry"
     set_r '.action = "branch_exists"'
     finish
@@ -415,7 +421,7 @@ This ticket has been in $QA_FAILED_STATE for over ${THRESHOLD_HOURS}h, which sto
   [ "$conflict" != null ] && draft=(--draft)
 
   if ! git push -q "$REMOTE" "HEAD:refs/heads/$br"; then
-    log "ERROR: $id: push of $br failed (a revert touching .github/workflows needs workflows:write)"
+    log "ERROR: $id: push of $br failed"
     set_r '.action = "failed" | .error = "push failed"'
     failed=1
   elif ! pr_url=$(gh pr create --repo "$GITHUB_REPOSITORY" --base "$BRANCH" --head "$br" \
@@ -428,9 +434,7 @@ This ticket has been in $QA_FAILED_STATE for over ${THRESHOLD_HOURS}h, which sto
     log "$id: opened $pr_url"
     if [ "$conflict" = null ]; then
       set_r --arg u "$pr_url" '.action = "opened" | .pr_url = $u'
-      comment="Prodzilla opened a revert PR for this ticket's commits: $pr_url
-
-This ticket has been in $QA_FAILED_STATE for over ${THRESHOLD_HOURS}h, which stops the line for ${GITHUB_REPOSITORY}. Merge the revert to unblock it, or close it if the fix lands and QA re-passes the ticket."
+      comment=$(link_comment "$pr_url")
     else
       set_r --arg u "$pr_url" '.action = "opened_draft_conflict" | .pr_url = $u'
       csha=$(printf '%s' "$conflict" | jq -r '.sha[0:7]')
@@ -457,5 +461,5 @@ This ticket has been in $QA_FAILED_STATE for over ${THRESHOLD_HOURS}h, which sto
 done 3<<< "$ticket_ids"
 
 jq -nc --arg tag "$LAST_TAG" --arg head "$head_sha" --arg th "$THRESHOLD_HOURS" --argjson t "$results" \
-  '{last_tag: $tag, head_sha: $head, threshold_hours: ($th | tonumber), tickets: $t}'
+  '{base: $tag, head_sha: $head, threshold_hours: ($th | tonumber), tickets: $t}'
 exit "$failed"
