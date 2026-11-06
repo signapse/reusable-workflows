@@ -24,8 +24,9 @@
 #      there. It is due once that is at least THRESHOLD_HOURS ago.
 #   3. Dedupe: skip when an open PR from prodzilla/revert-<ticket> exists (and
 #      post the PR link on the ticket if an earlier run failed to), or the
-#      branch exists on the remote (quietly when its PR was merged: the revert
-#      worked and the ticket waits in QA Failed for the fix).
+#      branch exists on the remote (quietly when its PR was merged and every
+#      commit of the ticket is reverted: the ticket waits in QA Failed for the
+#      fix).
 #   4. On branch prodzilla/revert-<ticket> from <head-ref>, git revert the
 #      ticket's commits newest first (merge commits with -m 1). A commit is
 #      skipped as already reverted when a later revert of it is still live
@@ -174,7 +175,10 @@ linear_issue() {
     printf '%s' "$resp" | jq -e 'type == "object"' > /dev/null 2>&1 \
       || die "Linear returned an unparsable reply for $id: $resp"
     issue=$(printf '%s' "$resp" | jq -c '.data.issue // empty')
-    if [ -z "$issue" ] && [ -z "$after" ]; then
+    # Only a clean miss counts as unknown: no errors, or only "Entity not
+    # found". Any other error (rate limit, bad key) fails below.
+    if [ -z "$issue" ] && [ -z "$after" ] && printf '%s' "$resp" \
+      | jq -e '(.errors // []) | all(.message // "" | startswith("Entity not found"))' > /dev/null; then
       # issue: null is how Linear answers an unknown identifier (a typo, a
       # deleted ticket, a branch like alex/sig-2024-cleanup). It can't be in
       # QA Failed, so it must not stop the other tickets' reverts.
@@ -310,7 +314,12 @@ while IFS= read -r id <&3; do
   if [ -n "$remote_branch" ]; then
     merged=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$br" --state merged --json url --jq '.[0].url // ""') \
       || die "cannot list PRs for $br"
-    if [ -n "$merged" ]; then
+    # Quiet only while the merged revert still covers the ticket: a commit of
+    # it that is not reverted (a re-landed fix that failed QA again) needs a
+    # new revert, so warn as for any other kept branch.
+    left=$(printf '%s' "$commits" | jq -r --arg id "$id" --argjson u "$units" \
+      '[.[] | select((.revert | not) and (.tickets | index($id)) and ($u[.sha].kind // "normal") != "reverted")] | length')
+    if [ -n "$merged" ] && [ "$left" -eq 0 ]; then
       log "$id: revert PR merged: $merged"
       set_r --arg u "$merged" '.action = "merged" | .pr_url = $u'
       finish
