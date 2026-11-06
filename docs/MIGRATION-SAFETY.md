@@ -22,8 +22,8 @@ The SQL is read as Postgres. Comments, string literals, quoted identifiers and f
 | `ALTER TABLE ... DROP [COLUMN]` | It still selects or inserts the column |
 | `RENAME` of a table, column, view, schema, type, enum value or type attribute; `ALTER TABLE ... SET SCHEMA` | It still uses the old name |
 | `ALTER [COLUMN] ... TYPE` / `SET DATA TYPE` | It may not read or write the new type (and the table is rewritten under lock). This includes widening (`INT` to `BIGINT`, a longer `VARCHAR`), which a reviewer can override |
-| `ALTER COLUMN ... SET NOT NULL` | Its INSERTs may leave the column out |
-| `ADD COLUMN ... NOT NULL` or `PRIMARY KEY` with no non-null `DEFAULT` | Its INSERTs don't know the column and fail |
+| `ALTER COLUMN ... SET NOT NULL`, or `ADD [CONSTRAINT ...] CHECK (... IS NOT NULL)` (with or without `NOT VALID`, which only skips existing rows) | Its INSERTs may leave the column out |
+| `ADD COLUMN ... NOT NULL` or `PRIMARY KEY` with no non-null `DEFAULT`, or with one that the same migration then drops (`DROP DEFAULT` / `DROP IDENTITY`) | Its INSERTs don't know the column and fail |
 | `DROP TYPE` / `DROP DOMAIN ... CASCADE` | CASCADE also drops every column of that type |
 
 Changes to a table that the **same migration** creates with a plain `CREATE TABLE` are not flagged, because no earlier code can depend on it. `CREATE TABLE IF NOT EXISTS` doesn't count, because the table may already exist.
@@ -34,7 +34,7 @@ Changes to a table that the **same migration** creates with a plain `CREATE TABL
 |---|---|
 | `DROP FUNCTION` / `PROCEDURE` / `SEQUENCE` | The previous code may call them, but most are trigger functions replaced in the same migration, so the reviewer checks |
 | `DROP INDEX`, `ALTER TABLE ... DROP CONSTRAINT`, `RENAME CONSTRAINT`, `ALTER INDEX ... RENAME` | The previous code's reads and writes still succeed. A dropped index or constraint costs performance or loosens a rule; it doesn't change the shape the code reads. Our migrations often drop and recreate one in the same file (billing 004 and 025). The one real break is an `ON CONFLICT` that targets the dropped unique index or names the constraint, so the warning annotation asks the reviewer to check for that |
-| `ADD [CONSTRAINT ...] CHECK (... IS NOT NULL)` (with or without `NOT VALID`), `ALTER COLUMN ... DROP DEFAULT`, `DROP IDENTITY` | They break the previous code's INSERTs that leave the column out, like `SET NOT NULL`, but only when the column is (or the CHECK makes it) effectively NOT NULL. The check can't see nullability, so the reviewer confirms every deployed writer sets the column. `NOT VALID` only skips existing rows; new INSERTs are still checked |
+| Other `ALTER COLUMN ... DROP DEFAULT` / `DROP IDENTITY` | They break the previous code's INSERTs that leave the column out, but only when the column is NOT NULL. The check can't see the nullability of existing columns, so the reviewer confirms every deployed writer sets the column |
 
 ### Passes silently
 
