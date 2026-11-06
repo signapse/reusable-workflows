@@ -22,7 +22,7 @@ The SQL is read as Postgres. Comments, string literals, quoted identifiers and f
 | `ALTER TABLE ... DROP [COLUMN]` | It still selects or inserts the column |
 | `RENAME` of a table, column, view, schema, type, enum value or type attribute; `ALTER TABLE ... SET SCHEMA` | It still uses the old name |
 | `ALTER [COLUMN] ... TYPE` / `SET DATA TYPE` | It may not read or write the new type (and the table is rewritten under lock). This includes widening (`INT` to `BIGINT`, a longer `VARCHAR`), which a reviewer can override |
-| `ALTER COLUMN ... SET NOT NULL`, or `ADD [CONSTRAINT ...] CHECK (... IS NOT NULL)` (with or without `NOT VALID`, which only skips existing rows) | Its INSERTs may leave the column out |
+| `ALTER COLUMN ... SET NOT NULL`, or `ADD [CONSTRAINT ...] CHECK (... IS NOT NULL)` (with or without `NOT VALID`, which only skips existing rows; a CHECK with an `OR` only warns) | Its INSERTs may leave the column out |
 | `ADD COLUMN ... NOT NULL` or `PRIMARY KEY` with no non-null `DEFAULT`, or with one that the same migration then drops (`DROP DEFAULT` / `DROP IDENTITY`) | Its INSERTs don't know the column and fail |
 | `DROP TYPE` / `DROP DOMAIN ... CASCADE` | CASCADE also drops every column of that type |
 

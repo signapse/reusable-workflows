@@ -242,13 +242,19 @@ def check_alter_table(table, actions, notnull):
             continue
         if m and m.group(1).upper() not in ADD_NOT_A_COLUMN and re.search(r"\bNOT\s+NULL\b", top):
             notnull.add((table.lower(), bare(m.group(1)).lower()))
+        m = re.match(rf"ALTER\s+(?:COLUMN\s+)?({IDENT})\s+DROP\s+NOT\s+NULL\b", a, re.I)
+        if m:
+            notnull.discard((table.lower(), bare(m.group(1)).lower()))
+            continue
         m = re.match(rf"ALTER\s+(?:COLUMN\s+)?({IDENT})\s+DROP\s+(DEFAULT|IDENTITY)\b", a, re.I)
         if m:
             sev = "block" if (table.lower(), bare(m.group(1)).lower()) in notnull else "warn"
             yield (sev, f"DROP {m.group(2).upper()}", f"{table}.{m.group(1)}", off)
             continue
-        if re.match(r"ADD\b", a, re.I) and any(re.search(r"\bIS\s+NOT\s+NULL\b", e, re.I) for e in check_exprs(a)):
-            yield ("block", "CHECK NOT NULL", table, off)
+        nn = [e for e in check_exprs(a) if re.search(r"\bIS\s+NOT\s+NULL\b", e, re.I)] if re.match(r"ADD\b", a, re.I) else []
+        if nn:
+            # With an OR the old writers may still satisfy it: a reviewer's look.
+            yield ("warn" if any(re.search(r"\bOR\b", e, re.I) for e in nn) else "block", "CHECK NOT NULL", table, off)
             continue
         if re.match(r"SET\s+SCHEMA\b", a, re.I):
             yield ("block", "SET SCHEMA", table, off)
