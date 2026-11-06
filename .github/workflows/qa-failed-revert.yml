@@ -140,7 +140,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.release_branch }}
-          fetch-depth: 0          # the walk needs history and tags since the last Promotion
+          fetch-depth: 0          # the walk needs history since the walk base
           token: ${{ steps.app.outputs.token }}
 
       # Same pattern as release-train.yml: scripts fetched explicitly so the
@@ -149,7 +149,9 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: signapse/reusable-workflows
-          ref: ${{ job.workflow_sha }} # scripts from the same commit as this workflow, not mutable main
+          # Scripts from the same commit as this workflow, not mutable main. An
+          # empty workflow_sha would silently check out main, so fail instead.
+          ref: ${{ job.workflow_sha || 'job.workflow_sha-is-empty' }}
           path: _rw
           persist-credentials: false
 
@@ -219,7 +221,6 @@ jobs:
           QA_FAILED_STATE: ${{ inputs.qa_failed_state }}
           THRESHOLD_HOURS: ${{ inputs.threshold_hours }}
           BRANCH: ${{ inputs.release_branch }}
-          RELEASE_TAG_PATTERN: ${{ inputs.release_tag_pattern }}
           SLACK_CHANNEL: ${{ inputs.slack_channel }}
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -236,10 +237,10 @@ jobs:
           {
             echo "## QA Failed revert PRs"
             echo
-            echo "Threshold: $(jq -r .threshold_hours <<< "$res")h. Commits since \`$(jq -r .last_tag <<< "$res")\` (the tag prod runs)."
+            echo "Threshold: $(jq -r .threshold_hours <<< "$res")h. Commits since \`$(jq -r .base <<< "$res")\` (the walk base)."
             echo
             if [ "$(jq '.tickets | length' <<< "$res")" -eq 0 ]; then
-              echo "No ticket with commits since the tag prod runs is in QA Failed."
+              echo "No ticket with commits since the walk base is in QA Failed."
             else
               echo "| Ticket | In QA Failed | Action | PR | Notes |"
               echo "|---|---|---|---|---|"
