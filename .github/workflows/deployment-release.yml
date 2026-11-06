@@ -1,0 +1,209 @@
+name: Deployment Release (reusable)
+
+# Records one production Deployment: a Release in the product's Linear release
+# pipeline (stage `Deployed`) listing the tickets in the deployed commits, and a
+# Sentry release with the identical version, "<repo>@<tag>" by default
+# (repos share product pipelines; Sentry versions are org-wide). Call it after
+# the Release Candidate's image reaches production, from the product repo (it
+# reads the product's tags and commits). Idempotent on the version: a re-run
+# reuses the Linear Release; Sentry keys releases by version, so it stays one
+# release (a re-run adds a second deploy record to it).
+#
+# Docs: docs/DEPLOYMENT-RELEASE.md
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: "The Release Candidate's semver tag. Recorded as `<release_prefix><version>` in Linear and Sentry."
+        required: true
+        type: string
+      sha:
+        description: 'Commit the Deployment ships. Empty resolves it from the `version` tag.'
+        required: false
+        type: string
+        default: ''
+      since:
+        description: 'Exclusive lower bound of the commit range. Empty uses the commit of the pipeline''s latest Linear Release (the last Deployment that was not rolled back). Required for a pipeline''s first Deployment.'
+        required: false
+        type: string
+        default: ''
+      linear_pipeline:
+        description: 'Linear release pipeline name. Empty reads `linear_pipeline` from .signapse/pipeline.yml.'
+        required: false
+        type: string
+        default: ''
+      linear_stage:
+        description: 'Stage a new Release is created in.'
+        required: false
+        type: string
+        default: 'Deployed'
+      linear_team_key:
+        description: 'Linear team key for ticket refs in commits.'
+        required: false
+        type: string
+        default: 'SIG'
+      sentry_org:
+        description: 'Sentry org slug.'
+        required: false
+        type: string
+        default: 'signapse'
+      sentry_project:
+        description: 'Sentry project slug. Empty reads `sentry_project` from .signapse/pipeline.yml; still empty skips Sentry with a warning.'
+        required: false
+        type: string
+        default: ''
+      sentry_environment:
+        description: 'Sentry deploy environment.'
+        required: false
+        type: string
+        default: 'production'
+      release_prefix:
+        description: 'Prefix of the Linear and Sentry release version. `auto` = `<repo name>@` (e.g. sign-stream-api@1.4.0); empty = bare tag (only for a pipeline with one repo); anything else is used literally.'
+        required: false
+        type: string
+        default: 'auto'
+      reusable_workflows_ref:
+        description: 'Ref of signapse/reusable-workflows to load the release-train scripts from.'
+        required: false
+        type: string
+        default: 'main'
+    secrets:
+      LINEAR_API_KEY:
+        required: true
+      SENTRY_AUTH_TOKEN:
+        required: false
+    outputs:
+      linear_release_id:
+        description: 'Linear Release id (for moving stages / marking Rolled back later).'
+        value: ${{ jobs.linear-release.outputs.id }}
+      linear_release_url:
+        description: 'Linear Release URL.'
+        value: ${{ jobs.linear-release.outputs.url }}
+      linear_release_created:
+        description: '"true" if this run created the Release, "false" if it already existed.'
+        value: ${{ jobs.linear-release.outputs.created }}
+      tickets:
+        description: 'JSON array of ticket ids attached to the Release, e.g. ["SIG-1","SIG-2"].'
+        value: ${{ jobs.linear-release.outputs.tickets }}
+      release_version:
+        description: 'Version the Deployment is recorded under in Linear and Sentry, e.g. sign-stream-api@1.4.0.'
+        value: ${{ jobs.linear-release.outputs.release_version }}
+      sentry_version:
+        description: 'Sentry release version (equals `release_version`); empty when Sentry is skipped.'
+        value: ${{ jobs.sentry-release.outputs.version }}
+      since:
+        description: 'Commit the scanned range started after (input `since`, or the latest Release''s commit).'
+        value: ${{ jobs.linear-release.outputs.since }}
+
+permissions:
+  contents: read
+
+jobs:
+  linear-release:
+    runs-on: ubuntu-latest
+    # Serialise runs for one version so two can't both miss the lookup and
+    # create two Releases. The running job is never cancelled, but GitHub keeps
+    # one pending run per group: a third run cancels the one waiting. That
+    # cancelled job is not a failure; it would have been a no-op re-run.
+    concurrency:
+      group: deployment-release-${{ github.repository }}-${{ inputs.release_prefix }}-${{ inputs.version }}
+      cancel-in-progress: false
+    outputs:
+      id: ${{ steps.release.outputs.id }}
+      url: ${{ steps.release.outputs.url }}
+      created: ${{ steps.release.outputs.created }}
+      tickets: ${{ steps.release.outputs.tickets }}
+      since: ${{ steps.release.outputs.since }}
+      release_version: ${{ steps.release.outputs.release_version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Same pattern as retag-release.yml: this job never invokes the composite
+      # action, it only needs its scripts.
+      - name: Fetch release-train scripts
+        uses: actions/checkout@v4
+        with:
+          repository: signapse/reusable-workflows
+          ref: ${{ inputs.reusable_workflows_ref }}
+          path: _rw
+          persist-credentials: false
+
+      - name: Create or reuse Linear Release
+        id: release
+        env:
+          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+          LINEAR_PIPELINE: ${{ inputs.linear_pipeline }}
+          LINEAR_STAGE: ${{ inputs.linear_stage }}
+          LINEAR_TEAM_KEY: ${{ inputs.linear_team_key }}
+          VERSION: ${{ inputs.version }}
+          RELEASE_PREFIX: ${{ inputs.release_prefix }}
+          INPUT_SHA: ${{ inputs.sha }}
+          SINCE: ${{ inputs.since }}
+        run: |
+          set -euo pipefail
+          until_ref="${INPUT_SHA:-$(git rev-parse "${VERSION}^{commit}")}"
+          out=$(./_rw/actions/release-train/scripts/linear-release.sh "$VERSION" "$until_ref" "$SINCE")
+          {
+            echo "id=$(jq -r '.id' <<<"$out")"
+            echo "url=$(jq -r '.url' <<<"$out")"
+            echo "created=$(jq -r '.created' <<<"$out")"
+            echo "tickets=$(jq -c '.tickets' <<<"$out")"
+            echo "since=$(jq -r '.since' <<<"$out")"
+            echo "release_version=$(jq -r '.version' <<<"$out")"
+          } >> "$GITHUB_OUTPUT"
+          jq -r '"### Linear Release \(.version)\n\(.url) (stage \(.stage), created: \(.created))\n\nTickets: \(.tickets | join(", "))\nUntracked commits: \(.untracked | length)\nNot found in Linear: \(.unresolved | join(", "))"' \
+            <<<"$out" >> "$GITHUB_STEP_SUMMARY"
+
+  sentry-release:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.project.outputs.project != '' && steps.project.outputs.version || '' }}
+    steps:
+      # Check out the deployed commit: set_commits: auto associates commits up
+      # to HEAD, which must be the Deployment, not the caller's default branch.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.sha != '' && inputs.sha || inputs.version }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fetch release-train scripts
+        uses: actions/checkout@v4
+        with:
+          repository: signapse/reusable-workflows
+          ref: ${{ inputs.reusable_workflows_ref }}
+          path: _rw
+          persist-credentials: false
+
+      - name: Resolve Sentry project
+        id: project
+        env:
+          INPUT_PROJECT: ${{ inputs.sentry_project }}
+          TAG: ${{ inputs.version }}
+          RELEASE_PREFIX: ${{ inputs.release_prefix }}
+        run: |
+          set -euo pipefail
+          VERSION=$(./_rw/actions/release-train/scripts/release-version.sh "$TAG")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          project="${INPUT_PROJECT:-$(./_rw/actions/release-train/scripts/pipeline-config.sh sentry_project)}"
+          if [ -z "$project" ]; then
+            echo "::warning::No Sentry project (input sentry_project or sentry_project in .signapse/pipeline.yml); skipping the Sentry release for $VERSION"
+          fi
+          echo "project=$project" >> "$GITHUB_OUTPUT"
+
+      - name: Create Sentry release
+        if: steps.project.outputs.project != ''
+        # Same pinned action and settings as retag-release.yml.
+        uses: getsentry/action-release@ff07929a6537bac57790c3451cf4d364aca38528 # v3
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG: ${{ inputs.sentry_org }}
+          SENTRY_PROJECT: ${{ steps.project.outputs.project }}
+        with:
+          version: ${{ steps.project.outputs.version }}
+          environment: ${{ inputs.sentry_environment }}
+          set_commits: auto
