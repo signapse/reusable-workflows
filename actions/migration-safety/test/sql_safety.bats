@@ -165,6 +165,12 @@ sql() { printf '%s\n' "$1" >"$BATS_TEST_TMPDIR/m.up.sql"; run python3 "$SCRIPT" 
   sql 'ALTER TABLE users ADD CONSTRAINT email_nn CHECK (email IS NOT NULL) NOT VALID;'
   [ "$status" -eq 1 ]
   [[ "$output" == *"BLOCK: CHECK NOT NULL users"* ]]
+  sql 'ALTER TABLE users ADD CONSTRAINT c CHECK ((coalesce(a, 0) > 0) AND (b IS NOT NULL));'
+  [ "$status" -eq 1 ]
+  # IS NOT NULL outside the CHECK expression is not a CHECK NOT NULL.
+  sql 'ALTER TABLE users ADD COLUMN x boolean CHECK (x) DEFAULT (1 IS NOT NULL);'
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
 }
 
 @test "DROP DEFAULT / DROP IDENTITY warn; DROP DEFAULT on a column just added NOT NULL blocks" {

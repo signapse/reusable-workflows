@@ -179,6 +179,17 @@ def split_actions(body):
     return parts
 
 
+def check_exprs(action):
+    """Yield the body of each balanced CHECK (...) in one action."""
+    for m in re.finditer(r"\bCHECK\s*\(", action, re.I):
+        depth = 1
+        for k in range(m.end(), len(action)):
+            depth += {"(": 1, ")": -1}.get(action[k], 0)
+            if depth == 0:
+                yield action[m.end():k]
+                break
+
+
 def bare(name):
     return name.replace('"', "")
 
@@ -236,7 +247,7 @@ def check_alter_table(table, actions, notnull):
             sev = "block" if (table.lower(), bare(m.group(1)).lower()) in notnull else "warn"
             yield (sev, f"DROP {m.group(2).upper()}", f"{table}.{m.group(1)}", off)
             continue
-        if re.match(r"ADD\b", a, re.I) and re.search(r"\bCHECK\s*\(.*\bIS\s+NOT\s+NULL\b", a, re.I):
+        if re.match(r"ADD\b", a, re.I) and any(re.search(r"\bIS\s+NOT\s+NULL\b", e, re.I) for e in check_exprs(a)):
             yield ("block", "CHECK NOT NULL", table, off)
             continue
         if re.match(r"SET\s+SCHEMA\b", a, re.I):
