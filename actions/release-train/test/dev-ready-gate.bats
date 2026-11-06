@@ -254,22 +254,11 @@ smoke_passed() {
   [[ "$(reason SIG-1)" == *"superseded by signapse/api#8"* ]]
 }
 
-@test "same-second merges: the pass supersedes only if its merge commit contains the failed one" {
+@test "same-second merges are not ordered: the pass does not supersede (re-run recovers)" {
   CURRENT_PRS='["signapse/app#11"]'
   issue SIG-1 "In Review" https://github.com/signapse/app/pull/10 https://github.com/signapse/app/pull/11
   smoke_failed signapse/app 10 sha10 100 2026-11-01T10:00:00Z
   pr signapse/app 11 closed true sha11 2026-11-01T10:00:00Z
-  gh_fix "repos/signapse/app/compare/sha10...sha11" '{"status":"ahead"}'
-  run_gate '["SIG-1"]'
-  [ "$(decision SIG-1)" = true ]
-}
-
-@test "same-second merges: a pass that does not contain the failed commit does not supersede" {
-  CURRENT_PRS='["signapse/app#11"]'
-  issue SIG-1 "In Review" https://github.com/signapse/app/pull/10 https://github.com/signapse/app/pull/11
-  smoke_failed signapse/app 10 sha10 100 2026-11-01T10:00:00Z
-  pr signapse/app 11 closed true sha11 2026-11-01T10:00:00Z
-  gh_fix "repos/signapse/app/compare/sha10...sha11" '{"status":"behind"}'
   run_gate '["SIG-1"]'
   [ "$(decision SIG-1)" = false ]
 }

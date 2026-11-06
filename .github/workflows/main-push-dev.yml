@@ -31,6 +31,7 @@ name: Main Push · dev smoke and QA hand-off (reusable)
 #         contents: read
 #         pull-requests: write   # failure comment on the merged PR
 #       with:
+#         reusable_workflows_ref: main   # same ref as the @ pin above
 #         build_result: ${{ needs.build.result }}
 #         dev_watch_paths: workloads/dev/signstream-api/helmrelease-patch.yaml
 #         read_app_id: ${{ vars.PIPELINE_READ_APP_ID }}
@@ -48,6 +49,10 @@ name: Main Push · dev smoke and QA hand-off (reusable)
 # The "Dev smoke verdict" job name is what other repos' runs look for when a
 # ticket is linked to PRs in several repos. Do not rename it without changing
 # SMOKE_JOB_PATTERN in dev-ready-gate.sh.
+#
+# Known gap: if a ticket's other linked PR is in a repo without this workflow
+# (Terraform, say) and settles after this run's gate, the ticket stays in In
+# Review. Re-run this run's `tickets-to-dev-qa` job (see dev-ready-gate.sh).
 
 on:
   workflow_call:
@@ -58,19 +63,11 @@ on:
         type: string
       dev_watch_paths:
         description: >-
-          Newline- or comma-separated files in gitops_repo that Flux image
+          Newline- or comma-separated files in signapse/signapse-core-k8s (main) that Flux image
           automation rewrites with this repo's dev tags, one per service
           (e.g. workloads/dev/signstream-api/helmrelease-patch.yaml).
         required: true
         type: string
-      gitops_repo:
-        required: false
-        type: string
-        default: 'signapse/signapse-core-k8s'
-      gitops_ref:
-        required: false
-        type: string
-        default: 'main'
       dev_version_url:
         description: >-
           Optional dev URL returning JSON whose dev_version_jq field is the running build (its sha or
@@ -98,6 +95,7 @@ on:
         type: number
         default: 20
       smoke_grep:
+        description: 'Playwright grep for the signapse-e2e dev run, e.g. `@smoke` or `@smoke|@billing`.'
         required: false
         type: string
         default: '@smoke'
@@ -112,6 +110,7 @@ on:
         type: string
         default: 'In Review,PR in Review'
       ticket_target_state:
+        description: 'Linear state tickets move to once every linked PR passed dev smoke, e.g. `On Dev · Ready for QA` (U+00B7 middle dot).'
         required: false
         type: string
         default: 'On Dev · Ready for QA'
@@ -120,6 +119,15 @@ on:
         required: false
         type: string
         default: ''
+      reusable_workflows_ref:
+        description: >-
+          Ref of signapse/reusable-workflows to load the pipeline scripts from.
+          Set it to the same ref as your `uses: ...main-push-dev.yml@<ref>` pin;
+          a called workflow cannot see its own ref, so the default `main` would
+          otherwise run main's scripts under a pinned workflow.
+        required: false
+        type: string
+        default: 'main'
       read_app_id:
         description: >-
           GitHub App id of the read-only pipeline app (ADR 0005). Its token
@@ -174,7 +182,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: signapse/reusable-workflows
-          ref: main
+          ref: ${{ inputs.reusable_workflows_ref }}
           path: _rw
           persist-credentials: false
 
@@ -232,18 +240,9 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: signapse/reusable-workflows
-          ref: main
+          ref: ${{ inputs.reusable_workflows_ref }}
           path: _rw
           persist-credentials: false
-
-      - name: Split GitOps repo
-        id: gitops
-        env:
-          GITOPS_REPO: ${{ inputs.gitops_repo }}
-        run: |
-          set -euo pipefail
-          echo "owner=${GITOPS_REPO%%/*}" >> "$GITHUB_OUTPUT"
-          echo "name=${GITOPS_REPO#*/}" >> "$GITHUB_OUTPUT"
 
       - name: Mint read-only app token
         id: app
@@ -251,15 +250,13 @@ jobs:
         with:
           app-id: ${{ inputs.read_app_id }}
           private-key: ${{ secrets.READ_APP_PRIVATE_KEY }}
-          owner: ${{ steps.gitops.outputs.owner }}
-          repositories: ${{ steps.gitops.outputs.name }}
+          owner: signapse
+          repositories: signapse-core-k8s
           permission-contents: read
 
       - name: Wait for dev to run main-${{ github.run_number }}
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}
-          GITOPS_REPO: ${{ inputs.gitops_repo }}
-          GITOPS_REF: ${{ inputs.gitops_ref }}
           WATCH_PATHS: ${{ inputs.dev_watch_paths }}
           RUN_NUMBER: ${{ github.run_number }}
           SHA: ${{ github.sha }}
@@ -280,7 +277,8 @@ jobs:
       contents: read
     # The ref is literal: GitHub does not evaluate expressions in `uses:`, so
     # it cannot be a caller input. Pin it here (a tag or sha, via a PR to this
-    # repo) once signapse-e2e cuts one; callers pin this file's own ref.
+    # repo) once signapse-e2e cuts one. Callers pin this file's ref, and pass
+    # the same ref as reusable_workflows_ref for the scripts.
     uses: signapse/signapse-e2e/.github/workflows/playwright.yml@main
     with:
       environment: dev
@@ -346,7 +344,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: signapse/reusable-workflows
-          ref: main
+          ref: ${{ inputs.reusable_workflows_ref }}
           path: _rw
           persist-credentials: false
 
@@ -358,8 +356,6 @@ jobs:
           private-key: ${{ secrets.READ_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
           permission-actions: read
-          # contents: compare API orders same-second merges in private repos.
-          permission-contents: read
           permission-pull-requests: read
 
       - name: Move tickets whose linked PRs all passed dev smoke
@@ -411,56 +407,18 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: signapse/reusable-workflows
-          ref: main
+          ref: ${{ inputs.reusable_workflows_ref }}
           path: _rw
           persist-credentials: false
-
-      - name: Checkout push range (context fallback)
-        if: ${{ needs.context.result != 'success' }}
-        # A failed checkout must not suppress the notification below.
-        continue-on-error: true
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          path: _src
-          persist-credentials: false
-
-      # context failed, so its PR list is missing: rebuild it for the push
-      # range with this repo's own token. If even that fails, notify
-      # with an empty list (Slack and the run's error still fire).
-      - name: Merged PRs (context fallback)
-        id: fallback
-        if: ${{ needs.context.result != 'success' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-          SHA: ${{ github.sha }}
-          BEFORE: ${{ github.event.before }}
-          REPO: ${{ github.repository }}
-        run: |
-          set -uo pipefail
-          if ! cd "$GITHUB_WORKSPACE/_src" 2>/dev/null; then
-            echo "::warning::no checkout to list merged PRs from; notifying Slack only"
-            echo "prs=[]" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          # Same range as context: the whole push, else the merge commit alone.
-          if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ] \
-            || ! git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
-            BEFORE="${SHA}~1"
-          fi
-          if prs=$("$GITHUB_WORKSPACE/_rw/actions/release-train/scripts/merged-prs.sh" "$REPO" "$BEFORE" "$SHA"); then
-            echo "prs=$prs" >> "$GITHUB_OUTPUT"
-          else
-            echo "::warning::could not list merged PRs for ${SHA}; notifying Slack only"
-            echo "prs=[]" >> "$GITHUB_OUTPUT"
-          fi
 
       - name: Notify PR authors
         env:
           GH_TOKEN: ${{ github.token }}
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_CHANNEL: ${{ inputs.slack_channel }}
-          PRS: ${{ needs.context.outputs.prs || steps.fallback.outputs.prs || '[]' }}
+          # If context failed there is no PR list: notify with [] (the error
+          # below and Slack still fire).
+          PRS: ${{ needs.context.outputs.prs || '[]' }}
           STAGE: ${{ needs.verdict.outputs.failed_stage || 'dev smoke' }}
           REPORT_URL: ${{ needs.verdict.outputs.report_url }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

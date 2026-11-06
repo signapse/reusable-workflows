@@ -120,7 +120,7 @@ if [ -n "$VERSION_URL" ]; then
       | if length == 1 and (.[0] | type) == \"string\" and (.[0] | test(\"[\\\\n\\\\r]\") | not)
         then .[0] else empty end" 2>/dev/null || true)
     n=""
-    if [[ "$running" != *$'\n'* && "$running" =~ ^main-([0-9]+)(-[0-9a-f]{40})?$ ]]; then n="${BASH_REMATCH[1]}"; fi
+    if [[ "$running" =~ ^main-([0-9]+)(-[0-9a-f]{40})?$ ]]; then n="${BASH_REMATCH[1]}"; fi
     if [ "$running" = "$SHA" ] || { [ -n "$n" ] && [ "$n" -ge "$RUN_NUMBER" ]; }; then
       log "dev runs ${running} at ${VERSION_URL}"
       summary "Dev deploy confirmed: ${VERSION_URL} reports \`${running}\` (wanted main-${RUN_NUMBER} or newer)."
