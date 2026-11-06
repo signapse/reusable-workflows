@@ -19,12 +19,18 @@ name: Release Train prod (reusable)
 #   smoke     signapse-e2e @prod-safe against prod (AC4)
 #   verdict   pass: AC5 guard again, tickets -> On Prod.
 #             fail: prod_smoke_passed=false and a red run.
+#             unknown (no suite verdict): prod_smoke_passed empty and a red
+#             run; smoke-unknown alerts critically, nothing is rolled back.
 #   partial   a deploy-prod run or the final check fails or times out after
 #             some services already run the tag: a failed Deployment.
 #             prod_smoke_passed=false, partial_deployment=true and
 #             moved_services name what the rollback restores
-#             (scripts/prod-partial.sh; unknown -> alert, no rollback). The automatic
-#             rollback is SIG-2771's job, chained after this one.
+#             (scripts/prod-partial.sh; unknown -> alert, no rollback).
+#   rollback  only after a failed smoke or a partial Deployment (SIG-2771): rollback.yml in
+#             signapse-core-k8s per service, checked against the previous
+#             tags; Linear Release -> Rolled back; incident.io incident (Minor,
+#             or Major when the rollback did not restore everything) with
+#             Cause = Deployment; tickets -> QA Failed; Slack alert. Always red.
 #
 # Two ways in (see scripts/prod-plan.sh):
 #   fresh   release_tag set: staging just passed for it in this run.
@@ -213,6 +219,49 @@ on:
         required: false
         type: string
         default: ''
+      # Automatic rollback on a failed prod smoke (SIG-2771).
+      rollback_timeout_minutes:
+        description: 'Limit on waiting for every service''s rollback run (at most 60: the job has 90).'
+        required: false
+        type: number
+        default: 30
+      rollback_max_attempts:
+        description: 'Dispatches per service, counting re-dispatches of a cancelled rollback with the same run_key.'
+        required: false
+        type: number
+        default: 3
+      qa_passed_label:
+        description: 'Label removed from every ticket the rollback moves to QA Failed.'
+        required: false
+        type: string
+        default: 'QA Passed'
+      rolled_back_stage:
+        description: 'Canceled-type stage of the Linear release pipeline that marks a Release rolled back.'
+        required: false
+        type: string
+        default: 'Rolled back'
+      incident_io_minor_severity_id:
+        description: >-
+          incident.io severity for a smoke failure that was rolled back (the spec's
+          "Minor"). The workspace has P1-P4 and no Minor; default P3.
+        required: false
+        type: string
+        default: '01JWRDWJJNB922KTB3S6ZGFSM6'
+      incident_io_major_severity_id:
+        description: 'incident.io severity when the rollback failed or needs a human (the spec''s "Major"). Default P2.'
+        required: false
+        type: string
+        default: '01JWRDWJJN13741D7BW7QPATFS'
+      incident_io_incident_type_id:
+        description: 'incident.io incident type. Empty: the organisation''s default type.'
+        required: false
+        type: string
+        default: ''
+      incident_io_mode:
+        description: 'standard, or test to try the failure path without a real incident.'
+        required: false
+        type: string
+        default: 'standard'
     secrets:
       LINEAR_API_KEY:
         required: true
@@ -226,6 +275,9 @@ on:
         required: false
       POSTHOG_READ_API_KEY:
         # Personal API key with feature_flag:read only (AC5 guard).
+        required: false
+      INCIDENT_IO_API_KEY:
+        # incident.io API key allowed to create incidents only (SIG-2771).
         required: false
       # Forwarded to signapse-e2e for the prod @prod-safe run, nothing else.
       E2E_PROD_SIGNSTUDIO_ADMIN_API_TOKEN:
@@ -285,6 +337,15 @@ on:
         value: ${{ jobs.deploy.outputs.moved_services || '[]' }}
       smoke_report_url:
         value: ${{ jobs.smoke.outputs.report_url }}
+      rolled_back:
+        description: "'true' when a failed smoke was rolled back on every service; 'false' when it was not; empty when no rollback was needed"
+        value: ${{ jobs.rollback.outputs.rolled_back }}
+      rollback_results:
+        description: 'JSON [{service, run_key, run_url, result, expected, restored, replaced, ok, reason, ...}] (scripts/prod-rollback.sh)'
+        value: ${{ jobs.rollback.outputs.results }}
+      incident_url:
+        description: 'incident.io incident opened for the failed smoke'
+        value: ${{ jobs.rollback.outputs.incident_url }}
 
 jobs:
   deploy:
@@ -316,6 +377,8 @@ jobs:
       deployed: ${{ steps.verify.outputs.deployed || 'false' }}
       partial_deployment: ${{ steps.partial.outputs.partial || 'false' }}
       moved_services: ${{ steps.partial.outputs.moved || '[]' }}
+      gitops_owner: ${{ steps.cfg.outputs.owner }}
+      gitops_name: ${{ steps.cfg.outputs.name }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -527,10 +590,8 @@ jobs:
           TAG: ${{ steps.plan.outputs.release_tag }}
         run: |
           set -euo pipefail
-          now=$("$GITHUB_WORKSPACE/_rw/actions/release-train/scripts/prod-tags.sh" "$TAG")
-          off=$(jq -r '[.[] | select(.on_tag | not) | "\(.service) runs \(.current_tag)"] | join(", ")' <<< "$now")
-          if [ -n "$off" ]; then
-            echo "::error::After the deploy, prod does not run $TAG everywhere: $off"
+          if ! off=$("$GITHUB_WORKSPACE/_rw/actions/release-train/scripts/prod-tags.sh" --require-all "$TAG"); then
+            echo "::error::After the deploy, prod does not run $TAG everywhere: ${off:-the tags could not be read}"
             exit 1
           fi
           echo "deployed=true" >> "$GITHUB_OUTPUT"
@@ -688,13 +749,28 @@ jobs:
           TAG: ${{ needs.deploy.outputs.release_tag }}
         run: |
           set -euo pipefail
-          passed=false
-          [ "$JOB_RESULT" = success ] && [ "$RESULT" = passed ] && passed=true
+          # Three answers, never a guess (SIG-2771):
+          #   true    the suite job succeeded and reported passed
+          #   false   the suite reported failed: the tests ran against prod
+          #           and failed, so the rollback runs
+          #   (empty) unknown: no result (the suite job errored, was cancelled
+          #           or skipped before reporting), or passed with a job that
+          #           did not succeed. Neither a pass nor a rollback: the
+          #           smoke-unknown job alerts and a human decides.
+          case "$RESULT" in
+            passed) if [ "$JOB_RESULT" = success ]; then passed=true; else passed=""; fi ;;
+            failed) passed=false ;;
+            *) passed="" ;;
+          esac
           echo "passed=$passed" >> "$GITHUB_OUTPUT"
           {
             echo "## Prod smoke (@prod-safe) on \`$TAG\`"
             echo
-            if [ "$passed" = true ]; then echo "**Passed.**"; else echo "**Failed** (job ${JOB_RESULT}, result ${RESULT:-none}). Rollback is SIG-2771's job."; fi
+            case "$passed" in
+              true) echo "**Passed.**" ;;
+              false) echo "**Failed** (job ${JOB_RESULT}). The rollback job restores the previous tags." ;;
+              *) echo "**Unknown** (job ${JOB_RESULT}, result ${RESULT:-none}): not rolled back, not passed; see the smoke-unknown alert." ;;
+            esac
             [ -z "$REPORT_URL" ] || echo "[Playwright report]($REPORT_URL)"
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -727,6 +803,35 @@ jobs:
             exit 1
           fi
 
+      # A "Re-run failed jobs" after a rollback re-runs the smoke against the
+      # rolled-back prod. A pass then must not move tickets to On Prod.
+      - name: Mint read-only app token
+        id: read
+        if: steps.smoke.outputs.passed == 'true'
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ inputs.read_app_id }}
+          private-key: ${{ secrets.READ_APP_PRIVATE_KEY }}
+          owner: ${{ needs.deploy.outputs.gitops_owner }}
+          repositories: ${{ needs.deploy.outputs.gitops_name }}
+          permission-contents: read
+
+      - name: Prod still runs ${{ needs.deploy.outputs.release_tag }}
+        id: ontag
+        if: steps.smoke.outputs.passed == 'true'
+        env:
+          GH_TOKEN: ${{ steps.read.outputs.token }}
+          PROD_SERVICES: ${{ inputs.prod_services }}
+          GITOPS_REPO: ${{ inputs.gitops_repo }}
+          GITOPS_REF: ${{ inputs.gitops_ref }}
+          TAG: ${{ needs.deploy.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          if ! off=$("$GITHUB_WORKSPACE/_rw/actions/release-train/scripts/prod-tags.sh" --require-all "$TAG"); then
+            echo "::error::The smoke passed, but prod no longer runs $TAG (${off:-the tags could not be read}): it was rolled back or replaced. Tickets were not moved."
+            exit 1
+          fi
+
       - name: Move tickets to ${{ inputs.on_prod_state }} (AC4)
         id: move
         if: steps.smoke.outputs.passed == 'true'
@@ -752,12 +857,13 @@ jobs:
       # The smoke passed but the flag guard failed: a Feature flag left the
       # QA Cohort during the Deployment. Users may see an unreviewed
       # feature, so Releasers hear about it now. No rollback: the flag is a
-      # PostHog change a rollback does not undo. A failed ticket move gets a
-      # plain alert.
+      # PostHog change a rollback does not undo. Prod no longer running the
+      # tag, or a failed ticket move, gets a plain alert.
       - name: Alert Slack (checks after a passed smoke)
-        if: failure() && (steps.guard.outcome == 'failure' || steps.move.outcome == 'failure')
+        if: failure() && (steps.guard.outcome == 'failure' || steps.ontag.outcome == 'failure' || steps.move.outcome == 'failure')
         env:
           GUARD: ${{ steps.guard.outcome }}
+          ONTAG: ${{ steps.ontag.outcome }}
           STATE: ${{ inputs.on_prod_state }}
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_CHANNEL: ${{ inputs.slack_channel || inputs.slack_releases_channel || vars.SLACK_RELEASES_CHANNEL || '#releases' }}
@@ -770,6 +876,8 @@ jobs:
           source "$GITHUB_WORKSPACE/_rw/actions/release-train/lib/slack.sh"
           if [ "$GUARD" = failure ]; then
             text=":rotating_light: <!channel> \`${GITHUB_REPOSITORY}\` \`${TAG}\` passed the prod smoke, but a Feature flag is on beyond the QA Cohort. Tickets were not moved. Check PostHog now. <${RUN_URL}|Run>"
+          elif [ "$ONTAG" = failure ]; then
+            text=":warning: \`${GITHUB_REPOSITORY}\` \`${TAG}\` passed the prod smoke, but prod no longer runs it everywhere (rolled back or replaced). Tickets were not moved. <${RUN_URL}|Run>"
           else
             text=":warning: \`${GITHUB_REPOSITORY}\` \`${TAG}\` passed the prod smoke, but moving its tickets to ${STATE} failed (Linear). Prod is fine; re-run failed jobs or move them by hand. <${RUN_URL}|Run>"
           fi
@@ -782,6 +890,313 @@ jobs:
           PASSED: ${{ steps.smoke.outputs.passed }}
           RELEASE_RESULT: ${{ needs.release.result }}
         run: |
-          [ "$PASSED" = true ] || echo "::error::Prod @prod-safe tests did not pass. prod_smoke_passed=false."
+          case "$PASSED" in
+            true) ;;
+            false) echo "::error::Prod @prod-safe tests failed. prod_smoke_passed=false." ;;
+            *) echo "::error::The prod @prod-safe result is unknown (no verdict from the suite). prod_smoke_passed is empty." ;;
+          esac
           [ "$RELEASE_RESULT" = success ] || echo "::error::The Linear/Sentry release was not recorded (${RELEASE_RESULT}). Re-run failed jobs: deployment-release is idempotent."
+          exit 1
+
+  # SIG-2771: the smoke result is unknown, not 'false': the suite gave no
+  # verdict, or the verdict job died before reading it. Rolling back a
+  # Deployment that may be healthy is worse than asking a human: alert
+  # critically and end red, change nothing.
+  smoke-unknown:
+    name: Prod smoke result unknown
+    needs: [deploy, smoke, verdict]
+    if: >-
+      !cancelled() && needs.deploy.outputs.deployed == 'true' &&
+      needs.verdict.outputs.prod_smoke_passed != 'true' && needs.verdict.outputs.prod_smoke_passed != 'false'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    # No checkout: the alert must not depend on fetching anything (review fix).
+    steps:
+      - name: Alert Slack and end red
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL: ${{ inputs.slack_channel || inputs.slack_releases_channel || vars.SLACK_RELEASES_CHANNEL || '#releases' }}
+          TAG: ${{ needs.deploy.outputs.release_tag }}
+          SMOKE_JOB: ${{ needs.smoke.result }}
+          SMOKE_RESULT: ${{ needs.smoke.outputs.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          msg="Prod runs \`${TAG}\` but its @prod-safe result is unknown: the suite gave no verdict, or the verdict job did not record it (smoke job ${SMOKE_JOB}, result ${SMOKE_RESULT:-none}). Nothing was rolled back and no ticket moved. Check prod, then re-run the smoke or roll back by hand."
+          echo "::error::${msg}"
+          if [ -z "$SLACK_BOT_TOKEN" ]; then
+            echo "::error::No SLACK_BOT_TOKEN: the alert was not posted."
+          else
+            resp=$(jq -nc --arg c "$SLACK_CHANNEL" --arg t ":rotating_light: <!channel> ${GITHUB_REPOSITORY}: ${msg} <${RUN_URL}|Run>" '{channel: $c, text: $t}' \
+              | curl -sS --max-time 20 -X POST https://slack.com/api/chat.postMessage \
+                  -H "Authorization: Bearer ${SLACK_BOT_TOKEN}" -H 'Content-Type: application/json; charset=utf-8' --data-binary @-) \
+              || resp='{"ok":false,"error":"curl failed"}'
+            [ "$(jq -r '.ok // false' <<< "$resp" 2> /dev/null)" = true ] || echo "::error::Slack alert failed: $resp"
+          fi
+          exit 1
+
+  # SIG-2771: a failed @prod-safe smoke rolls back by itself (spec step 6
+  # "Fail", "Failure handling"). Only after a Deployment that actually reached
+  # prod; a cancelled run never rolls back. Every step after the rollback runs
+  # whatever the rollback did, so what is knowable is still recorded (AC5).
+  # The job always ends red. Retry it with a re-run of this job alone: "Re-run
+  # failed jobs" would re-run a failed smoke against the restored prod, and a
+  # pass there skips this job (docs/RELEASE-TRAIN.md "Re-runs").
+  # Re-runs are safe: rollback.yml is keyed on the
+  # rollback run key, the incident on run id + release tag, the Release move and
+  # ticket comments check before writing.
+  rollback:
+    name: Roll back prod
+    needs: [deploy, release, smoke, verdict]
+    # Also after a partial Deployment (SIG-2769): a deploy-prod run or the
+    # final check failed after some services moved. Then only those roll back.
+    if: >-
+      !cancelled() && (
+        (needs.deploy.outputs.deployed == 'true' && needs.verdict.outputs.prod_smoke_passed == 'false') ||
+        needs.deploy.outputs.partial_deployment == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    outputs:
+      rolled_back: ${{ steps.rollback.outputs.ok || 'false' }}
+      results: ${{ steps.rollback.outputs.results || '[]' }}
+      incident_url: ${{ steps.incident.outputs.url }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_branch }}
+          sparse-checkout: .signapse
+          persist-credentials: false
+
+      - name: Fetch release-train scripts
+        uses: actions/checkout@v4
+        with:
+          repository: signapse/reusable-workflows
+          # Scripts from the same commit as this workflow, not mutable main. An
+          # empty workflow_sha would silently check out main, so fail instead.
+          ref: ${{ job.workflow_sha || 'job.workflow_sha-is-empty' }}
+          path: _rw
+          persist-credentials: false
+
+      - name: Rollback inputs
+        id: cfg
+        env:
+          DEPLOY_RUN_KEY: ${{ needs.deploy.outputs.run_key }}
+          RELEASE_TAG: ${{ needs.deploy.outputs.release_tag }}
+          LINEAR_PIPELINE: ${{ inputs.linear_pipeline }}
+          ROLLBACK_TIMEOUT: ${{ inputs.rollback_timeout_minutes }}
+        run: |
+          set -euo pipefail
+          # The job has 90 minutes: a longer wait could kill it before the
+          # incident, ticket and Slack steps run.
+          awk -v m="$ROLLBACK_TIMEOUT" 'BEGIN { exit !(m > 0 && m <= 60) }' \
+            || { echo "::error::rollback_timeout_minutes must be above 0 and at most 60 (got $ROLLBACK_TIMEOUT)"; exit 1; }
+          # Empty when this run dispatched nothing (prod already ran the tag):
+          # then a key stable across re-runs of this run.
+          echo "run_key=${DEPLOY_RUN_KEY:-${GITHUB_REPOSITORY#*/}-${GITHUB_RUN_ID}-prod}" >> "$GITHUB_OUTPUT"
+          # One incident per train run and release tag, whatever the attempt:
+          # a "Re-run all jobs" may get a new deploy key (or none, when prod
+          # already runs the tag) and must still find the first incident.
+          echo "incident_key=${GITHUB_REPOSITORY#*/}-${GITHUB_RUN_ID}-${RELEASE_TAG}-prod" >> "$GITHUB_OUTPUT"
+          pipeline="$LINEAR_PIPELINE"
+          [ -n "$pipeline" ] || pipeline=$("$GITHUB_WORKSPACE/_rw/actions/release-train/scripts/pipeline-config.sh" linear_pipeline 2>/dev/null || true)
+          echo "linear_pipeline=$pipeline" >> "$GITHUB_OUTPUT"
+
+      # ADR 0005: Prodzilla narrowed to signapse-core-k8s, actions: write only.
+      # rollback.yml pushes the tag with its own Flux app.
+      - name: Mint Prodzilla token for ${{ inputs.gitops_repo }}
+        id: prodzilla
+        continue-on-error: true
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ inputs.prodzilla_app_id }}
+          private-key: ${{ secrets.PRODZILLA_APP_PRIVATE_KEY }}
+          owner: ${{ needs.deploy.outputs.gitops_owner }}
+          repositories: ${{ needs.deploy.outputs.gitops_name }}
+          permission-actions: write
+
+      # What prod runs right before the rollback: a service no longer on the
+      # release tag (a newer deployment landed after the smoke) is left to a
+      # human, so the rollback never undoes it. Best effort: without it the
+      # rollback still runs.
+      - name: Mint read-only app token for ${{ inputs.gitops_repo }}
+        id: read
+        continue-on-error: true
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ inputs.read_app_id }}
+          private-key: ${{ secrets.READ_APP_PRIVATE_KEY }}
+          owner: ${{ needs.deploy.outputs.gitops_owner }}
+          repositories: ${{ needs.deploy.outputs.gitops_name }}
+          permission-contents: read
+
+      - name: Read the tags prod runs
+        id: current
+        if: ${{ !cancelled() && steps.read.outputs.token != '' }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ steps.read.outputs.token }}
+          PROD_SERVICES: ${{ inputs.prod_services }}
+          GITOPS_REPO: ${{ inputs.gitops_repo }}
+          GITOPS_REF: ${{ inputs.gitops_ref }}
+          RELEASE_TAG: ${{ needs.deploy.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          echo "tags=$("$GITHUB_WORKSPACE/_rw/actions/release-train/scripts/prod-tags.sh" "$RELEASE_TAG" | jq -c .)" >> "$GITHUB_OUTPUT"
+
+      - name: Roll back with rollback.yml (AC1)
+        id: rollback
+        if: ${{ !cancelled() }}
+        env:
+          GH_TOKEN: ${{ steps.prodzilla.outputs.token }}
+          SERVICES: ${{ needs.deploy.outputs.partial_deployment == 'true' && needs.deploy.outputs.moved_services || inputs.prod_services }}
+          PREVIOUS_TAGS: ${{ needs.deploy.outputs.previous_tags }}
+          RELEASE_TAG: ${{ needs.deploy.outputs.release_tag }}
+          CURRENT_TAGS: ${{ steps.current.outputs.tags }}
+          DEPLOY_RUN_KEY: ${{ steps.cfg.outputs.run_key }}
+          K8S_REPO: ${{ inputs.gitops_repo }}
+          K8S_REF: ${{ inputs.gitops_ref }}
+          TIMEOUT_MINUTES: ${{ inputs.rollback_timeout_minutes }}
+          MAX_ATTEMPTS: ${{ inputs.rollback_max_attempts }}
+        run: |
+          set -euo pipefail
+          # awk, not $((...)): the input is a number and may be fractional.
+          TIMEOUT_SECONDS=$(awk -v m="$TIMEOUT_MINUTES" 'BEGIN { printf "%d", m * 60 }')
+          export TIMEOUT_SECONDS
+          if [ -z "$GH_TOKEN" ]; then
+            res=$(jq -nc --argjson s "$SERVICES" '{ok: false, needs_human: true, reason: "no Prodzilla token, nothing was dispatched",
+              results: [$s[] | {service: ., ok: false, result: "not_dispatched", restored: "", run_url: "", reason: "not rolled back: the Prodzilla token could not be minted"}]}')
+          else
+            res=$("$GITHUB_WORKSPACE/_rw/actions/release-train/scripts/prod-rollback.sh") \
+              || res=$(jq -nc --argjson s "$SERVICES" '{ok: false, needs_human: true, reason: "the rollback script failed; see the log",
+                results: [$s[] | {service: ., ok: false, result: "error", restored: "", run_url: "", reason: "the rollback script failed; see the log"}]}')
+          fi
+          {
+            echo "ok=$(jq -r .ok <<< "$res")"
+            echo "results=$(jq -c .results <<< "$res")"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "## Automatic rollback"
+            echo
+            echo "| Service | Rollback run | Result | Prod ran before | Restored | |"
+            echo "|---|---|---|---|---|---|"
+            jq -r '.results[] | "| `\(.service)` | \(if (.run_url // "") == "" then "none" else "[\(.run_key)](\(.run_url))" end) | \(.result) | `\(.expected // "?")` | `\(.restored // "")` | \(if .ok then "ok" else "**\(.reason)**" end) |"' <<< "$res"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$(jq -r .ok <<< "$res")" != true ]; then
+            echo "::error::Rollback incomplete: $(jq -r .reason <<< "$res")"
+            exit 1
+          fi
+
+      # A partial Deployment never reached the release job: no Release to mark.
+      - name: Mark the Linear Release ${{ inputs.rolled_back_stage }} (AC2)
+        id: release
+        # Bounded so the ticket and Slack step after it always runs.
+        timeout-minutes: 5
+        if: ${{ !cancelled() && needs.deploy.outputs.deployed == 'true' }}
+        env:
+          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+          RELEASE_ID: ${{ needs.release.outputs.linear_release_id }}
+          VERSION: ${{ needs.deploy.outputs.release_tag }}
+          LINEAR_PIPELINE: ${{ steps.cfg.outputs.linear_pipeline }}
+          STAGE_NAME: ${{ inputs.rolled_back_stage }}
+        run: |
+          set -euo pipefail
+          rc=0
+          res=$("$GITHUB_WORKSPACE/_rw/actions/release-train/scripts/release-rolled-back.sh") || rc=$?
+          [ -n "$res" ] || res='{"ok":false,"reason":"the script failed; see the log"}'
+          echo "Linear Release: $(jq -r '.reason' <<< "$res")$(jq -r 'if (.url // "") != "" then " ([Release](\(.url)))" else "" end' <<< "$res")" >> "$GITHUB_STEP_SUMMARY"
+          echo "note=$([ "$rc" -eq 0 ] || echo ":warning: Linear Release not marked ${STAGE_NAME}: $(jq -r .reason <<< "$res")")" >> "$GITHUB_OUTPUT"
+          echo "url=$(jq -r '.url // ""' <<< "$res")" >> "$GITHUB_OUTPUT"
+          [ "$rc" -eq 0 ] || { echo "::error::Linear Release not marked ${STAGE_NAME}: $(jq -r .reason <<< "$res")"; exit 1; }
+
+      - name: Open the incident.io incident (AC3, AC5)
+        id: incident
+        # Bounded so the ticket and Slack step after it always runs.
+        timeout-minutes: 5
+        if: ${{ !cancelled() }}
+        env:
+          INCIDENT_IO_API_KEY: ${{ secrets.INCIDENT_IO_API_KEY }}
+          IDEMPOTENCY_KEY: ${{ steps.cfg.outputs.incident_key }}
+          ROLLBACK_OK: ${{ steps.rollback.outputs.ok }}
+          ROLLBACK_RESULTS: ${{ steps.rollback.outputs.results }}
+          MINOR_SEVERITY_ID: ${{ inputs.incident_io_minor_severity_id }}
+          MAJOR_SEVERITY_ID: ${{ inputs.incident_io_major_severity_id }}
+          INCIDENT_TYPE_ID: ${{ inputs.incident_io_incident_type_id }}
+          INCIDENT_MODE: ${{ inputs.incident_io_mode }}
+          REPOSITORY: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.deploy.outputs.release_tag }}
+          TICKETS: ${{ needs.deploy.outputs.tickets }}
+          CAUSE: ${{ needs.deploy.outputs.partial_deployment == 'true' && 'Prod deploy failed part-way' || 'Prod smoke failed' }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          REPORT_URL: ${{ needs.smoke.outputs.report_url }}
+          RELEASE_URL: ${{ steps.release.outputs.url || needs.release.outputs.linear_release_url }}
+        run: |
+          set -euo pipefail
+          rc=0
+          res=$("$GITHUB_WORKSPACE/_rw/actions/release-train/scripts/rollback-incident.sh") || rc=$?
+          [ -n "$res" ] || res='{"ok":false,"reason":"the script failed; see the log"}'
+          echo "url=$(jq -r '.url // ""' <<< "$res")" >> "$GITHUB_OUTPUT"
+          echo "note=$([ "$rc" -eq 0 ] || echo ":warning: incident.io incident not opened: $(jq -r .reason <<< "$res")")" >> "$GITHUB_OUTPUT"
+          echo "incident.io ($(jq -r '.severity // "?"' <<< "$res")): $(jq -r '.reason' <<< "$res") $(jq -r 'if (.url // "") != "" then "[\(.reference)](\(.url))" else "" end' <<< "$res")" >> "$GITHUB_STEP_SUMMARY"
+          [ "$rc" -eq 0 ] || { echo "::error::incident.io incident not opened: $(jq -r .reason <<< "$res")"; exit 1; }
+
+      - name: Tickets to ${{ inputs.qa_failed_state }} and Slack (AC4, AC5)
+        id: tickets
+        if: ${{ !cancelled() }}
+        env:
+          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL: ${{ inputs.slack_channel || inputs.slack_releases_channel || vars.SLACK_RELEASES_CHANNEL || '#releases' }}
+          QA_FAILED_STATE: ${{ inputs.qa_failed_state }}
+          QA_PASSED_LABEL: ${{ inputs.qa_passed_label }}
+          LINEAR_TEAM_KEY: ${{ inputs.linear_team_key }}
+          TICKETS: ${{ needs.deploy.outputs.tickets }}
+          ROLLBACK_OK: ${{ steps.rollback.outputs.ok }}
+          ROLLBACK_RESULTS: ${{ steps.rollback.outputs.results }}
+          INCIDENT_URL: ${{ steps.incident.outputs.url }}
+          NOTES: ${{ format('{0} {1}', steps.release.outputs.note, steps.incident.outputs.note) }}
+          REPOSITORY: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.deploy.outputs.release_tag }}
+          CAUSE: ${{ needs.deploy.outputs.partial_deployment == 'true' && 'Prod deploy failed part-way' || 'Prod smoke failed' }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          REPORT_URL: ${{ needs.smoke.outputs.report_url }}
+        run: |
+          set -euo pipefail
+          NOTES="$(sed -E 's/^ +| +$//g' <<< "$NOTES")"
+          export NOTES
+          rc=0
+          res=$("$GITHUB_WORKSPACE/_rw/actions/release-train/scripts/rollback-tickets.sh") || rc=$?
+          [ -n "$res" ] || res='{"ok":false,"errors":["the script failed; see the log"]}'
+          jq -r --arg qf "$QA_FAILED_STATE" '.moves // empty
+            | "Tickets:",
+              (if (.moved + .already | length) > 0 then "- In \($qf): \(.moved + .already | join(", "))" else empty end),
+              (if (.kept | length) > 0 then "- Left where they are: \(.kept | map("\(.id) (\(.state))") | join(", "))" else empty end),
+              (if (.failed | length) > 0 then "- NOT moved to \($qf) (Linear failed): \(.failed | join(", "))" else empty end)' \
+            <<< "$res" >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+          if [ "$rc" -ne 0 ]; then
+            jq -r '.errors[]? | "::error::" + .' <<< "$res"
+            exit 1
+          fi
+
+      # Every failure path ends red: the smoke failed, so this run failed, even
+      # when everything above went to plan.
+      - name: End red
+        if: always()
+        env:
+          ROLLBACK_OK: ${{ steps.rollback.outputs.ok }}
+          RELEASE: ${{ steps.release.outcome }}
+          INCIDENT: ${{ steps.incident.outcome }}
+          TICKETS: ${{ steps.tickets.outcome }}
+          WHAT: ${{ needs.deploy.outputs.partial_deployment == 'true' && 'The prod Deployment failed part-way' || 'Prod @prod-safe smoke failed' }}
+        run: |
+          if [ "$ROLLBACK_OK" = true ]; then
+            echo "::error::${WHAT}; prod was rolled back to the previous tags. Tickets are in QA Failed."
+          else
+            echo "::error::${WHAT} and the automatic rollback did NOT restore every service. Roll back by hand (signapse-core-k8s docs/OPERATIONS.md)."
+          fi
+          echo "Linear Release step: ${RELEASE:-not run}; incident step: ${INCIDENT:-not run}; tickets and Slack step: ${TICKETS:-not run}"
           exit 1
