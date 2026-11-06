@@ -477,6 +477,25 @@ jobs:
 | `disable-gitleaks` | boolean | `false` | Disable Gitleaks |
 | `extra-super-linter-env` | string | `''` | Extra Super-Linter env vars |
 
+### 7. Migration Safety (`migration-safety.yml`)
+
+Fails a PR whose SQL migrations would break a rollback to the previous code (DROP / RENAME / ALTER COLUMN TYPE / SET NOT NULL), unless a reviewer approves with `allow-destructive-migration` in the review. Silent when a PR changes no migrations. Adoption, the full rule list, the override, and expand/contract: [docs/MIGRATION-SAFETY.md](docs/MIGRATION-SAFETY.md).
+
+```yaml
+on:
+  pull_request:
+  pull_request_review:
+    types: [submitted, edited, dismissed]
+jobs:
+  migration-safety:
+    uses: signapse/reusable-workflows/.github/workflows/migration-safety.yml@main
+    permissions:
+      contents: read
+      pull-requests: read
+    with:
+      reusable_workflows_ref: main   # must match the @ref above, or the scripts come from main
+```
+
 ## Conventions
 
 ### Workflow Naming
