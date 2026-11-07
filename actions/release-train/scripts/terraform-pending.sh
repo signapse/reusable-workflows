@@ -113,7 +113,8 @@ while IFS= read -r t; do
       continue
     fi
     sha=$(jq -r '.merge_commit_sha' <<< "$pr")
-    files=$(gh api --paginate "repos/${TF_REPO}/pulls/${n}/files?per_page=100" | jq -r '.[].filename') \
+    # A rename counts for both paths: moving a product's file away changes it.
+    files=$(gh api --paginate "repos/${TF_REPO}/pulls/${n}/files?per_page=100" | jq -r '.[] | .filename, (.previous_filename // empty)') \
       || die "cannot list files of ${TF_REPO}#${n}"
     products=$(printf '%s\n' "$files" | awk -v self="$PRODUCT" '
       /^terragrunt\/products\/[^\/]+\// { split($0, a, "/"); print a[3]; next }

@@ -40,7 +40,8 @@ shift
 [ "$1" = --paginate ] && shift
 case "$1" in
   */pulls/*/files*) n=${1#*/pulls/}; n=${n%%/*}
-    jq -Rn '[inputs | {filename: .}]' < "$TMP/pulls/$n.files" ;;
+    # "<new> <- <old>" is a rename.
+    jq -Rn '[inputs | split(" <- ") | {filename: .[0]} + (if .[1] then {previous_filename: .[1]} else {} end)]' < "$TMP/pulls/$n.files" ;;
   */pulls/*) cat "$TMP/pulls/${1##*/}.json" ;;
   */terraform-deploy.yml/runs*) echo "$1" >> "$TMP/run-queries"; cat "$TMP/deploy-runs.json"
     # --paginate prints one object per page.
@@ -88,6 +89,14 @@ field() { tail -n1 <<< "$output" | jq -r "$1"; }
   [ "$(field '.pending[0].products | join(",")')" = Signstream ]
   # the run listing is narrowed to runs created since the merge
   grep -q 'branch=main&status=success&created=>=2026-11-02T10:00:00Z' "$TMP/run-queries"
+}
+
+@test "AC4: a file renamed out of a product's directory still needs that product applied" {
+  echo "$TF/pull/12" > "$TMP/linear/SIG-7"
+  pr 12 2026-11-02T10:00:00Z "docs/old-stg.yml <- terragrunt/products/Signstream/config/stg.yml"
+  pending "SIG-7"
+  [ "$status" -eq 0 ]
+  [ "$(field '.pending[0].products | join(",")')" = Signstream ]
 }
 
 @test "AC4: a successful apply run created after the merge counts as applied" {
