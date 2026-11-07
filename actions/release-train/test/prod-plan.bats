@@ -333,6 +333,18 @@ field() { tail -n1 <<< "$output" | jq -r "$@"; }
   [ "$(field .decision)" = nothing ]
 }
 
+@test "resume without RESUME_TAG never picks a release-shaped tag on a merged side branch" {
+  git checkout -q -b side
+  git commit -q --allow-empty -m "SIG-1 side work"
+  git tag 9.9.9
+  git checkout -q main
+  git merge -q --no-ff --no-edit side
+  unset RELEASE_TAG RESUME_TAG
+  plan
+  [ "$status" -eq 0 ]
+  [ "$(field .release_tag)" = 1.1.0 ]
+}
+
 @test "a reverted commit's ticket in range does not refuse the Deployment" {
   cd "$TMP/repo" || return 1
   echo broken > sig-4 && git add sig-4 && git commit -q -m "SIG-4 broke staging"

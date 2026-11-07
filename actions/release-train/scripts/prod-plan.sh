@@ -10,8 +10,9 @@
 #           (the caller only calls with staging_passed == 'true').
 #   resume  RELEASE_TAG is empty: staging was not attempted in this train run
 #           (nothing new promoted, deferred, or the train failed). Take
-#           RESUME_TAG (the train's staged_tag) or else the newest release tag
-#           on the branch, and deploy it if prod does not run it yet.
+#           RESUME_TAG (the train's staged_tag) or else the nearest release
+#           tag on the branch's first-parent history (never a tag on a merged
+#           side branch), and deploy it if prod does not run it yet.
 # Both modes check the staging pass of every ticket in the range (review fix,
 # SIG-2769): every ticket carries Staging Passed, none carries Staging Failed
 # and none is in QA Failed. Fresh refuses otherwise (red run); resume reports
@@ -58,6 +59,8 @@
 source "$(dirname "$0")/../lib/common.sh"
 # shellcheck source=SCRIPTDIR/../lib/revert.sh
 source "$(dirname "$0")/../lib/revert.sh"
+# shellcheck source=SCRIPTDIR/../lib/release-tag.sh
+source "$(dirname "$0")/../lib/release-tag.sh"
 
 need git
 need jq
@@ -91,7 +94,9 @@ if [ "$mode" = resume ]; then
     printf '%s\n' "$RESUME_TAG" | grep -qE "$RELEASE_TAG_PATTERN" || die "resume tag '$RESUME_TAG' is not a release tag"
     tag="$RESUME_TAG"
   else
-    tag=$(git tag --merged HEAD --sort=-v:refname | { grep -E "$RELEASE_TAG_PATTERN" || true; } | head -1)
+    # The nearest release tag on the branch's first-parent history: a
+    # release-shaped tag on a merged side branch was never promoted.
+    tag=$(last_release_tag "$(git rev-parse HEAD)" "$RELEASE_TAG_PATTERN")
   fi
   [ -n "$tag" ] || emit nothing "no release tag on the branch yet"
 fi
@@ -148,7 +153,7 @@ while IFS= read -r t; do
   fi
 done < <(jq -r '.services[] | if .on_tag then .deployed_previous else .current_tag end' <<< "$plan")
 if [ -z "$base" ] && git rev-parse --verify -q "${sha}^" > /dev/null; then
-  base=$(git tag --merged "${sha}^" --sort=-v:refname | { grep -E "$RELEASE_TAG_PATTERN" || true; } | head -1)
+  base=$(last_release_tag "$(git rev-parse "${sha}^")" "$RELEASE_TAG_PATTERN")
 fi
 
 ranged='[]'

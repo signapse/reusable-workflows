@@ -9,7 +9,7 @@
 #     nothing when no tag matches.
 #   release_tag_at <sha> <tag-ERE>
 #     The highest matching tag pointing at <sha>, or nothing.
-# Used by release-candidate.sh (SIG-2761) and selection-base.sh.
+# Used by release-candidate.sh (SIG-2761), selection-base.sh and prod-plan.sh (SIG-2769).
 
 last_release_tag() {
   local head_sha="$1" pattern="$2" tagmap
