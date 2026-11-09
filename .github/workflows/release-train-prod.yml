@@ -28,9 +28,10 @@ name: Release Train prod (reusable)
 #             (scripts/prod-partial.sh; unknown -> alert, no rollback).
 #   rollback  only after a failed smoke or a partial Deployment (SIG-2771): rollback.yml in
 #             signapse-core-k8s per service, checked against the previous
-#             tags; Linear Release -> Rolled back; incident.io incident (Minor,
-#             or Major when the rollback did not restore everything) with
-#             Cause = Deployment; tickets -> QA Failed; Slack alert. Always red.
+#             tags; Linear Release -> Rolled back; incident.io incident (P3
+#             Minor, or P2 Major when the rollback did not restore everything)
+#             with Cause = Deployment; tickets -> QA Failed (Done tickets stay
+#             in Done with QA Passed); Slack alert. Always red.
 #
 # Two ways in (see scripts/prod-plan.sh):
 #   fresh   release_tag set: staging just passed for it in this run.
@@ -235,13 +236,14 @@ on:
         default: 'Rolled back'
       incident_io_minor_severity_id:
         description: >-
-          incident.io severity for a smoke failure that was rolled back (the spec's
-          "Minor"). The workspace has P1-P4 and no Minor; default P3.
+          incident.io severity for an automatic rollback that restored every
+          service: P3 (Minor), Decision (Alex, 2026-11-09) 3. The workspace has
+          P1-P4 and no Minor; the default is P3's id.
         required: false
         type: string
         default: '01JWRDWJJNB922KTB3S6ZGFSM6'
       incident_io_major_severity_id:
-        description: 'incident.io severity when the rollback failed or needs a human (the spec''s "Major"). Default P2.'
+        description: 'incident.io severity when the rollback failed or needs a human: P2 (Major), Decision (Alex, 2026-11-09) 3. The default is P2''s id.'
         required: false
         type: string
         default: '01JWRDWJJN13741D7BW7QPATFS'

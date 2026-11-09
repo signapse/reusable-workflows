@@ -5,8 +5,9 @@
 # spec "incident.io"), with the incident.io API v2 (POST /v2/incidents), the
 # same shape as the Prodzilla router's adaptor (signapse-core-terraform,
 # SIG-2772):
-#   - severity: MINOR_SEVERITY_ID when every service was rolled back, else
-#     MAJOR_SEVERITY_ID (the rollback failed or needs a human: AC5). One
+#   - severity: MINOR_SEVERITY_ID (P3) when every service was rolled back, else
+#     MAJOR_SEVERITY_ID (P2: the rollback failed or needs a human: AC5).
+#     Decision (Alex, 2026-11-09) 3. One
 #     incident per Deployment either way;
 #   - custom field Cause = Deployment, which dora-metrics counts for change
 #     failure rate (the spec's "tagged `deployment`");

@@ -557,6 +557,11 @@ rollback
   End red                  the run fails in every path
 ```
 
+- **Tickets (Decision (Alex, 2026-11-09) 2).** Every ticket in the
+  Deployment moves to `QA Failed` and loses `QA Passed`, except a ticket
+  already in `Done`: it stays in `Done` and keeps `QA Passed`. It gets the
+  comment, and the Slack alert lists it as stayed. SIG-2771's AC4 says the
+  same.
 - **Run keys.** Service S's rollback key is `<deploy run_key>-S-rollback`
   (rollback.yml shows it in its run title). When the run dispatched nothing
   (prod already ran the tag), the deploy key is `<repo>-<run id>-prod`.
@@ -586,9 +591,10 @@ rollback
   no artifact, a timeout or a failed dispatch all count as "the rollback
   failed" (AC5).
 - **Incident.** One per Deployment, idempotency key `<repo>-<run id>-<release tag>-prod`: the same on every attempt of the run, so "Re-run all jobs" (new deploy key, or none when prod already runs the tag) finds the first incident.
-  Severity `incident_io_minor_severity_id` (default P3) when every service was
-  restored, else `incident_io_major_severity_id` (default P2). The workspace
-  has P1-P4 and no "Minor"/"Major". The Cause field is set to Deployment
+  Severity (Decision (Alex, 2026-11-09) 3): an automatic rollback that
+  restored every service is P3 (Minor), `incident_io_minor_severity_id`; a
+  failed rollback is P2 (Major), `incident_io_major_severity_id`. The
+  workspace has P1-P4 and no "Minor"/"Major". The Cause field is set to Deployment
   (dora-metrics counts it), and the run URL goes in the summary and the
   "Where did you find it? (URL)" link field. The Cause and link field ids are
   constants of Signapse's workspace in `rollback-incident.sh`. `incident_io_mode: test` opens a
