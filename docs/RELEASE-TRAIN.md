@@ -392,7 +392,11 @@ cannot disagree. Secrets:
 ## Dark Deployment to prod (SIG-2769)
 
 When staging passes, `release-train-prod.yml` deploys the Release Candidate to
-prod with no human approval (spec step 6, ADR 0004). Feature tickets' flags
+prod (spec step 6, ADR 0004). QA does not have to act; a Prod approver (GitHub
+team `prod-approvers`) approves the prod Terraform apply and the k8s
+`deploy-prod` runs (Decisions 16 and 30, Alex, 2026-11-09), and the
+`terraform_timeout_minutes` and `deploy_timeout_minutes` waits include that
+approval. Feature tickets' flags
 stay QA Cohort only, so customers see nothing new until a Rollout.
 
 ```text
@@ -562,6 +566,10 @@ rollback
   already in `Done`: it stays in `Done` and keeps `QA Passed`. It gets the
   comment, and the Slack alert lists it as stayed. SIG-2771's AC4 says the
   same.
+- **No approval.** rollback.yml runs prod rollbacks in the `prod-rollback`
+  GitHub environment, which has no required reviewers, so an automatic
+  rollback never waits for a Prod approver (Decision 31, Alex, 2026-11-09;
+  signapse-core-k8s#503).
 - **Run keys.** Service S's rollback key is `<deploy run_key>-S-rollback`
   (rollback.yml shows it in its run title). When the run dispatched nothing
   (prod already ran the tag), the deploy key is `<repo>-<run id>-prod`.
@@ -603,7 +611,11 @@ rollback
   constants of Signapse's workspace in `rollback-incident.sh`. `incident_io_mode: test` opens a
   test incident instead, for trying the path out.
 - **Release.** `linear_release_id` from the release job; if recording the
-  Release failed, the Release is looked up by version in the pipeline.
+  Release failed, the Release is looked up by version in the pipeline. A
+  Release moves to `Rolled back` only here, when prod's image was actually
+  rolled back. A `/rollout-abort` does not touch the Release: it turns the
+  flag off, the code stays dark-deployed and the ticket goes back to
+  `On Prod`.
 - **Slack.** Normal alert when rolled back. When the rollback failed it is
   critical (`<!channel>`) and names each service and the reason.
 - **AC5: still records what it can.** Every step after the rollback runs
