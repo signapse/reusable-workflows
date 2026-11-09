@@ -12,4 +12,4 @@ We rejected a release-conductor service with its own database. It would duplicat
 ## Consequences
 
 - Retries must be safe to repeat, because the router remembers nothing. Every action checks the current state in Linear, GitHub or PostHog before acting.
-- The Slack `@release-clickers` group (the releasers) is the only group allowed to start, pause or abort a Rollout.
+- The Slack `@release-clickers` group (the releasers) is the only group allowed to start, pause or abort a Rollout. Approving prod Terraform applies and k8s prod deploys is a different group, the GitHub team `prod-approvers` (Decision 30, ADR 0002).

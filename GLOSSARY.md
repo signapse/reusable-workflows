@@ -26,25 +26,29 @@ A Release Candidate's image reaching production. The unit DORA counts for deploy
 _Avoid_: counting tickets reaching Done as deployments
 
 **Dark Deployment**:
-A production deployment of a Release Candidate whose Feature tickets' flags are off for everyone except the QA Cohort. QA does not have to act for it; a Releaser approves the production job.
+A production deployment of a Release Candidate whose Feature tickets' flags are off for everyone except the QA Cohort. QA does not have to act for it; a Prod approver approves the production jobs.
 _Avoid_: soft launch, "released"
 
 **QA Cohort**:
 The internal Signapse test users for which a feature flag is switched on in production, so the QA team can review a Dark Deployment, UI or API alike.
 
 **Releasers**:
-The people allowed to release today, and so to start, pause or abort a Rollout and to approve a production Terraform apply.
+The people in the Slack `@release-clickers` group, the only ones allowed to start, pause or abort a Rollout. Not the Prod approvers.
 _Avoid_: release-clickers
 
+**Prod approvers**:
+The GitHub team `prod-approvers`, the required reviewers on the `prod-apply` environment (prod Terraform applies) and the k8s `prod` environment (prod deploys). An automatic rollback runs in the `prod-rollback` environment and never waits for them.
+_Avoid_: releasers team, `tech`
+
 **Rollout**:
-Raising a feature flag in stages from the QA Cohort to every user, started by the QA team after their review. Not limited to the deploy window.
+Raising a feature flag in stages from the QA Cohort to every user, started by the QA team after their review. Not limited to the deploy window. Aborting a Rollout turns the flag off: the code stays dark-deployed, the ticket goes back to On Prod and the Linear Release is not marked Rolled back (only a prod image rollback does that).
 
 **Deploy window**:
 The hours in which Promotion may run. It gates Promotion only, never a Rollout step.
 _Avoid_: release (reserved for the Linear Release record), go-live
 
 **Stability Window**:
-The 24 hours after a Rollout reaches every user, during which Sentry's error rate decides whether the ticket is Done or the flag is turned back off. Without flag data from the service, a Releaser confirms Done instead.
+The 24 hours after a Rollout reaches every user, during which Sentry's error rate decides whether the ticket is Done or the flag is turned back off. Without flag data from the service, the ticket stays in Rolling Out and Prodzilla asks the Releasers in Slack to confirm.
 
 ## Tooling
 
