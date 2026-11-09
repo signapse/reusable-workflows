@@ -337,6 +337,23 @@ fail() { export SUITE_JOB_RESULT=failure SUITE_RESULT=failed; }
   [[ "$(jq -r '.errors[0]' <<< "$output")" == *"Rate limit"* ]]
 }
 
+@test "a failed add keeps the old verdict label (never neither)" {
+  jq '.issues["SIG-1"].labels += [{id: "sf-t1", name: "Staging Failed"}]' "$TMP/linear.json" > "$TMP/l" && mv "$TMP/l" "$TMP/linear.json"
+  pass
+  touch "$TMP/fail-add"
+  run verdict
+  [ "$status" -eq 1 ]
+  [[ "$(labels SIG-1)" == *'"Staging Failed"'* ]]
+}
+
+@test "pass, fail, pass in one run: the last pass says production waits" {
+  pass; run verdict
+  fail; run verdict
+  pass; run verdict
+  [ "$(state SIG-1)" = "QA Failed" ]
+  [[ "$(comment SIG-1)" == *"production waits until QA re-passes it"* ]]
+}
+
 @test "a missing Staging label fails the job and names it" {
   jq '.labels |= map(select(.name != "Staging Failed"))' "$TMP/linear.json" > "$TMP/l" && mv "$TMP/l" "$TMP/linear.json"
   fail

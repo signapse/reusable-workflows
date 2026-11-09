@@ -102,6 +102,7 @@ footer="
 Run: ${RUN_URL}
 ${report_line}"
 in_qa_failed='[]'   # passed verdict: tickets already in QA Failed
+recorded=''        # tickets whose label and comment were recorded
 
 # "team|name" -> label id, so each team's label is looked up once.
 label_cache='{}'
@@ -159,10 +160,10 @@ record_ticket() {
     body="$comment_qa_failed"
   fi
 
-  # Same run, same verdict: already commented (re-run). A re-run with another
-  # verdict comments again, because the labels changed.
-  if jq -e --arg v "**${add}**" --arg r "Run: ${RUN_URL}" \
-    'any(.issue.comments.nodes[]; (.body | contains($v)) and (.body | split("\n") | index($r)))' <<< "$data" > /dev/null; then
+  # Same run, same text: already commented (re-run). A re-run with another
+  # verdict, or a pass that now has to say "production waits", comments again.
+  if jq -e --arg v "$body" --arg r "Run: ${RUN_URL}" \
+    'any(.issue.comments.nodes[]; (.body | startswith($v)) and (.body | split("\n") | index($r)))' <<< "$data" > /dev/null; then
     log "$id: already commented for this run"
   else
     # shellcheck disable=SC2016 # GraphQL variables, not shell expansion.
@@ -186,9 +187,11 @@ else
     rc=$?
     set -e
     cat "$errf" >&2
-    [ "$rc" -eq 0 ] || add_error "$t: $(grep -v '^\[' "$errf" | tail -n 3 | tr '\n' ' ')"
+    if [ "$rc" -eq 0 ]; then recorded="${recorded:+$recorded,}$t"
+    else add_error "$t: $(grep -v '^\[' "$errf" | tail -n 3 | tr '\n' ' ')"; fi
   done < <(jq -r '.[]' <<< "$tickets")
-  "$(dirname "$0")/ticket-labels-remove.sh" "$drop" "${RC_TICKETS:-}" > /dev/null 2> "$errf" \
+  # Only where the new label landed: never leave a ticket with neither verdict.
+  "$(dirname "$0")/ticket-labels-remove.sh" "$drop" "${recorded:-}" > /dev/null 2> "$errf" \
     || add_error "removing '$drop': $(tail -n 1 "$errf")"
   cat "$errf" >&2
 fi

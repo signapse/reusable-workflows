@@ -169,7 +169,7 @@ jobs:
             if [ -n "$REPORT_URL" ]; then echo "[Playwright report]($REPORT_URL)"; else echo "No report."; fi
             echo
             if [ "$verdict" = passed ]; then
-              echo "Marked **Staging Passed**: ${RC_TICKETS:-no tickets}. They stay in their column."
+              echo "**Staging Passed** for: ${RC_TICKETS:-no tickets}. They stay in their column. staging_passed=${passed} (see the reason above and any errors below)."
             else
               echo "Marked **Staging Failed**: ${RC_TICKETS:-no tickets}. Slack: ${SLACK_CHANNEL}."
               jq -r '.moves // empty
