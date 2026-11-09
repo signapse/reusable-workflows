@@ -21,9 +21,9 @@ Decision (Alex, 2026-11-09, decision 10): PostHog has **two** projects, both EU 
 
 Both use the personal API key scopes `feature_flag:read` and `feature_flag:write` for create/update (read only for the guards), and the public evaluation API `https://eu.i.posthog.com/flags?v=2` with the project's token (`phc_...`, public by design).
 
-**Anything in this repo that reads or checks a flag reads the prod project** (`256388`): `posthog-flag-check.sh`, and the release-train AC5 flag guard (`feature-flag-guard.sh`, input `posthog_project_id_prod`). The dev project's copy is on for everyone and has nothing to guard.
+**Anything in this repo that reads or checks a flag reads the prod project** (`256388`): `posthog-flag-check.sh`, and the release-train AC5 flag guard (`feature-flag-guard.sh`, input `posthog_project_id_prod`, added by SIG-2769 in #47). The dev project's copy is on for everyone and has nothing to guard.
 
-sign-stream-platform and auth-service dev builds already point at the dev project, so they see every Feature flag on. Builds pointed at the prod project still pass `environment` (below): the prod template keeps dev and staging on for everyone through `groups[0]`.
+sign-stream-platform and auth-service dev builds already point at the dev project, so they see every Feature flag on. Builds pointed at the prod project must pass `environment` (below): the prod template keeps dev and staging on for everyone through `groups[0]` only for builds that do. No app passes it yet (see Gaps), so until then a staging build sees the flag dark except for QA Cohort members.
 
 ## Decision: aggregate by person, QA Cohort as a cohort, environment passed at evaluation time
 
@@ -164,11 +164,11 @@ if err != nil {
    - Fail dark: off for the other user with an empty or unknown `environment`, and for every synthetic id with an unknown one.
 3. Set `groups[2].rollout_percentage` to 10 (UI: the third condition set; or the PATCH above).
 4. `PROD_PERCENT=10 posthog-flag-check.sh sig-2749-posthog-qa-cohort-and-environment`
-   - AC4: about 10 of 100 synthetic non-cohort ids on (accepted 1 to 19, three standard deviations); QA user still on. Synthetic ids alternate between `prod` and `production`. The script refuses a `SAMPLE` too small for the band to exclude 0 and all.
+   - AC4: about 10 of 100 synthetic non-cohort ids on (accepted 1 to 19, three standard deviations); QA user still on. Each synthetic id is evaluated in both `prod` and `production` and must get the same answer, so a prod condition missing either value fails at any percentage between 0 and 100. The script refuses a `SAMPLE` too small for the band to exclude 0 and all.
 5. Set it back to 0 and re-run step 2 (the abort path).
 6. AC5: compare each project's flag JSON in PostHog with the output of `posthog-flag-payload.sh` (`POSTHOG_PROJECT=dev` for `275880`).
 
-At 0% a flag missing `production` from `groups[2]` looks the same as a correct one (both are off). For the test flag, also run the check at `PROD_PERCENT=100`, where the other user must be on in both `prod` and `production`; for a real flag, step 6's comparison covers it.
+At 0% a flag missing `production` from `groups[2]` looks the same as a correct one (both are off); the 10% run in step 4 catches it. For the test flag, also run the check at `PROD_PERCENT=100`, where the other user must be on in both `prod` and `production`; for a real flag, step 6's comparison covers it too.
 
 Synthetic ids (`sig-flag-check-<key>-<i>`) are only evaluated, never captured, so they create no persons.
 

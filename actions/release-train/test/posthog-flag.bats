@@ -170,7 +170,17 @@ EOF
   [ "$status" -eq 1 ]
   [[ "$output" == *"PASS prod at 100%, non-cohort user: true"* ]]
   [[ "$output" == *"FAIL production at 100%, non-cohort user: want true, got false"* ]]
-  [[ "$output" == *"FAIL AC4 prod at 100%, 5/10"* ]]
+  [[ "$output" == *"FAIL prod and production agree for 10 synthetic ids (10 differ)"* ]]
+}
+
+@test "check: a prod condition missing production (or prod) fails at 10% too" {
+  stub_curl
+  STUB_PROD_ENVS=prod STUB_PERCENT=10 PROD_PERCENT=10 SAMPLE=100 run "$CHECK" sig-1-thing
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"FAIL prod and production agree for 100 synthetic ids (10 differ)"* ]]
+  STUB_PROD_ENVS=production STUB_PERCENT=10 PROD_PERCENT=10 SAMPLE=100 run "$CHECK" sig-1-thing
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"FAIL prod and production agree"* ]]
 }
 
 @test "check: a catch-all prod condition fails the fail-dark check at 100%" {

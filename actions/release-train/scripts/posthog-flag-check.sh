@@ -9,9 +9,9 @@
 #   dev, development, staging  -> on for the QA user and the other user
 #   prod                       -> on for the QA user
 #   prod, production           -> other user off at 0, on at 100
-#   SAMPLE synthetic ids       -> on for about PROD_PERCENT% of them, half
-#                                 evaluated as prod and half as production
-#                                 (exactly none at 0, exactly all at 100)
+#   SAMPLE synthetic ids       -> on for about PROD_PERCENT% of them in prod
+#                                 (exactly none at 0, exactly all at 100), and
+#                                 the same answer for each id in production
 #   empty/unknown environment   -> off for the other user; unknown -> off for every
 #                                 synthetic id, at any percentage
 #
@@ -96,22 +96,28 @@ if [ "$PERCENT" -gt 0 ] && [ "$PERCENT" -lt 100 ] && { [ "$lo" -eq 0 ] || [ "$hi
   die "SAMPLE=$N is too small to tell ${PERCENT}% from 0% or 100%; raise SAMPLE"
 fi
 
-# AC4: share of synthetic non-cohort ids that get the flag in prod. Odd ids
-# send the legacy `production`, which today's apps still send.
+# AC4: share of synthetic non-cohort ids that get the flag in prod. Each id
+# is evaluated as `prod` and as the legacy `production` (today's apps still
+# send it): one condition covers both, so the answers must match. A prod
+# condition missing either value gives mismatches at any percentage between
+# 0 and 100, which the band alone would miss.
 # The same ids with an unknown environment must all stay off, whatever the
 # percentage, so a catch-all prod condition cannot hide behind one user.
 on=0
 leaked=0
+differ=0
 for i in $(seq 1 "$N"); do
-  env=prod
-  [ $((i % 2)) -eq 0 ] || env=production
-  r=$(evaluate "sig-flag-check-${KEY}-${i}" "$env")
+  id="sig-flag-check-${KEY}-${i}"
+  r=$(evaluate "$id" prod)
   if [ "$r" = true ]; then on=$((on + 1)); fi
-  r=$(evaluate "sig-flag-check-${KEY}-${i}" unknown)
+  [ "$(evaluate "$id" production)" = "$r" ] || differ=$((differ + 1))
+  r=$(evaluate "$id" unknown)
   if [ "$r" = true ]; then leaked=$((leaked + 1)); fi
 done
 label="fail dark, ${leaked}/${N} synthetic ids on with an unknown environment"
 if [ "$leaked" -eq 0 ]; then pass "$label"; else fail "$label"; fi
+label="prod and production agree for ${N} synthetic ids (${differ} differ)"
+if [ "$differ" -eq 0 ]; then pass "$label"; else fail "$label"; fi
 label="AC4 prod at ${PERCENT}%, ${on}/${N} synthetic non-cohort ids on (accept ${lo}-${hi})"
 if [ "$on" -ge "$lo" ] && [ "$on" -le "$hi" ]; then pass "$label"; else fail "$label"; fi
 
