@@ -138,7 +138,7 @@ on:
         default: 'On Staging'
       qa_cohort_id:
         description: >-
-          PostHog id of the QA Cohort (SIG-2749). The AC5 guard accepts a
+          PostHog id of the QA Cohort in the prod project (SIG-2749). The AC5 guard accepts a
           Feature flag condition only when it targets this cohort. Required
           when a Deployment has Feature tickets; empty fails the guard.
         required: false
@@ -201,7 +201,12 @@ on:
         required: false
         type: string
         default: ''
-      posthog_project_id:
+      posthog_project_id_prod:
+        description: >-
+          PostHog prod project (256388, SignStream Production) that the AC5
+          flag guard reads. Decision (Alex, 2026-11-09) 10: flags exist in the
+          prod and dev (275880) projects; every guard reads the prod project's
+          flag only, as the dev copy is on for everyone.
         required: false
         type: string
         default: '256388'
@@ -428,7 +433,7 @@ jobs:
         env:
           DETAILS: ${{ steps.plan.outputs.ticket_details }}
           POSTHOG_API_KEY: ${{ secrets.POSTHOG_READ_API_KEY }}
-          POSTHOG_PROJECT_ID: ${{ inputs.posthog_project_id }}
+          POSTHOG_PROJECT_ID: ${{ inputs.posthog_project_id_prod }}
           POSTHOG_HOST: ${{ inputs.posthog_host }}
           FEATURE_LABEL: ${{ inputs.feature_label }}
           QA_COHORT_ID: ${{ inputs.qa_cohort_id }}
@@ -714,7 +719,7 @@ jobs:
         env:
           DETAILS: ${{ needs.deploy.outputs.ticket_details }}
           POSTHOG_API_KEY: ${{ secrets.POSTHOG_READ_API_KEY }}
-          POSTHOG_PROJECT_ID: ${{ inputs.posthog_project_id }}
+          POSTHOG_PROJECT_ID: ${{ inputs.posthog_project_id_prod }}
           POSTHOG_HOST: ${{ inputs.posthog_host }}
           FEATURE_LABEL: ${{ inputs.feature_label }}
           QA_COHORT_ID: ${{ inputs.qa_cohort_id }}

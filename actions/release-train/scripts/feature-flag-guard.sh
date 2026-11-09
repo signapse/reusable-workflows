@@ -20,9 +20,12 @@
 # Env:
 #   POSTHOG_API_KEY     personal API key with feature_flag:read only (required
 #                       when there is a Feature ticket to check)
-#   QA_COHORT_ID        PostHog id of the QA Cohort (required when there is a
-#                       Feature ticket to check; SIG-2749 creates it)
-#   POSTHOG_PROJECT_ID  default 256388
+#   QA_COHORT_ID        PostHog id of the QA Cohort in the prod project (required
+#                       when there is a Feature ticket to check; SIG-2749 creates it)
+#   POSTHOG_PROJECT_ID  the PROD project, default 256388 (workflow input
+#                       posthog_project_id_prod). Flags also exist in the dev
+#                       project 275880, on for everyone; the guard never reads
+#                       it (Decision (Alex, 2026-11-09) 10).
 #   POSTHOG_HOST        default https://eu.posthog.com
 #   FEATURE_LABEL       default Feature
 #   ROLLOUT_STATES      comma-separated columns where a Rollout has started

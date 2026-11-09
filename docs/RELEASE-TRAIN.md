@@ -465,6 +465,9 @@ from deploying an earlier tag that already passed staging.
   created by SIG-2749). Another cohort, or no `qa_cohort_id` with Feature
   tickets to check, fails the guard. Every page of PostHog's flag search is
   read.
+- The guard reads the PostHog **prod** project, `posthog_project_id_prod`
+  (default `256388`). Decision (Alex, 2026-11-09) 10: each flag also exists
+  in the dev project (`275880`), on for everyone; nothing here reads it.
 - If the flag guard fails after a passed smoke, tickets do not move and a
   critical Slack alert (`<!channel>`) goes out. Nothing is rolled back: a
   widened flag is a PostHog change that an image rollback does not undo. A
