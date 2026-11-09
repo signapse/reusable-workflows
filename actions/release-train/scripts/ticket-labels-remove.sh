@@ -34,7 +34,9 @@ while IFS= read -r id; do
   # shellcheck disable=SC2016 # GraphQL variables, not shell expansion.
   resp=$(linear_query 'query($id:String!){issue(id:$id){labels{nodes{id name}}}}' "$(jq -nc --arg id "$id" '{id:$id}')") || resp='{}'
   # shellcheck disable=SC2016 # jq bindings, not shell expansion.
-  if ! hits=$(jq -ce --argjson n "$names" '.data.issue.labels.nodes | [.[] | select(.name as $x | $n | index($x))]' <<< "$resp" 2> /dev/null); then
+  # `arrays`: a reply without the label list (GraphQL errors, issue: null)
+  # is a failure, not "no labels", or a stale verdict would survive.
+  if ! hits=$(jq -ce --argjson n "$names" '.data.issue.labels.nodes | arrays | [.[] | select(.name as $x | $n | index($x))]' <<< "$resp" 2> /dev/null); then
     log "$id: cannot read its labels: $resp"
     errors=$((errors + 1))
     continue

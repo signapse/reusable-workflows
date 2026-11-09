@@ -119,6 +119,17 @@ move() { printf '%s' "$2" | "$S/ticket-transitioner.sh" "$1" 2> "$TMP/stderr"; }
   grep -qx "unlabel SIG-3 lbl-QA Passed" "$TMP/calls"
 }
 
+@test "labels: issue: null (or GraphQL errors) is a failure, not an empty label list" {
+  run "$S/ticket-labels-remove.sh" "Staging Passed" "SIG-404,SIG-1"
+  [ "$status" -ne 0 ]
+  grep -qx "unlabel SIG-1 lbl-Staging Passed" "$TMP/calls"
+}
+
+@test "csv_json splits on commas and newlines" {
+  run bash -c "source '$BATS_TEST_DIRNAME/../lib/common.sh'; csv_json \$'a, b\n\nc,,d '"
+  [ "$output" = '["a","b","c","d"]' ]
+}
+
 @test "labels: no tickets needs no Linear key" {
   unset LINEAR_API_KEY
   run "$S/ticket-labels-remove.sh" "QA Passed" ""
