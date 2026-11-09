@@ -215,12 +215,12 @@ on:
         default: ''
       # Automatic rollback on a failed prod smoke (SIG-2771).
       rollback_timeout_minutes:
-        description: 'Limit on waiting for every service''s rollback run (at most 60: the job has 90).'
+        description: 'Limit on waiting for every service''s rollback run (at most 60: the job has 90). Above 60 is used as 60, and 0 or less as 30, with a warning.'
         required: false
         type: number
         default: 30
       rollback_max_attempts:
-        description: 'Dispatches per service, counting re-dispatches of a cancelled rollback with the same run_key.'
+        description: 'Dispatches per service, counting re-dispatches of a cancelled rollback with the same run_key. A fraction is rounded down; below 1 uses 3, with a warning.'
         required: false
         type: number
         default: 3
@@ -1007,22 +1007,33 @@ jobs:
           RELEASE_TAG: ${{ needs.deploy.outputs.release_tag }}
           LINEAR_PIPELINE: ${{ inputs.linear_pipeline }}
           ROLLBACK_TIMEOUT: ${{ inputs.rollback_timeout_minutes }}
+          ROLLBACK_MAX_ATTEMPTS: ${{ inputs.rollback_max_attempts }}
         run: |
           set -euo pipefail
-          # The job has 90 minutes: a longer wait could kill it before the
-          # incident, ticket and Slack steps run.
-          awk -v m="$ROLLBACK_TIMEOUT" 'BEGIN { exit !(m > 0 && m <= 60) }' \
-            || { echo "::error::rollback_timeout_minutes must be above 0 and at most 60 (got $ROLLBACK_TIMEOUT)"; exit 1; }
-          # Empty when this run dispatched nothing (prod already ran the tag):
-          # then a key stable across re-runs of this run.
-          echo "run_key=${DEPLOY_RUN_KEY:-${GITHUB_REPOSITORY#*/}-${GITHUB_RUN_ID}-prod}" >> "$GITHUB_OUTPUT"
-          # One incident per train run and release tag, whatever the attempt:
-          # a "Re-run all jobs" may get a new deploy key (or none, when prod
-          # already runs the tag) and must still find the first incident.
-          echo "incident_key=${GITHUB_REPOSITORY#*/}-${GITHUB_RUN_ID}-${RELEASE_TAG}-prod" >> "$GITHUB_OUTPUT"
+          # A bad value must never stop the rollback (prod has already failed),
+          # so it is corrected with a warning, not rejected. The job has 90
+          # minutes: a wait above 60 could kill it before the incident, ticket
+          # and Slack steps run.
+          timeout=$(awk -v m="$ROLLBACK_TIMEOUT" 'BEGIN { if (m + 0 <= 0) m = 30; if (m > 60) m = 60; printf "%g", m }')
+          [ "$timeout" = "$ROLLBACK_TIMEOUT" ] \
+            || echo "::warning::rollback_timeout_minutes must be above 0 and at most 60 (got $ROLLBACK_TIMEOUT); using $timeout"
+          attempts=$(awk -v a="$ROLLBACK_MAX_ATTEMPTS" 'BEGIN { a = int(a + 0); if (a < 1) a = 3; printf "%d", a }')
+          [ "$attempts" = "$ROLLBACK_MAX_ATTEMPTS" ] \
+            || echo "::warning::rollback_max_attempts must be a whole number above 0 (got $ROLLBACK_MAX_ATTEMPTS); using $attempts"
           pipeline="$LINEAR_PIPELINE"
           [ -n "$pipeline" ] || pipeline=$("$GITHUB_WORKSPACE/_rw/actions/release-train/scripts/pipeline-config.sh" linear_pipeline 2>/dev/null || true)
-          echo "linear_pipeline=$pipeline" >> "$GITHUB_OUTPUT"
+          {
+            echo "timeout_minutes=$timeout"
+            echo "max_attempts=$attempts"
+            # Empty when this run dispatched nothing (prod already ran the tag):
+            # then a key stable across re-runs of this run.
+            echo "run_key=${DEPLOY_RUN_KEY:-${GITHUB_REPOSITORY#*/}-${GITHUB_RUN_ID}-prod}"
+            # One incident per train run and release tag, whatever the attempt:
+            # a "Re-run all jobs" may get a new deploy key (or none, when prod
+            # already runs the tag) and must still find the first incident.
+            echo "incident_key=${GITHUB_REPOSITORY#*/}-${GITHUB_RUN_ID}-${RELEASE_TAG}-prod"
+            echo "linear_pipeline=$pipeline"
+          } >> "$GITHUB_OUTPUT"
 
       # ADR 0005: Prodzilla narrowed to signapse-core-k8s, actions: write only.
       # rollback.yml pushes the tag with its own Flux app.
@@ -1078,8 +1089,8 @@ jobs:
           DEPLOY_RUN_KEY: ${{ steps.cfg.outputs.run_key }}
           K8S_REPO: ${{ inputs.gitops_repo }}
           K8S_REF: ${{ inputs.gitops_ref }}
-          TIMEOUT_MINUTES: ${{ inputs.rollback_timeout_minutes }}
-          MAX_ATTEMPTS: ${{ inputs.rollback_max_attempts }}
+          TIMEOUT_MINUTES: ${{ steps.cfg.outputs.timeout_minutes }}
+          MAX_ATTEMPTS: ${{ steps.cfg.outputs.max_attempts }}
         run: |
           set -euo pipefail
           # awk, not $((...)): the input is a number and may be fractional.

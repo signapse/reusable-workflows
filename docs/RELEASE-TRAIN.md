@@ -581,6 +581,9 @@ rollback
 - **Waiting.** Bounded by `rollback_timeout_minutes` (default 30, at most
   60 so the 90-minute job always reaches the incident and Slack steps) for
   all services together. A run still going at the limit is not cancelled.
+  A bad value never stops the rollback: above 60 is used as 60, 0 or less
+  as 30, and a fractional `rollback_max_attempts` is rounded down (below 1
+  uses 3), each with a warning.
 - **Cancelled.** A rollback that ends `cancelled` was displaced in the
   per-service concurrency queue. It is dispatched again with the same key, up
   to `rollback_max_attempts` (default 3) dispatches in all.
