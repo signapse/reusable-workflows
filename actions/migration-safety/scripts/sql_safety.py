@@ -195,7 +195,7 @@ def check_exprs(action):
 # x IS DISTINCT FROM NULL, NOT (x IS NULL), NOT x IS NULL, NOT ((x)) IS NULL.
 NOT_NULL_TEST = re.compile(
     r"\bIS\s+NOT\s+NULL\b|\bNOTNULL\b|\bIS\s+DISTINCT\s+FROM\s+NULL\b"
-    r"|\bNOT\s*(?:\(\s*)*[\w.\"]+(?:\s*\))*\s+IS\s+NULL\b",
+    r"|\bNOT\b\s*(?:\(\s*)*[\w.\"]+(?:\s*\))*\s+IS\s+NULL\b",
     re.I,
 )
 

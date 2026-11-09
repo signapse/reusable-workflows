@@ -190,6 +190,12 @@ sql() { printf '%s\n' "$1" >"$BATS_TEST_TMPDIR/m.up.sql"; run python3 "$SCRIPT" 
   sql 'ALTER TABLE users ADD CONSTRAINT c CHECK (NOT (email IS NULL) OR channel = 1);'
   [ "$status" -eq 0 ]
   [[ "$output" == *"warn: CHECK NOT NULL users"* ]]
+  # A column whose name starts with "not" is not a NOT.
+  for expr in 'note IS NULL' 'notified_at IS NULL OR status = 1' '(notes) IS NULL'; do
+    sql "ALTER TABLE users ADD CONSTRAINT c CHECK ($expr);"
+    [ "$status" -eq 0 ] || { echo "blocked: $expr"; false; }
+    [ -z "$output" ] || { echo "reported: $expr: $output"; false; }
+  done
   # IS NOT DISTINCT FROM NULL means IS NULL.
   sql 'ALTER TABLE users ADD CONSTRAINT c CHECK (email IS NOT DISTINCT FROM NULL);'
   [ "$status" -eq 0 ]
