@@ -58,6 +58,23 @@ teardown() { rm -rf "$TMP"; }
   [[ "$name" == "SIG-10: Thing (https://linear.app/x/SIG-10)."* ]]
 }
 
+@test "payload: dev project (275880) flag has the same key and one 100% condition for everyone" {
+  prod=$("$PAYLOAD" SIG-10 "Thing" "https://linear.app/signapse/issue/SIG-10")
+  POSTHOG_PROJECT=dev QA_COHORT_ID="" run "$PAYLOAD" SIG-10 "Thing" "https://linear.app/signapse/issue/SIG-10"
+  [ "$status" -eq 0 ]
+  [ "$(jq -r .key <<< "$output")" = "$(jq -r .key <<< "$prod")" ]
+  [ "$(jq -r .name <<< "$output")" = "$(jq -r .name <<< "$prod")" ]
+  [ "$(jq -c '.filters.groups' <<< "$output")" = '[{"properties":[],"rollout_percentage":100,"variant":null}]' ]
+  [ "$(jq -r .filters.aggregation_group_type_index <<< "$output")" = null ]
+  [ "$(jq -r .active <<< "$output")" = true ]
+}
+
+@test "payload: rejects an unknown POSTHOG_PROJECT" {
+  POSTHOG_PROJECT=staging run "$PAYLOAD" SIG-10 "Thing"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"prod or dev"* ]]
+}
+
 @test "payload: rejects a malformed ticket id" {
   run "$PAYLOAD" LIV-10 "Thing"
   [ "$status" -ne 0 ]
@@ -120,9 +137,9 @@ EOF
   stub_curl
   STUB_PERCENT=0 PROD_PERCENT=0 SAMPLE=20 run "$CHECK" sig-1-thing
   [ "$status" -eq 0 ]
-  [[ "$output" == *"PASS AC2 prod at 0%, non-cohort account: false"* ]]
-  [[ "$output" == *"PASS AC2 production at 0%, non-cohort account: false"* ]]
-  [[ "$output" == *"PASS AC3 prod, QA Cohort account: true"* ]]
+  [[ "$output" == *"PASS AC2 prod at 0%, non-cohort user: false"* ]]
+  [[ "$output" == *"PASS AC2 production at 0%, non-cohort user: false"* ]]
+  [[ "$output" == *"PASS AC3 prod, QA Cohort user: true"* ]]
   [[ "$output" == *"0/20 synthetic"* ]]
 }
 
@@ -151,8 +168,8 @@ EOF
   stub_curl
   STUB_PROD_ENVS=prod STUB_PERCENT=100 PROD_PERCENT=100 SAMPLE=10 run "$CHECK" sig-1-thing
   [ "$status" -eq 1 ]
-  [[ "$output" == *"PASS prod at 100%, non-cohort account: true"* ]]
-  [[ "$output" == *"FAIL production at 100%, non-cohort account: want true, got false"* ]]
+  [[ "$output" == *"PASS prod at 100%, non-cohort user: true"* ]]
+  [[ "$output" == *"FAIL production at 100%, non-cohort user: want true, got false"* ]]
   [[ "$output" == *"FAIL AC4 prod at 100%, 5/10"* ]]
 }
 

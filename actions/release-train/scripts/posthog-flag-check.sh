@@ -6,19 +6,22 @@
 # /flags evaluation endpoint. It writes nothing to PostHog and creates no
 # persons: /flags only evaluates.
 #
-#   dev, development, staging  -> on for the QA account and the other account
-#   prod                       -> on for the QA account
-#   prod, production           -> other account off at 0, on at 100
+#   dev, development, staging  -> on for the QA user and the other user
+#   prod                       -> on for the QA user
+#   prod, production           -> other user off at 0, on at 100
 #   SAMPLE synthetic ids       -> on for about PROD_PERCENT% of them, half
 #                                 evaluated as prod and half as production
 #                                 (exactly none at 0, exactly all at 100)
-#   empty/unknown environment   -> off for the other account; unknown -> off for every
+#   empty/unknown environment   -> off for the other user; unknown -> off for every
 #                                 synthetic id, at any percentage
 #
 # Env:
-#   POSTHOG_PROJECT_TOKEN  required, the public project token (phc_...)
+#   POSTHOG_PROJECT_TOKEN  required, the public token (phc_...) of the PROD project
+#                          (256388 SignStream Production). Every flag check reads
+#                          the prod project; the dev project (275880) has the
+#                          same flag on for everyone and nothing to check.
 #   QA_DISTINCT_ID         required, distinct_id of a QA Cohort member
-#   OTHER_DISTINCT_ID      required, distinct_id of an account outside the cohort
+#   OTHER_DISTINCT_ID      required, distinct_id of a user (PostHog person) outside the cohort
 #   PROD_PERCENT           the prod Rollout percentage the flag is set to (default 0)
 #   SAMPLE                 synthetic ids to evaluate in prod (default 100)
 #   POSTHOG_HOST           default https://eu.i.posthog.com
@@ -67,19 +70,19 @@ expect() { # expect <want> <distinct_id> <environment> <label>
 }
 
 for env in dev development staging; do
-  expect true "$QA_DISTINCT_ID" "$env" "AC2 $env, QA Cohort account"
-  expect true "$OTHER_DISTINCT_ID" "$env" "AC2 $env, non-cohort account"
+  expect true "$QA_DISTINCT_ID" "$env" "AC2 $env, QA Cohort user"
+  expect true "$OTHER_DISTINCT_ID" "$env" "AC2 $env, non-cohort user"
 done
-expect true "$QA_DISTINCT_ID" prod "AC3 prod, QA Cohort account"
+expect true "$QA_DISTINCT_ID" prod "AC3 prod, QA Cohort user"
 for env in prod production; do
   if [ "$PERCENT" -eq 0 ]; then
-    expect false "$OTHER_DISTINCT_ID" "$env" "AC2 $env at 0%, non-cohort account"
+    expect false "$OTHER_DISTINCT_ID" "$env" "AC2 $env at 0%, non-cohort user"
   elif [ "$PERCENT" -eq 100 ]; then
-    expect true "$OTHER_DISTINCT_ID" "$env" "$env at 100%, non-cohort account"
+    expect true "$OTHER_DISTINCT_ID" "$env" "$env at 100%, non-cohort user"
   fi
 done
-expect false "$OTHER_DISTINCT_ID" "" "fail dark, empty environment, non-cohort account"
-expect false "$OTHER_DISTINCT_ID" unknown "fail dark, unknown environment, non-cohort account"
+expect false "$OTHER_DISTINCT_ID" "" "fail dark, empty environment, non-cohort user"
+expect false "$OTHER_DISTINCT_ID" unknown "fail dark, unknown environment, non-cohort user"
 
 # Accept within 3 standard deviations of the binomial mean.
 read -r lo hi < <(awk -v n="$N" -v p="$PERCENT" 'BEGIN {
@@ -96,7 +99,7 @@ fi
 # AC4: share of synthetic non-cohort ids that get the flag in prod. Odd ids
 # send the legacy `production`, which today's apps still send.
 # The same ids with an unknown environment must all stay off, whatever the
-# percentage, so a catch-all prod condition cannot hide behind one account.
+# percentage, so a catch-all prod condition cannot hide behind one user.
 on=0
 leaked=0
 for i in $(seq 1 "$N"); do
