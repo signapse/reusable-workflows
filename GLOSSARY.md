@@ -26,7 +26,7 @@ A Release Candidate's image reaching production. The unit DORA counts for deploy
 _Avoid_: counting tickets reaching Done as deployments
 
 **Dark Deployment**:
-A production deployment of a Release Candidate whose Feature tickets' flags are off for everyone except the QA Cohort. Runs with no human approval.
+A production deployment of a Release Candidate whose Feature tickets' flags are off for everyone except the QA Cohort. QA does not have to act for it; a Releaser approves the production job.
 _Avoid_: soft launch, "released"
 
 **QA Cohort**:

@@ -25,6 +25,6 @@ The read-only pipeline GitHub App is part of this split (Decision 23, Alex). Rel
 
 - **Permissions:** `contents: read`, `pull-requests: read`, `actions: read`. Nothing writes.
 - **Repos:** the product repo (merged PRs, check runs, Terraform paths) and signapse-core-k8s (the image tags Flux committed for dev, staging and prod).
-- **Config:** org variable `PIPELINE_READ_APP_ID` (workflow input `read_app_id`) and the app's private key passed as the `READ_APP_PRIVATE_KEY` secret.
+- **Config:** org variable `PIPELINE_READ_APP_ID` (workflow input `read_app_id`) and the app's private key, which the reusable workflows take as the secret `READ_APP_PRIVATE_KEY`. The caller templates do not yet agree on the org secret it comes from (`PIPELINE_READ_APP_PRIVATE_KEY` in main-push-dev's, `READ_APP_PRIVATE_KEY` in the release-train docs); use one org secret name in every caller.
 
 Like the Modules app, a leak of its key can only read. Prodzilla's key stays limited to the workflows that dispatch or open PRs.
