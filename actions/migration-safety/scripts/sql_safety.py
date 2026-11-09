@@ -7,7 +7,8 @@ the "up" direction of migration files and reports:
 
   block  - the previous code would break: DROP TABLE/VIEW/SCHEMA, DROP COLUMN,
            RENAME of a table/view/column/type/enum value, ALTER COLUMN ... TYPE,
-           SET NOT NULL, ADD ... CHECK (... IS NOT NULL), ADD COLUMN ...
+           SET NOT NULL, ADD ... CHECK (... IS NOT NULL, or NOT (x IS NULL),
+           x NOTNULL, x IS DISTINCT FROM NULL), ADD COLUMN ...
            NOT NULL / PRIMARY KEY without a non-null DEFAULT, DROP DEFAULT /
            IDENTITY on a column added NOT NULL earlier in the same migration,
            SET SCHEMA, DROP TYPE/DOMAIN ... CASCADE.
@@ -190,6 +191,15 @@ def check_exprs(action):
                 break
 
 
+# A test that a value is not null, in any spelling: x IS NOT NULL, x NOTNULL,
+# x IS DISTINCT FROM NULL, NOT (x IS NULL), NOT x IS NULL, NOT ((x)) IS NULL.
+NOT_NULL_TEST = re.compile(
+    r"\bIS\s+NOT\s+NULL\b|\bNOTNULL\b|\bIS\s+DISTINCT\s+FROM\s+NULL\b"
+    r"|\bNOT\s*(?:\(\s*)*[\w.\"]+(?:\s*\))*\s+IS\s+NULL\b",
+    re.I,
+)
+
+
 def bare(name):
     return name.replace('"', "")
 
@@ -251,7 +261,7 @@ def check_alter_table(table, actions, notnull):
             sev = "block" if (table.lower(), bare(m.group(1)).lower()) in notnull else "warn"
             yield (sev, f"DROP {m.group(2).upper()}", f"{table}.{m.group(1)}", off)
             continue
-        nn = [e for e in check_exprs(a) if re.search(r"\bIS\s+NOT\s+NULL\b", e, re.I)] if re.match(r"ADD\b", a, re.I) else []
+        nn = [e for e in check_exprs(a) if NOT_NULL_TEST.search(e)] if re.match(r"ADD\b", a, re.I) else []
         if nn:
             # With an OR the old writers may still satisfy it: a reviewer's look.
             yield ("warn" if any(re.search(r"\bOR\b", e, re.I) for e in nn) else "block", "CHECK NOT NULL", table, off)

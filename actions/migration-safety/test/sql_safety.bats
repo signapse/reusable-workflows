@@ -170,8 +170,28 @@ sql() { printf '%s\n' "$1" >"$BATS_TEST_TMPDIR/m.up.sql"; run python3 "$SCRIPT" 
   sql 'ALTER TABLE users ADD CONSTRAINT c CHECK (email IS NOT NULL OR channel = 1);'
   [ "$status" -eq 0 ]
   [[ "$output" == *"warn: CHECK NOT NULL users"* ]]
+  # A CHECK on a nullable test that is not a NOT NULL test passes.
+  sql 'ALTER TABLE users ADD CONSTRAINT c CHECK (deleted_at IS NULL OR deleted_at > created_at);'
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
   # IS NOT NULL outside the CHECK expression is not a CHECK NOT NULL.
   sql 'ALTER TABLE users ADD COLUMN x boolean CHECK (x) DEFAULT (1 IS NOT NULL);'
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "CHECK NOT NULL in other spellings blocks: NOT (x IS NULL), NOT x IS NULL, NOTNULL, IS DISTINCT FROM NULL" {
+  for expr in 'NOT (email IS NULL)' 'not(email is null)' 'NOT email IS NULL' 'NOT ((email) IS NULL)' \
+              'NOT ("email" IS NULL)' 'NOT (users.email IS NULL)' 'email NOTNULL' 'email IS DISTINCT FROM NULL'; do
+    sql "ALTER TABLE users ADD CONSTRAINT email_nn CHECK ($expr) NOT VALID;"
+    [ "$status" -eq 1 ] || { echo "not blocked: $expr"; false; }
+    [[ "$output" == *"BLOCK: CHECK NOT NULL users"* ]]
+  done
+  sql 'ALTER TABLE users ADD CONSTRAINT c CHECK (NOT (email IS NULL) OR channel = 1);'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"warn: CHECK NOT NULL users"* ]]
+  # IS NOT DISTINCT FROM NULL means IS NULL.
+  sql 'ALTER TABLE users ADD CONSTRAINT c CHECK (email IS NOT DISTINCT FROM NULL);'
   [ "$status" -eq 0 ]
   [ -z "$output" ]
 }
