@@ -29,10 +29,20 @@ need jq
 HERE="$(dirname "$0")"
 RELEASE_TAG_PATTERN="${RELEASE_TAG_PATTERN:-^v?[0-9]+\.[0-9]+\.[0-9]+$}"
 
+# on_release_branch <rev>: on HEAD's first-parent line, which
+# release-candidate.sh walks. Any ancestor is not enough: a commit on a merged
+# side branch would make the walk start from the wrong place.
+on_release_branch() {
+  local c
+  c=$(git rev-parse -q --verify "${1}^{commit}") || return 1
+  # No grep -q: an early exit would SIGPIPE rev-list under pipefail.
+  git rev-list --first-parent HEAD | grep -x "$c" > /dev/null
+}
+
 if [ -n "${SELECTION_BASE:-}" ]; then
   git rev-parse -q --verify "${SELECTION_BASE}^{commit}" > /dev/null \
     || die "selection_base '$SELECTION_BASE' is not a commit in this repo"
-  git merge-base --is-ancestor "$SELECTION_BASE" HEAD \
+  on_release_branch "$SELECTION_BASE" \
     || die "selection_base '$SELECTION_BASE' is not on the release branch"
   jq -nc --arg b "$SELECTION_BASE" '{base: $b, source: "input", services: []}'
   exit 0
@@ -49,7 +59,7 @@ while IFS= read -r t; do
     || die "prod runs '$t', which is not a release tag; set selection_base for the first Deployment through the train"
   git rev-parse -q --verify "refs/tags/${t}^{commit}" > /dev/null \
     || die "prod runs '$t', which is not a tag in this repo; set selection_base for the first Deployment through the train"
-  git merge-base --is-ancestor "$t" HEAD || die "prod runs '$t', which is not on the release branch"
+  on_release_branch "$t" || die "prod runs '$t', which is not on the release branch"
   # Services may differ mid-deploy: walk from the oldest code in prod.
   if [ -z "$base" ] || git merge-base --is-ancestor "$t" "$base"; then base="$t"; fi
 done < <(jq -r '.[].current_tag' <<< "$services")
