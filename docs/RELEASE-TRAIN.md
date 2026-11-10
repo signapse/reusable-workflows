@@ -409,8 +409,8 @@ prod (caller job, needs: [train, staging])
   release   deployment-release.yml@main   AC3: Linear Release (Deployed), Sentry release + production deploy
   smoke     signapse-e2e playwright.yml@main, environment prod, grep @prod-safe   AC4
   verdict   pass: flag guard again, tickets -> On Prod (only from on_prod_from)
-            fail: prod_smoke_passed=false, run red
-            unknown: prod_smoke_passed empty, run red, smoke-unknown alerts
+            fail: the suite job failed and reported failed: prod_smoke_passed=false, run red
+            unknown: anything else (e.g. `failed` from a cancelled suite): prod_smoke_passed empty, run red, smoke-unknown alerts
   rollback  after a failed smoke or a partial Deployment (SIG-2771): see "Automatic rollback" below
 ```
 

@@ -771,15 +771,17 @@ jobs:
           set -euo pipefail
           # Three answers, never a guess (SIG-2771):
           #   true    the suite job succeeded and reported passed
-          #   false   the suite reported failed: the tests ran against prod
-          #           and failed, so the rollback runs
-          #   (empty) unknown: no result (the suite job errored, was cancelled
-          #           or skipped before reporting), or passed with a job that
-          #           did not succeed. Neither a pass nor a rollback: the
-          #           smoke-unknown job alerts and a human decides.
-          case "$RESULT" in
-            passed) if [ "$JOB_RESULT" = success ]; then passed=true; else passed=""; fi ;;
-            failed) passed=false ;;
+          #   false   the suite job failed and reported failed: the tests ran
+          #           against prod and failed, so the rollback runs
+          #   (empty) unknown: anything else. signapse-e2e reports `failed`
+          #           whenever its job gives no result, so `failed` from a
+          #           cancelled or skipped suite job is no verdict; nor is
+          #           `errored`, or passed with a job that did not succeed.
+          #           Neither a pass nor a rollback: the smoke-unknown job
+          #           alerts and a human decides.
+          case "$RESULT/$JOB_RESULT" in
+            passed/success) passed=true ;;
+            failed/failure) passed=false ;;
             *) passed="" ;;
           esac
           echo "passed=$passed" >> "$GITHUB_OUTPUT"
@@ -1173,14 +1175,13 @@ jobs:
           echo "incident.io ($(jq -r '.severity // "?"' <<< "$res")): $(jq -r '.reason' <<< "$res") $(jq -r 'if (.url // "") != "" then "[\(.reference)](\(.url))" else "" end' <<< "$res")" >> "$GITHUB_STEP_SUMMARY"
           [ "$rc" -eq 0 ] || { echo "::error::incident.io incident not opened: $(jq -r .reason <<< "$res")"; exit 1; }
 
-      - name: Tickets to ${{ inputs.qa_failed_state }} and Slack (AC4, AC5)
+      - name: Tickets to QA Failed and Slack (AC4, AC5)
         id: tickets
         if: ${{ !cancelled() }}
         env:
           LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_CHANNEL: ${{ inputs.slack_channel || inputs.slack_releases_channel || vars.SLACK_RELEASES_CHANNEL || '#releases' }}
-          QA_FAILED_STATE: ${{ inputs.qa_failed_state }}
           QA_PASSED_LABEL: ${{ inputs.qa_passed_label }}
           LINEAR_TEAM_KEY: ${{ inputs.linear_team_key }}
           TICKETS: ${{ needs.deploy.outputs.tickets }}
@@ -1201,7 +1202,7 @@ jobs:
           rc=0
           res=$("$GITHUB_WORKSPACE/_rw/actions/release-train/scripts/rollback-tickets.sh") || rc=$?
           [ -n "$res" ] || res='{"ok":false,"errors":["the script failed; see the log"]}'
-          jq -r --arg qf "$QA_FAILED_STATE" '.moves // empty
+          jq -r --arg qf "QA Failed" '.moves // empty
             | "Tickets:",
               (if (.moved + .already | length) > 0 then "- In \($qf): \(.moved + .already | join(", "))" else empty end),
               (if (.kept | length) > 0 then "- Left where they are: \(.kept | map("\(.id) (\(.state))") | join(", "))" else empty end),
