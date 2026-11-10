@@ -16,5 +16,5 @@ Infrastructure therefore always reaches an environment before the code that need
 ## Consequences
 
 - Terraform needs `workflow_dispatch` inputs per product and environment, and change detection for stg and prod. Today those environments apply every product.
-- Image tags are owned only by the pipeline, and `:latest` is never used in stg or prod. Terraform stops pinning app images, except SageMaker endpoints (such as gloss-translation GPU): they stay pinned in Terraform and their prod apply is human-reviewed for now. A follow-up ticket covers a better SageMaker release process.
+- Image tags are owned by the pipeline, and `:latest` is never used in stg or prod. Terraform never pins app images, with one exception: SageMaker endpoint images (such as gloss-translation GPU) stay pinned in Terraform and roll out blue/green through the sagemaker module (signapse-core-terraform#509 and the module's README), and their prod apply is human-reviewed for now. A better SageMaker release process is tracked in SIG-2842.
 - Not yet decided: turning on "Prevent self-review" on `prod-apply`, so whoever triggers a prod apply cannot approve it.
