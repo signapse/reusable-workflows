@@ -14,10 +14,9 @@ on:
   workflow_call:
     inputs:
       prodzilla_app_id:
-        description: Prodzilla GitHub App ID. Required; the run fails without it.
+        description: Prodzilla GitHub App ID.
         type: string
-        required: false
-        default: ''
+        required: true
       threshold_hours:
         description: >-
           Hours a ticket must have been in QA Failed before its revert PR is
@@ -78,8 +77,8 @@ on:
         default: ''
     secrets:
       PRODZILLA_APP_PRIVATE_KEY:
-        description: Prodzilla GitHub App private key. Required; the run fails without it.
-        required: false
+        description: Prodzilla GitHub App private key.
+        required: true
       READ_APP_PRIVATE_KEY:
         description: Key of read_app_id; not needed with selection_base.
         required: false

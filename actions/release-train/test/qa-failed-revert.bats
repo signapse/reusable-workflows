@@ -507,6 +507,20 @@ EOF
   [ -z "$(git status --porcelain)" ]
 }
 
+@test "PR creation failure deletes the pushed branch, so the next run opens the PR" {
+  change f "one-a" "feat(SIG-1): A"
+  ticket SIG-1 "QA Failed" 25
+  touch "$TMP/gh-create-down"
+  run run_revert
+  [ "$status" -eq 1 ]
+  [ -z "$(git --git-dir="$TMP/origin.git" branch --list 'prodzilla/revert-SIG-1')" ]
+  rm "$TMP/gh-create-down"
+  run run_revert
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.tickets[0].action == "opened"' > /dev/null
+  [ "$(created)" -eq 1 ]
+}
+
 @test "in QA Failed with no history move into it -> no action, reported" {
   change f "one-a" "feat(SIG-1): A"
   ticket SIG-1 "QA Failed"
@@ -528,4 +542,19 @@ EOF
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.tickets[0] | .id == "SIG-1" and .action == "opened"
     and ([.reverted[].subject] == ["Revert \"Revert \"feat(SIG-1): A\"\""])' > /dev/null
+}
+
+@test "a Revert subject without git's trailer is ticket work, as for selection: it is reverted with the rest" {
+  change f "one-a" "feat(SIG-1): A"
+  printf 'one\ntwo\nthree\n' > f; git commit -qam 'Revert "feat(SIG-1): A"'   # no "This reverts commit" line
+  change g "g1" "feat(SIG-1): A2"
+  ticket SIG-1 "QA Failed" 25
+  run run_revert
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.tickets[0] | .action == "opened"
+    and ([.reverted[].subject] == ["feat(SIG-1): A2", "Revert \"feat(SIG-1): A\"", "feat(SIG-1): A"])' > /dev/null
+  # The branch removes the ticket's code.
+  git checkout -q "$(git --git-dir="$TMP/origin.git" rev-parse prodzilla/revert-SIG-1)"
+  [ "$(git show 1.0.0:f)" = "$(cat f)" ]
+  [ ! -e g ]
 }
