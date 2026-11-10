@@ -1,0 +1,195 @@
+name: Release Train staging tests (reusable)
+
+# Verify on staging (SIG-2767, spec step 5, ADR 0001/0002). Called by a
+# qa-passed release train caller right after release-train.yml has promoted a
+# Release Candidate to staging (promoted == 'true'):
+#
+#   1. runs signapse-e2e on staging (workflow_call, ADR 0002), scoped to the
+#      Release Candidate's tickets; the suite adds the product suites their
+#      Linear labels point at,
+#   2. the "Staging verdict" job (runs whatever the suite did):
+#      pass  -> every ticket gets Staging Passed (Staging Failed removed) and
+#               a comment with the run and report links; tickets stay On Staging
+#               (staging_passed stays false if one is in QA Failed from an
+#               earlier attempt)
+#      fail, error, cancelled or skipped -> every ticket gets Staging Failed
+#               (Staging Passed and QA Passed removed), a comment, moves to
+#               QA Failed (never out of Done), and a
+#               Slack alert goes to slack_channel. The run then fails.
+#   3. outputs staging_passed ('true' only on a recorded pass) and report_url.
+#      Production (SIG-2769) must run only when staging_passed == 'true'.
+#
+# It is a separate file, not jobs inside release-train.yml, because GitHub
+# resolves every `uses:` workflow when a run is queued, even for jobs whose
+# `if:` is false: referencing signapse-e2e from release-train.yml would make
+# every legacy ready-for-prod caller depend on that repo being callable and
+# declaring the E2E_STAGING_* secrets. Same reason as main-push-dev.yml.
+#
+# Caller (after the `train` job of docs/RELEASE-TRAIN.md's template):
+#
+#   staging:
+#     needs: train
+#     if: needs.train.outputs.promoted == 'true'
+#     uses: signapse/reusable-workflows/.github/workflows/release-train-staging.yml@main
+#     permissions:
+#       contents: read
+#     with:
+#       tickets: ${{ needs.train.outputs.rc_tickets }}
+#       release_tag: ${{ needs.train.outputs.release_tag }}
+#       slack_channel: '#signstream-releases'
+#     secrets:
+#       LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+#       SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+#       E2E_STAGING_SIGNSTUDIO_ADMIN_API_TOKEN: ${{ secrets.E2E_STAGING_SIGNSTUDIO_ADMIN_API_TOKEN }}
+#       E2E_STAGING_SIGNSTUDIO_USER_EMAIL: ${{ secrets.E2E_STAGING_SIGNSTUDIO_USER_EMAIL }}
+#       E2E_STAGING_SIGNSTUDIO_USER_PASSWORD: ${{ secrets.E2E_STAGING_SIGNSTUDIO_USER_PASSWORD }}
+#       E2E_LINEAR_API_KEY: ${{ secrets.E2E_LINEAR_API_KEY }}
+#
+# Re-runs: "Re-run failed jobs" re-runs the suite and the verdict. The verdict
+# converges on the same labels and column, and does not comment twice for the
+# same run and verdict (the comment carries the run URL).
+
+on:
+  workflow_call:
+    inputs:
+      tickets:
+        description: >-
+          Comma-separated tickets of the promoted Release Candidate (the train's
+          rc_tickets: every live ticket from the tag prod runs to the
+          candidate, the same set prod deploys). Empty when it carries only
+          untracked commits: the suite then runs its default staging scope and
+          only Slack hears of a failure.
+        required: true
+        type: string
+      release_tag:
+        description: 'Release tag on staging (the train''s release_tag), for comments and the alert.'
+        required: false
+        type: string
+        default: ''
+      slack_channel:
+        description: 'Repo channel for the failure alert (required: a failure without an alert fails the job).'
+        required: true
+        type: string
+    secrets:
+      LINEAR_API_KEY:
+        required: true
+      SLACK_BOT_TOKEN:
+        required: true
+      # Forwarded to signapse-e2e for the staging run, nothing else.
+      E2E_STAGING_SIGNSTUDIO_ADMIN_API_TOKEN:
+        required: false
+      E2E_STAGING_SIGNSTUDIO_USER_EMAIL:
+        required: false
+      E2E_STAGING_SIGNSTUDIO_USER_PASSWORD:
+        required: false
+      E2E_LINEAR_API_KEY:
+        required: false
+    outputs:
+      staging_passed:
+        description: >-
+          'true' only when the suite passed, every ticket was marked Staging
+          Passed, and no ticket is in QA Failed from an earlier attempt. Gate
+          production on it.
+        value: ${{ jobs.verdict.outputs.staging_passed || 'false' }}
+      report_url:
+        description: 'Playwright report of the staging run (empty if the suite produced none)'
+        value: ${{ jobs.staging-tests.outputs.report_url }}
+
+jobs:
+  staging-tests:
+    name: Staging tests
+    uses: signapse/signapse-e2e/.github/workflows/playwright.yml@main
+    permissions:
+      contents: read
+    with:
+      environment: staging
+      tickets: ${{ inputs.tickets }}
+    # Only what the suite reads for a called staging run (E2E_STAGING_* +
+    # Linear for its label scoping), never `inherit`. signapse-e2e must
+    # declare these under on.workflow_call.secrets.
+    secrets:
+      E2E_STAGING_SIGNSTUDIO_ADMIN_API_TOKEN: ${{ secrets.E2E_STAGING_SIGNSTUDIO_ADMIN_API_TOKEN }}
+      E2E_STAGING_SIGNSTUDIO_USER_EMAIL: ${{ secrets.E2E_STAGING_SIGNSTUDIO_USER_EMAIL }}
+      E2E_STAGING_SIGNSTUDIO_USER_PASSWORD: ${{ secrets.E2E_STAGING_SIGNSTUDIO_USER_PASSWORD }}
+      E2E_LINEAR_API_KEY: ${{ secrets.E2E_LINEAR_API_KEY }}
+
+  verdict:
+    name: Staging verdict
+    needs: staging-tests
+    # always(): a failed, cancelled or skipped suite must still mark the
+    # tickets Staging Failed. An untested build never passes.
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      staging_passed: ${{ steps.verdict.outputs.staging_passed }}
+    steps:
+      - name: Fetch release-train scripts
+        uses: actions/checkout@v4
+        with:
+          repository: signapse/reusable-workflows
+          # Scripts from the same commit as this workflow, not mutable main. An
+          # empty workflow_sha would silently check out main, so fail instead.
+          ref: ${{ job.workflow_sha || 'job.workflow_sha-is-empty' }}
+          path: _rw
+          persist-credentials: false
+
+      - name: Record the staging verdict in Linear and Slack
+        id: verdict
+        env:
+          SUITE_JOB_RESULT: ${{ needs.staging-tests.result }}
+          SUITE_RESULT: ${{ needs.staging-tests.outputs.result }}
+          REPORT_URL: ${{ needs.staging-tests.outputs.report_url }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RC_TICKETS: ${{ inputs.tickets }}
+          REPOSITORY: ${{ github.repository }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          SLACK_CHANNEL: ${{ inputs.slack_channel }}
+          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+        run: |
+          set -euo pipefail
+          rc=0
+          res=$("$GITHUB_WORKSPACE/_rw/actions/release-train/scripts/staging-verdict.sh") || rc=$?
+          verdict=$(jq -r '.verdict // "failed"' <<< "$res" 2>/dev/null || echo failed)
+          passed=$(jq -r '.staging_passed // false' <<< "$res" 2>/dev/null || echo false)
+          [ "$rc" -eq 0 ] || passed=false
+          {
+            echo "verdict=$verdict"
+            echo "staging_passed=$passed"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "## Staging tests"
+            echo
+            if [ "$verdict" = passed ]; then echo "**Passed.**"; else echo "**Failed.**"; fi
+            echo "$(jq -r '.reason // "the verdict script failed"' <<< "$res" 2>/dev/null)."
+            echo
+            if [ -n "$REPORT_URL" ]; then echo "[Playwright report]($REPORT_URL)"; else echo "No report."; fi
+            echo
+            if [ "$verdict" = passed ]; then
+              echo "**Staging Passed** for: ${RC_TICKETS:-no tickets}. They stay in their column. staging_passed=${passed} (see the reason above and any errors below)."
+            else
+              echo "Marked **Staging Failed**: ${RC_TICKETS:-no tickets}. Slack: ${SLACK_CHANNEL}."
+              jq -r '.moves // empty
+                | (if (.moved + .already | length) > 0 then "- In QA Failed: \(.moved + .already | join(", "))" else empty end),
+                  (if (.kept | length) > 0 then "- Left where they are: \(.kept | map("\(.id) (\(.state))") | join(", "))" else empty end),
+                  (if (.failed | length) > 0 then "- NOT moved to QA Failed (Linear failed): \(.failed | join(", "))" else empty end)' \
+                <<< "$res" 2>/dev/null || true
+            fi
+            errs=$(jq -r '.errors[]? | "- " + .' <<< "$res" 2>/dev/null || true)
+            if [ -n "$errs" ]; then echo; echo "**Errors** (production will not run):"; echo "$errs"; fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::Recording the staging verdict failed; see the summary. staging_passed=false."
+            exit "$rc"
+          fi
+
+      # Red run on a staging failure, after the tickets and Slack were updated.
+      # The outputs above are already set, so callers still read them.
+      - name: Fail on a staging failure
+        if: steps.verdict.outputs.verdict != 'passed'
+        run: |
+          echo "::error::Staging tests did not pass; the summary says where each ticket is. Production will not run."
+          exit 1
