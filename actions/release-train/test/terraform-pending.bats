@@ -106,7 +106,7 @@ field() { tail -n1 <<< "$output" | jq -r "$1"; }
   pending "SIG-7"
   [ "$status" -eq 0 ]
   [ "$(field '.pending | length')" = 0 ]
-  [ "$(field '.checked[0].state')" = merged ]
+  [[ "$output" == *"#12 (SIG-7) is applied for Signstream in stg"* ]]
 }
 
 @test "AC4: apply runs for another environment, branch, outcome or product do not count" {
@@ -136,7 +136,7 @@ field() { tail -n1 <<< "$output" | jq -r "$1"; }
   deploy_run "Terraform plan+apply Signstream (stg/eu) [gate]" 2026-11-02T11:00:00Z
   pending "SIG-8"
   [ "$(field '.pending[0].products | join(",")')" = Hub ]
-  [ "$(field '.checked[0].products | join(",")')" = "Hub,Signstream" ]
+  [[ "$output" == *"#13 (SIG-8) is applied for Signstream in stg"* ]]
 }
 
 @test "AC4: shared module changes are attributed to the promoted product" {
@@ -153,7 +153,7 @@ field() { tail -n1 <<< "$output" | jq -r "$1"; }
   pending "SIG-10"
   [ "$status" -eq 0 ]
   [ "$(field '.pending | length')" = 0 ]
-  [ "$(field '[.checked[] | "\(.pr):\(.state)"] | join(",")')" = "15:merged,16:unmerged" ]
+  [[ "$output" != *"#15"* ]]   # no infrastructure: no product checked
   [[ "$output" == *"not merged"* ]]
 }
 

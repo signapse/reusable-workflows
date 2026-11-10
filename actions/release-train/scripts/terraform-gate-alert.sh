@@ -33,7 +33,7 @@ jq -c --arg ch "$SLACK_CHANNEL" --arg ctx "${CONTEXT:-Promotion}" \
       end;
   (.product // "?") as $p | (.environment // "?") as $e
   | (if .gate == "blocked" then
-      ":no_entry: *Terraform blocked the \($ctx)*\nProduct *\($p)*, environment *\($e)*: the plan destroys or replaces resources. Nothing was applied, tagged or deployed.\n\n"
+      ":no_entry: *Terraform blocked the \($ctx)*\nProduct *\($p)*, environment *\($e)*: the plan destroys or replaces resources that \($e) does not apply unattended (prod: any; stg: stateful types). Nothing was applied, tagged or deployed.\n\n"
       + ([bullets("destroys"), bullets("replaces"), bullets("unclassified")] | join("\n\n"))
       + "\n\nA human must review the plan in " + link(.run_url; "the Terraform run")
       + " and apply it by hand, then re-run the train."

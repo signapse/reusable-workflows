@@ -132,8 +132,9 @@ The `promote` job runs after `select` when `outcome` is `selected`:
      which some staging ImagePolicies require.
 2. **Terraform gate** (SIG-2765, `actions/terraform-gate`): plans and
    applies the product's `stg` stack in signapse-core-terraform and checks
-   that every ticket's merged Terraform PRs are applied in `stg`. A destroy,
-   replace, failed run or unapplied PR alerts Slack and fails the job here,
+   that every ticket's merged Terraform PRs are applied in `stg`. A destroy
+   or replace of a stateful resource, a failed run or an unapplied PR alerts
+   Slack and fails the job here,
    before any tag. Skipped on `resume`. See [Terraform gate](#terraform-gate).
 3. **Clear staging verdicts** (`ticket-labels-remove.sh`): every ticket in
    `rc_tickets` loses `Staging Passed` and `Staging Failed`. A staging
@@ -209,6 +210,11 @@ Terraform must pass before every Promotion (ADR 0002). The composite action
    | `safe` and `applied`, run concluded `success` | pass, the run applied the creates and updates |
    | `no_changes` or `safe` from a run that did not conclude `success` | stop; Slack names the conclusion |
    | `blocked` | stop; Slack names the product, environment and the destroyed, replaced or unclassified resources (25 of each, then a count); the job summary lists them all |
+
+   signapse-core-terraform decides `blocked` per environment (ADR 0002
+   Decisions 19 and 33): prod blocks on any destroy or replace, stg only on a
+   destroy or replace of a stateful resource type, dev never. The gate passes
+   the verdict through.
    | `failed`, missing artifact, wrong product/environment, timeout | stop; Slack names the reason |
 
    A run that concludes `cancelled` was superseded in its concurrency group
@@ -243,44 +249,17 @@ ahead of code, never behind it.
 
 ### Prod (SIG-2769)
 
-Call the same action with `environment: prod` before the prod tag commit:
+This PR gates staging only. The prod Deployment (SIG-2769) calls the same
+action with `environment: prod` before it deploys. terraform-deploy.yml runs
+every prod apply in signapse-core-terraform's `prod-apply` environment, which
+waits for a `prod-approvers` reviewer (ADR 0002 Decisions 19 and 30). The
+gate's wait (`timeout_minutes`, at most 50) includes that approval: with no
+approval in time the gate fails and nothing is deployed.
 
-```yaml
-      - name: Terraform gate (prod)
-        uses: ./_rw/actions/terraform-gate   # or signapse/reusable-workflows/actions/terraform-gate@main
-        with:
-          environment: prod
-          tickets: ${{ needs.select.outputs.rc_tickets }}
-          linear_api_key: ${{ secrets.LINEAR_API_KEY }}
-          prodzilla_app_id: ${{ inputs.prodzilla_app_id }}
-          prodzilla_app_private_key: ${{ secrets.PRODZILLA_APP_PRIVATE_KEY }}
-          slack_bot_token: ${{ secrets.SLACK_BOT_TOKEN }}
-          slack_channel: ${{ inputs.slack_releases_channel || vars.SLACK_RELEASES_CHANNEL || '#releases' }}
-          context: Dark Deployment of ${{ github.repository }} ${{ needs.promote.outputs.release_tag }} to prod
-```
+### Dev
 
-The job must have checked out the product repo (for `.signapse/pipeline.yml`).
-The `prod` GitHub environment in signapse-core-terraform has no required
-reviewers (checked with the API on 2026-11-04: its only protection rule is a
-branch policy, deployments from protected branches only). A prod run
-dispatched on `main` therefore starts without approval. Its README still
-mentions 2 reviewers; if that rule is ever added, the gate times out waiting
-and the prod Deployment stops (it fails safe), so keep the environment
-reviewer-free for unattended Deployments.
-
-### Dev (deviation from SIG-2765, for Alex to confirm)
-
-SIG-2765's summary says Terraform runs before dev, staging and prod. This
-implementation gates staging and prod only. The gate does not run on dev merges. Dev is not a Promotion: `main-push`
-pushes the image and Flux deploys it with no step in between to gate, and
-signapse-core-terraform's `orchestration.yml` already plans and applies the
-changed products in dev when a Terraform PR merges. The spec has Terraform
-PRs for a ticket merge first. Gating dev would mean a gate job before the
-build in every product repo's `main-push`, contending with orchestration for
-the dev state lock on each merge, for a guarantee orchestration already gives.
-Follow-up if dev drift shows up: add the action with `environment: dev` to
-`main-push-dev.yml` (SIG-2759) before its deploy wait. The scripts already
-support `dev`, including orchestration's merge-apply runs for the AC4 check.
+Not gated (a deviation from SIG-2765's summary, to be confirmed): dev is not
+a Promotion, and orchestration.yml already applies a merged Terraform PR in dev.
 
 ### "Waits for the next window"
 

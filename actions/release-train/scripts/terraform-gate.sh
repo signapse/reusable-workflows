@@ -13,7 +13,10 @@
 #   safe + applied        pass     creates/updates only, applied by the run
 #                                  (both only when the run concluded success:
 #                                  a passing artifact from a failed run fails)
-#   blocked               blocked  destroy, replace or unrecognised action;
+#   blocked               blocked  a destroy or replace the environment does
+#                                  not apply unattended (signapse-core-terraform
+#                                  decides: prod any, stg stateful types only,
+#                                  dev never), or an unrecognised action;
 #                                  nothing applied, a human must review
 #   failed                failed   plan or apply error
 #   anything else         failed   missing artifact, unknown verdict, verdict
@@ -221,7 +224,7 @@ while :; do
       [ "$(jq -r '.applied' <<< "$verdict_json")" = true ] \
         || result failed "plan was safe but the run did not apply it"
       result pass "creates and updates only; applied" ;;
-    blocked) result blocked "the plan destroys, replaces or makes a change the classifier does not recognise; nothing was applied" ;;
+    blocked) result blocked "the plan destroys or replaces resources ${ENVIRONMENT} does not apply unattended, or makes a change the classifier does not recognise; nothing was applied" ;;
     failed)
       if [ "$stale_retried" = false ] \
         && [ "$(jq -r '.apply_attempted == true and .applied != true' <<< "$verdict_json")" = true ] \

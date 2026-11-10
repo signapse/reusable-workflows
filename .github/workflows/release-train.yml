@@ -11,7 +11,8 @@ name: Release Train (reusable)
 #     The `promote` job then promotes it to staging (SIG-2764): inside the
 #     deploy window (or with a hotfix ticket) it runs the Terraform gate
 #     (SIG-2765: plan and apply the product's stg stack, block on a destroy or
-#     replace, or on a ticket's unapplied Terraform PR), then re-tags the dev
+#     replace of a stateful resource, or on a ticket's unapplied Terraform
+#     PR), then re-tags the dev
 #     image with the next release version in ECR and git (no rebuild), waits for Flux to run
 #     it on staging, and moves the tickets to On Staging. Outside the window it
 #     reports `deferred` and does nothing; the next hourly run promotes.
@@ -322,16 +323,6 @@ on:
       promotion_decision:
         description: 'qa-passed: open | hotfix | deferred | superseded | resume (see promotion-plan.sh)'
         value: ${{ jobs.promote.outputs.decision }}
-      terraform_gate:
-        description: >-
-          qa-passed: pass | blocked | failed | unapplied from the staging
-          Terraform gate (empty when it did not run: deferred or resume).
-        value: ${{ jobs.promote.outputs.terraform_gate }}
-      terraform_verdict:
-        description: 'qa-passed: no_changes | safe | blocked | failed from the staging terraform-deploy run.'
-        value: ${{ jobs.promote.outputs.terraform_verdict }}
-      terraform_run_url:
-        value: ${{ jobs.promote.outputs.terraform_run_url }}
 
 # No workflow-level `permissions:` on purpose: each job declares its own. The
 # select job declares none and inherits the caller's grant, because asking for
@@ -493,9 +484,6 @@ jobs:
       release_tag: ${{ steps.tag.outputs.release_tag }}
       image_digest: ${{ steps.tag.outputs.image_digest }}
       promoted: ${{ steps.done.outputs.promoted || 'false' }}
-      terraform_gate: ${{ steps.terraform.outputs.gate }}
-      terraform_verdict: ${{ steps.terraform.outputs.verdict }}
-      terraform_run_url: ${{ steps.terraform.outputs.run_url }}
     steps:
       - uses: actions/checkout@v4
         with:

@@ -35,8 +35,7 @@
 #      (pull-requests: read and actions: read on TF_REPO), TF_REPO, TF_WORKFLOW,
 #      TF_REGION (as terraform-gate.sh), ORCHESTRATION_WORKFLOW
 #      (default orchestration.yml).
-# Stdout: {"pending": [{ticket, pr, url, merged_at, products: [unapplied]}],
-#          "checked": [{ticket, pr, state, products}]}
+# Stdout: {"pending": [{ticket, pr, url, merged_at, products: [unapplied]}]}
 # Exit 0 with that object; exit 1 when Linear or GitHub cannot be read
 # (fail closed: an unknown is not "applied").
 
@@ -88,7 +87,6 @@ applied() {
 }
 
 pending='[]'
-checked='[]'
 while IFS= read -r t; do
   [ -n "$t" ] || continue
   # shellcheck disable=SC2016 # GraphQL variable, not shell expansion.
@@ -109,7 +107,6 @@ while IFS= read -r t; do
     url=$(jq -r '.html_url' <<< "$pr")
     if [ -z "$merged_at" ]; then
       log "warning: ${t} links ${TF_REPO}#${n}, which is not merged; it does not block (AC4 covers merged PRs)"
-      checked=$(jq -c --arg t "$t" --argjson n "$n" '. + [{ticket: $t, pr: $n, state: "unmerged", products: []}]' <<< "$checked")
       continue
     fi
     sha=$(jq -r '.merge_commit_sha' <<< "$pr")
@@ -129,9 +126,6 @@ while IFS= read -r t; do
         unapplied+=("$p")
       fi
     done
-    plist=$(printf '%s\n' "$products" | jq -R . | jq -sc 'map(select(. != ""))')
-    checked=$(jq -c --arg t "$t" --argjson n "$n" --argjson p "$plist" \
-      '. + [{ticket: $t, pr: $n, state: "merged", products: $p}]' <<< "$checked")
     if [ "${#unapplied[@]}" -gt 0 ]; then
       ulist=$(printf '%s\n' "${unapplied[@]}" | jq -R . | jq -sc .)
       pending=$(jq -c --arg t "$t" --argjson n "$n" --arg url "$url" --arg m "$merged_at" --argjson p "$ulist" \
@@ -140,4 +134,4 @@ while IFS= read -r t; do
   done
 done <<< "$tickets"
 
-jq -nc --argjson p "$pending" --argjson c "$checked" '{pending: $p, checked: $c}'
+jq -nc --argjson p "$pending" '{pending: $p}'
