@@ -15,9 +15,9 @@
 #      already-tagged commit, and must still be reverted (review fix). A
 #      commit's tickets are found the way release-candidate.sh finds them:
 #      <TEAM>-<n> refs in the commits it brought in plus the title and head
-#      branch of its merged PR(s). Revert commits (lib/revert.sh, subject
-#      "Revert ...", or a PR from a revert-* or prodzilla/revert-* branch)
-#      are not ticket work and are never reverted.
+#      branch of its merged PR(s). Revert commits (lib/revert.sh, the same
+#      test release-candidate.sh uses) are not ticket work and are never
+#      reverted.
 #   2. Read each ticket from Linear. Only tickets currently in QA_FAILED_STATE
 #      count; one that left the state (QA re-passed it) is never acted on. The
 #      time it entered the state is the newest issue-history entry moving it
@@ -140,18 +140,13 @@ while IFS= read -r sha; do
   parents=$(git log -1 --format=%P "$sha" | wc -w | tr -d ' ')
   prs=$(merged_prs "$sha")
   refs=$(printf '%s' "$prs" | jq -r '.[] | .title, .head' | "$HERE/ticket-extractor.sh" "${sha}^1" "$sha")
-  # lib/revert.sh decides whenever the commit carries git's "This reverts
-  # commit" line: then a revert of a revert (a re-land) is ticket work even
-  # though its subject starts with Revert (review fix: selection blocks on
-  # it, so this run must be able to revert it). The subject and branch
-  # heuristics only cover reverts without that line.
+  # lib/revert.sh alone decides, exactly as release-candidate.sh does: a
+  # commit selection blocks on must be one this run can revert. A "Revert ..."
+  # subject or a revert-* branch without a proven revert is ticket work (a
+  # re-land, or a revert whose trailer was lost), and reverting it together
+  # with the ticket's older commits leaves the ticket's code removed.
   revert=false
-  if git log -1 --format=%B "$sha" | grep -q 'This reverts commit [0-9a-f]'; then
-    [ "$(jq -r --arg s "$sha" '.[$s].kind // "normal"' <<< "$units")" = revert ] && revert=true
-  elif [[ "$subject" == Revert* ]] \
-    || printf '%s' "$prs" | jq -e 'any(.[]; .head | test("^(prodzilla/)?revert-"))' > /dev/null; then
-    revert=true
-  fi
+  [ "$(jq -r --arg s "$sha" '.[$s].kind // "normal"' <<< "$units")" = revert ] && revert=true
   commits=$(jq -nc --argjson a "$commits" --arg sha "$sha" --arg s "$subject" \
     --argjson merge "$([ "$parents" -gt 1 ] && echo true || echo false)" \
     --argjson revert "$revert" --argjson t "$refs" \
@@ -435,8 +430,16 @@ while IFS= read -r id <&3; do
     failed=1
   elif ! pr_url=$(gh pr create --repo "$GITHUB_REPOSITORY" --base "$BRANCH" --head "$br" \
       --title "$pr_title" --body "$body" "${draft[@]+"${draft[@]}"}"); then
-    log "ERROR: $id: gh pr create failed; branch $br is pushed"
-    set_r '.action = "failed" | .error = "PR creation failed; branch pushed without a PR"'
+    # A kept branch would dedupe every later run into branch_exists and the
+    # ticket would never get its PR or comment: delete it so the next run
+    # retries.
+    if git push -q "$REMOTE" --delete "$br"; then
+      log "ERROR: $id: gh pr create failed; deleted branch $br so the next run retries"
+      set_r '.action = "failed" | .error = "PR creation failed; branch deleted, the next run retries"'
+    else
+      log "ERROR: $id: gh pr create failed and branch $br could not be deleted; delete it by hand"
+      set_r '.action = "failed" | .error = "PR creation failed; branch pushed without a PR (delete it by hand)"'
+    fi
     failed=1
   else
     pr_url=$(printf '%s' "$pr_url" | tail -n 1)

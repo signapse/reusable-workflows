@@ -229,7 +229,8 @@ How it decides (details in `actions/release-train/scripts/qa-failed-revert.sh`):
   the ticket into QA Failed, so re-entering the column restarts it.
 - **What.** The ticket's commits since the tag, newest first. Merge commits
   are reverted against their first parent. Revert commits are never
-  reverted. A commit that a live revert since the tag already undoes ("This
+  reverted; a revert is what `lib/revert.sh` proves, the same test selection
+  uses, so a "Revert …" subject alone is ticket work. A commit that a live revert since the tag already undoes ("This
   reverts commit …", `lib/revert.sh`; a revert that was itself reverted does
   not count) or whose revert changes nothing is skipped and listed. Once the
   revert PR merges, selection treats the reverted commits as gone and the
@@ -253,7 +254,8 @@ How it decides (details in `actions/release-train/scripts/qa-failed-revert.sh`):
   is set. The branch dedupes later runs, so each of those is sent once.
 - **Failures are loud.** Linear or GitHub read errors fail the run before
   anything is opened. A failed push, PR, comment or alert fails the run after
-  the other tickets are handled, and is named in the job summary.
+  the other tickets are handled, and is named in the job summary. When the PR
+  cannot be opened, the pushed branch is deleted so the next run retries.
 
 ### Caller template (`.github/workflows/qa-failed-revert.yml` in the product repo)
 
