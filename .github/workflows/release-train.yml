@@ -289,7 +289,7 @@ on:
           the promote job did not run: outcome none or already_promoted).
         value: ${{ jobs.promote.outputs.promoted }}
       deferred:
-        description: "qa-passed: 'true' when the Promotion waited for the deploy window (nothing was done)."
+        description: "qa-passed: 'true' when nothing was done: outside the deploy window, or superseded by a newer Promotion (promotion_decision says which)."
         value: ${{ jobs.promote.outputs.deferred }}
       version:
         description: 'qa-passed: semver of the Promotion, no prefix (e.g. 1.2.45). Empty unless tagged.'
@@ -301,7 +301,7 @@ on:
         description: 'qa-passed: JSON object, ECR repository -> digest the release tag names (same as the dev build).'
         value: ${{ jobs.promote.outputs.image_digest }}
       promotion_decision:
-        description: 'qa-passed: open | hotfix | deferred | resume (see promotion-plan.sh)'
+        description: 'qa-passed: open | hotfix | deferred | superseded | resume (see promotion-plan.sh)'
         value: ${{ jobs.promote.outputs.decision }}
 
 # No workflow-level `permissions:` on purpose: each job declares its own. The
@@ -330,6 +330,8 @@ jobs:
       rc_sha: ${{ steps.select.outputs.rc_sha }}
       rc_image_tag: ${{ steps.select.outputs.rc_image_tag }}
       rc_tickets: ${{ steps.select.outputs.rc_tickets }}
+      rc_new_tickets: ${{ steps.select.outputs.rc_new_tickets }}
+      last_release_tag: ${{ steps.select.outputs.last_release_tag }}
       untracked_commits: ${{ steps.select.outputs.untracked_commits }}
       blocked_by: ${{ steps.select.outputs.blocked_by }}
       selection: ${{ steps.select.outputs.selection }}
@@ -424,6 +426,8 @@ jobs:
             echo "rc_sha=$(jq -r '.rc.sha // ""' <<< "$sel")"
             echo "rc_image_tag=$(jq -r '.rc.image_tag // ""' <<< "$sel")"
             echo "rc_tickets=$(jq -r '[.tickets[].id] | join(",")' <<< "$sel")"
+            echo "rc_new_tickets=$(jq -r '.new_tickets | join(",")' <<< "$sel")"
+            echo "last_release_tag=$(jq -r .last_release_tag <<< "$sel")"
             echo "untracked_commits=$(jq -c .untracked_commits <<< "$sel")"
             echo "blocked_by=$(jq -r '.blocked_by.id // ""' <<< "$sel")"
             echo "selection<<$eof"
@@ -496,12 +500,17 @@ jobs:
             exit 1
           fi
 
-      # Read-only: deploy window and version. A deferred run stops here.
+      # Read-only: deploy window and version. A deferred or superseded run stops here.
       - name: Plan Promotion
         id: plan
         env:
           RC_SHA: ${{ needs.select.outputs.rc_sha }}
           RC_TICKETS: ${{ needs.select.outputs.rc_tickets }}
+          # Only tickets new since the last Promotion can make it a hotfix.
+          HOTFIX_TICKETS: ${{ needs.select.outputs.rc_new_tickets }}
+          # A queued run whose select is stale (another Promotion tagged since)
+          # is superseded, not promoted over the newer tag.
+          SEEN_RELEASE_TAG: ${{ needs.select.outputs.last_release_tag }}
           LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
           HOTFIX_LABEL: ${{ inputs.hotfix_label }}
           RELEASE_TAG_PATTERN: ${{ inputs.release_tag_pattern }}
@@ -511,7 +520,8 @@ jobs:
           decision=$(jq -r .decision <<< "$plan")
           {
             echo "decision=$decision"
-            echo "deferred=$([ "$decision" = deferred ] && echo true || echo false)"
+            # superseded does nothing either, like deferred.
+            echo "deferred=$(case "$decision" in deferred | superseded) echo true ;; *) echo false ;; esac)"
             echo "tag=$(jq -r .tag <<< "$plan")"
           } >> "$GITHUB_OUTPUT"
           {
@@ -522,6 +532,10 @@ jobs:
                 echo "**Deferred: outside the deploy window** ($(jq -r .local_time <<< "$plan"))."
                 echo "Nothing was tagged, deployed or moved. The train's hourly run promotes"
                 echo "the Release Candidate it selects then, from $(jq -r .next_open <<< "$plan")." ;;
+              superseded)
+                echo "**Superseded:** \`$(jq -r .newer_tag <<< "$plan")\` was promoted while this run waited, so this"
+                echo "Release Candidate may be older than staging. Nothing was tagged, deployed or moved;"
+                echo "the train's next run re-selects." ;;
               hotfix) echo "Outside the deploy window ($(jq -r .local_time <<< "$plan")), going ahead: a ticket carries \`${HOTFIX_LABEL}\`." ;;
               resume) echo "The Release Candidate already carries \`$(jq -r .tag <<< "$plan")\`: finishing an earlier attempt." ;;
               *) echo "Inside the deploy window ($(jq -r .local_time <<< "$plan"))." ;;

@@ -44,6 +44,7 @@
 #   {base, last_release_tag, head_sha, outcome, already_promoted,
 #    rc: {sha, image_tag, run_number, run_url, release_tag} | null,
 #    tickets: [{id, title, url, state}],          # every live ticket from <base> to the RC
+#    new_tickets: [id],                            # those of them in commits after last_release_tag
 #    untracked_commits: [{sha, subject, revert?}],# ticketless and revert commits up to the RC
 #    reverted: [{sha, subject, tickets, reverted_by}],  # reverted commits walked
 #    blocked_by: {id, title, url, state, reason, sha, subject} | null,
@@ -257,8 +258,15 @@ done < <(git rev-list --first-parent --reverse "${LAST_TAG}..${head_sha}")
 
 already=false
 outcome=none
+new_tickets='[]'
 if [ "$rc" != 'null' ]; then
   outcome=selected
+  # Tickets in commits after the last Promotion, up to the RC: the ones this
+  # Promotion brings to staging (its hotfix check, promotion-plan.sh).
+  since=$(git rev-list --first-parent "${last_release:-$LAST_TAG}..$(printf '%s' "$rc" | jq -r .sha)" | jq -R . | jq -sc .)
+  # shellcheck disable=SC2016 # jq bindings, not shell expansion.
+  new_tickets=$(jq -nc --argjson c "$commits" --argjson s "$since" --argjson t "$tickets" \
+    '[$t[].id] as $live | [$c[] | select(.sha as $x | $s | index($x)) | .tickets[] | select(. as $i | $live | index($i))] | unique')
   if [ -n "$(printf '%s' "$rc" | jq -r .release_tag)" ]; then
     already=true
     outcome=already_promoted
@@ -278,7 +286,8 @@ jq -nc \
   --argjson reverted "$reverted" \
   --argjson blocked "$blocked" \
   --argjson commits "$commits" \
+  --argjson new_tickets "$new_tickets" \
   '{base: $base, last_release_tag: $last_release, head_sha: $head_sha,
     outcome: $outcome, already_promoted: $already,
-    rc: $rc, tickets: $tickets, untracked_commits: $untracked, reverted: $reverted,
+    rc: $rc, tickets: $tickets, new_tickets: $new_tickets, untracked_commits: $untracked, reverted: $reverted,
     blocked_by: $blocked, commits: $commits}'

@@ -103,11 +103,11 @@ Promotion outputs (empty when the promote job did not run, i.e. `outcome` is
 | Output | Example | Meaning |
 |---|---|---|
 | `promoted` | `true` | Tagged, staging runs it, tickets On Staging. `false` when deferred |
-| `deferred` | `false` | `true` when outside the deploy window; nothing was done |
+| `deferred` | `false` | `true` when nothing was done: outside the deploy window, or `superseded` |
 | `version` | `1.2.45` | Semver of the Promotion, no prefix |
 | `release_tag` | `1.2.45` | Tag created in git and ECR (prefix follows the repo's existing tags) |
 | `image_digest` | `{"signstream/http":"sha256:…"}` | ECR repository -> digest; same as the dev build's |
-| `promotion_decision` | `open` | `open`, `hotfix`, `deferred` or `resume` |
+| `promotion_decision` | `open` | `open`, `hotfix`, `deferred`, `superseded` or `resume` |
 
 ## Promotion to staging
 
@@ -118,8 +118,12 @@ The `promote` job runs after `select` when `outcome` is `selected`:
    - **Deploy window** (`deploy-window.sh`): Monday-Thursday 09:00-16:00 and
      Friday 09:00-12:00, Europe/London time, so GMT or BST as the clocks say.
      The start is inside, the end is not (Thu 16:00 is closed). A ticket
-     labelled `hotfix` (`hotfix_label`) bypasses it. SIG-2769 reuses the same
-     script for prod.
+     labelled `hotfix` (`hotfix_label`) bypasses it, but only a ticket new
+     in this Promotion (in a commit after the last release tag): a label
+     left on a ticket already on staging does not open the window for every
+     later Promotion. SIG-2769 reuses the same script for prod.
+   - **Superseded**: another Promotion tagged while this one was queued (see
+     "Concurrency"); nothing is done.
    - **Version** (`promotion-version.sh`): the highest release tag in the
      repo, bumped by `version-bump.sh` (any `major` label -> major, any
      `minor` -> minor, else patch). The highest, not the nearest, because
@@ -193,9 +197,16 @@ layers:
 
 A second run waits for the first. GitHub keeps at most one *pending* run (or
 job) per group, so with three runs the middle one is cancelled while still
-queued, before it has done anything. That is safe because every run
-re-selects from scratch: the survivor promotes the newest Release Candidate,
-or reports `already_promoted` if the first run already tagged it.
+queued, before it has done anything. With the template's workflow-level
+group, the survivor's `select` runs after the first run finished, so it
+re-selects from scratch and promotes the newest Release Candidate or reports
+`already_promoted`. With only the job-level group, a queued `promote` keeps
+the Release Candidate its `select` chose before it waited, which may be older
+than what the first run just promoted. So the plan compares the last release
+tag on the branch with the one `select` saw: if another Promotion tagged in
+between, the decision is `superseded` and nothing is done (a higher tag on an
+older commit would make Flux roll staging back). The next train run
+re-selects.
 
 ### Re-runs and idempotency
 

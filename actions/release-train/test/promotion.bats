@@ -224,6 +224,38 @@ digest() { cat "$TMP/ecr/$1/$2"; }
   echo "$output" | jq -e '.decision == "resume" and .tag == "1.2.45" and .existing == true and (has("next_open") | not)' > /dev/null
 }
 
+@test "a run queued behind another Promotion defers when a newer tag appeared since select" {
+  # select saw 1.2.44; meanwhile another run promoted a newer commit.
+  git commit -q --allow-empty -m "feat(SIG-2): B"
+  git tag 1.2.45
+  SEEN_RELEASE_TAG=1.2.44 run plan "$RC" ""
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.decision == "superseded" and .newer_tag == "1.2.45"' > /dev/null
+}
+
+@test "no newer tag since select: the plan goes ahead" {
+  SEEN_RELEASE_TAG=1.2.44 run plan "$RC" ""
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.decision == "open"' > /dev/null
+}
+
+@test "a re-run of a Promotion that already tagged its commit resumes, not superseded" {
+  git tag 1.2.45 "$RC"
+  SEEN_RELEASE_TAG=1.2.44 run plan "$RC" ""
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.decision == "resume"' > /dev/null
+}
+
+@test "hotfix: only tickets new in this Promotion bypass the window" {
+  labels SIG-1 Bug
+  labels SIG-2 Bug hotfix   # already on staging in an earlier tag
+  NOW=2026-11-07T10:00:00Z HOTFIX_TICKETS=SIG-1 run plan "$RC" "SIG-1,SIG-2"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.decision == "deferred"' > /dev/null
+  NOW=2026-11-07T10:00:00Z HOTFIX_TICKETS=SIG-2 run plan "$RC" "SIG-1,SIG-2"
+  echo "$output" | jq -e '.decision == "hotfix"' > /dev/null
+}
+
 # ---- tag: ECR re-put + git tag ---------------------------------------------
 
 @test "AC1: every service gets the release tag on the same digest as the dev build" {
