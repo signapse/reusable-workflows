@@ -477,7 +477,7 @@ jobs:
 | `disable-gitleaks` | boolean | `false` | Disable Gitleaks |
 | `extra-super-linter-env` | string | `''` | Extra Super-Linter env vars |
 
-### 7. Main Push · dev smoke and QA hand-off (`main-push-dev.yml`)
+### 8. Main Push · dev smoke and QA hand-off (`main-push-dev.yml`)
 
 Opt-in companion to `main-push.yml`, called as a second job in the same caller run. It waits for dev to run the new `main-<n>-<sha>` tag, runs signapse-e2e `@smoke` on dev, and moves the build's tickets to `On Dev · Ready for QA` once every PR linked to each ticket, in any repo, is merged and passed its own dev smoke. On build, deploy or smoke failure it leaves tickets alone and comments on the merged PRs (plus Slack when `slack_channel` is set). The full caller example, secrets and the known gap (a ticket whose other linked PR is in a repo without this workflow can stay in In Review; re-run `tickets-to-dev-qa`) are in the header of [`main-push-dev.yml`](.github/workflows/main-push-dev.yml).
 
