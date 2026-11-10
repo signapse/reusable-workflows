@@ -202,13 +202,17 @@ sql() { printf '%s\n' "$1" >"$BATS_TEST_TMPDIR/m.up.sql"; run python3 "$SCRIPT" 
   [ -z "$output" ]
 }
 
-@test "DROP DEFAULT / DROP IDENTITY warn; DROP DEFAULT on a column just added NOT NULL blocks" {
+@test "DROP DEFAULT warns; DROP IDENTITY always blocks; DROP DEFAULT on a column just added NOT NULL blocks" {
   sql 'ALTER TABLE users ALTER COLUMN created_at DROP DEFAULT;'
   [ "$status" -eq 0 ]
   [[ "$output" == *"warn: DROP DEFAULT users.created_at"* ]]
+  # An identity column is always NOT NULL and keeps it after DROP IDENTITY.
+  sql 'ALTER TABLE orders ALTER COLUMN id DROP IDENTITY;'
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"BLOCK: DROP IDENTITY orders.id"* ]]
   sql 'ALTER TABLE users ALTER COLUMN id DROP IDENTITY IF EXISTS;'
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"warn: DROP IDENTITY users.id"* ]]
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"BLOCK: DROP IDENTITY users.id"* ]]
   sql 'ALTER TABLE users ADD CONSTRAINT age_pos CHECK (age > 0), ALTER COLUMN bio DROP NOT NULL;'
   [ "$status" -eq 0 ]
   [ -z "$output" ]
@@ -258,4 +262,19 @@ sql() { printf '%s\n' "$1" >"$BATS_TEST_TMPDIR/m.up.sql"; run python3 "$SCRIPT" 
   printf 'ALTER TABLE t ADD COLUMN c text DEFAULT \xff;\n' >"$BATS_TEST_TMPDIR/bad.up.sql"
   run python3 "$SCRIPT" "$BATS_TEST_TMPDIR/bad.up.sql"
   [ "$status" -eq 2 ]
+}
+
+@test "TRUNCATE blocks: the rows the previous code reads are gone" {
+  sql 'TRUNCATE TABLE sessions;'
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"BLOCK: TRUNCATE sessions"* ]]
+  sql 'truncate only audit_log, events restart identity cascade;'
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"BLOCK: TRUNCATE audit_log, events"* ]]
+  sql "INSERT INTO notes (body) VALUES ('truncate table x');"
+  [ "$status" -eq 0 ]
+  # TRUNCATE as a privilege or trigger event is not a TRUNCATE.
+  sql 'GRANT SELECT, TRUNCATE ON sessions TO app; CREATE TRIGGER t BEFORE TRUNCATE ON sessions EXECUTE FUNCTION f();'
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
 }

@@ -93,8 +93,8 @@ Use expand/contract: add the new shape now, move the code over, and remove the
 old shape in a later release once no deployed code uses it.
 
 If no deployed code uses the old shape any more, a reviewer (not the author)
-can approve this PR with "${OVERRIDE_PHRASE}" in the review text.
+can approve this PR with "${OVERRIDE_PHRASE}" on a line of its own in the review text.
 EOF
 summary "### Migration safety: failed" "" '```' "$(findings)" '```' "" \
-  "Use expand/contract, or a reviewer (not the author) approves with \`${OVERRIDE_PHRASE}\` in the review text."
+  "Use expand/contract, or a reviewer (not the author) approves with \`${OVERRIDE_PHRASE}\` on a line of its own in the review text."
 exit 1

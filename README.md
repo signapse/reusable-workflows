@@ -479,7 +479,7 @@ jobs:
 
 ### 7. Migration Safety (`migration-safety.yml`)
 
-Fails a PR whose SQL migrations would break a rollback to the previous code (DROP / RENAME / ALTER COLUMN TYPE / SET NOT NULL), unless a reviewer approves with `allow-destructive-migration` in the review. Silent when a PR changes no migrations. Adoption, the full rule list, the override, and expand/contract: [docs/MIGRATION-SAFETY.md](docs/MIGRATION-SAFETY.md).
+Fails a PR whose SQL migrations would break a rollback to the previous code (DROP / RENAME / ALTER COLUMN TYPE / SET NOT NULL), unless a reviewer approves with `allow-destructive-migration` on a line of its own in the review. Silent when a PR changes no migrations. Adoption, the full rule list, the override, and expand/contract: [docs/MIGRATION-SAFETY.md](docs/MIGRATION-SAFETY.md).
 
 ```yaml
 on:

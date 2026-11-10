@@ -3,8 +3,9 @@
 # cleared a destructive migration. Change the mechanism here and nowhere else
 # (docs/MIGRATION-SAFETY.md describes it for humans).
 #
-# Mechanism: an APPROVING pull request review whose body contains
-# $OVERRIDE_PHRASE, from someone who
+# Mechanism: an APPROVING pull request review with $OVERRIDE_PHRASE on a line
+# of its own (case, surrounding spaces and backticks ignored; a whole line so
+# "do NOT allow-destructive-migration" does not count), from someone who
 #   * is not the PR author,
 #   * is not a bot,
 #   * is an OWNER / MEMBER / COLLABORATOR of the repo,
@@ -45,7 +46,8 @@ find_override() {
         (map(select(.state | IN("APPROVED", "CHANGES_REQUESTED", "DISMISSED"))) | last) as $latest
         | select($latest.state == "APPROVED")
         | map(select(.state == "APPROVED"
-                     and ((.body // "") | ascii_downcase | contains($phrase))))
+                     and ((.body // "") | ascii_downcase | split("\n")
+                          | any(gsub("^[\\s`]+|[\\s`]+$"; "") == $phrase))))
         | reverse
         | .[]
       )

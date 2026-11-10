@@ -9,15 +9,15 @@ the "up" direction of migration files and reports:
            RENAME of a table/view/column/type/enum value, ALTER COLUMN ... TYPE,
            SET NOT NULL, ADD ... CHECK (... IS NOT NULL, or NOT (x IS NULL),
            x NOTNULL, x IS DISTINCT FROM NULL), ADD COLUMN ...
-           NOT NULL / PRIMARY KEY without a non-null DEFAULT, DROP DEFAULT /
-           IDENTITY on a column added NOT NULL earlier in the same migration,
-           SET SCHEMA, DROP TYPE/DOMAIN ... CASCADE.
+           NOT NULL / PRIMARY KEY without a non-null DEFAULT, DROP IDENTITY,
+           DROP DEFAULT on a column added NOT NULL earlier in the same
+           migration, SET SCHEMA, DROP TYPE/DOMAIN ... CASCADE, TRUNCATE.
   warn   - usually safe, but worth a reviewer's look: DROP INDEX,
            DROP CONSTRAINT, RENAME of an index or constraint (the previous
            code's reads and writes still succeed; the risk is an
            `ON CONFLICT` that names it); DROP FUNCTION/PROCEDURE/SEQUENCE;
-           other DROP DEFAULT / DROP IDENTITY (break the previous code's
-           INSERTs if the column is NOT NULL, which this check cannot see).
+           other DROP DEFAULT (breaks the previous code's INSERTs if the
+           column is NOT NULL, which this check cannot see).
 
 Usage: sql_safety.py [--format plain|github] FILE...
 Exit:  0 no blocking finding, 1 at least one, 2 usage/IO error.
@@ -258,7 +258,9 @@ def check_alter_table(table, actions, notnull):
             continue
         m = re.match(rf"ALTER\s+(?:COLUMN\s+)?({IDENT})\s+DROP\s+(DEFAULT|IDENTITY)\b", a, re.I)
         if m:
-            sev = "block" if (table.lower(), bare(m.group(1)).lower()) in notnull else "warn"
+            # An identity column is always NOT NULL, and DROP IDENTITY keeps it.
+            known_notnull = m.group(2).upper() == "IDENTITY" or (table.lower(), bare(m.group(1)).lower()) in notnull
+            sev = "block" if known_notnull else "warn"
             yield (sev, f"DROP {m.group(2).upper()}", f"{table}.{m.group(1)}", off)
             continue
         nn = [e for e in check_exprs(a) if NOT_NULL_TEST.search(e)] if re.match(r"ADD\b", a, re.I) else []
@@ -291,7 +293,8 @@ REASONS = {
     "RENAME INDEX": "breaks an ON CONFLICT ON CONSTRAINT that names it",
     "CHECK NOT NULL": "rejects the previous code's INSERTs that leave the column out, like SET NOT NULL (NOT VALID only skips existing rows)",
     "DROP DEFAULT": "the previous code's INSERTs that leave this column out fail if it is NOT NULL",
-    "DROP IDENTITY": "the previous code's INSERTs that leave this column out fail if it is NOT NULL",
+    "DROP IDENTITY": "the column stays NOT NULL, so the previous code's INSERTs that leave it out fail",
+    "TRUNCATE": "deletes every row; a rollback restores the previous code but not the data",
 }
 
 
@@ -311,6 +314,7 @@ RULES = [
     ("block", "DROP TYPE CASCADE", rf"\bDROP\s+(?:TYPE|DOMAIN)\s+(?:IF\s+EXISTS\s+)?({IDENT}(?:\s*,\s*{IDENT})*)\s+CASCADE\b", "{0}"),
     ("warn", "DROP ROUTINE", rf"\bDROP\s+(?:FUNCTION|PROCEDURE|SEQUENCE)\s+(?:IF\s+EXISTS\s+)?({IDENT})", "{0}"),
     ("block", "RENAME TABLE", rf"\bALTER\s+SCHEMA\s+({IDENT})\s+RENAME\s+TO\s+({IDENT})", "schema {0} -> {1}"),
+    ("block", "TRUNCATE", rf"\bTRUNCATE\s+(?!ON\b)(?:TABLE\s+)?(?:ONLY\s+)?({IDENT}\s*\*?(?:\s*,\s*(?:ONLY\s+)?{IDENT}\s*\*?)*)", "{0}"),
 ]
 CREATE_TABLE = rf"\bCREATE\s+(?:(?:GLOBAL|LOCAL)\s+)?(?:(?:TEMP|TEMPORARY|UNLOGGED)\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?({IDENT})"
 ALTER_TABLE = rf"\bALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?({IDENT})\s*\*?\s+"

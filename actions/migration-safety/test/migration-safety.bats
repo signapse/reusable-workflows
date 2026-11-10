@@ -178,7 +178,7 @@ add_migration() { cp "$FX/$1" "$MIG/$2"; }
 @test "AC3: approving review with the phrase from another member passes, naming the reviewer" {
   add_migration drop_column.up.sql 002_drop.up.sql
   commit_pr
-  review olly APPROVED "Checked no code reads price_modifier. Allow-Destructive-Migration"
+  review olly APPROVED "$(printf 'Checked no code reads price_modifier.\r\n  `Allow-Destructive-Migration`  ')"
   GITHUB_ACTIONS=true run bash "$SCRIPT"
   [ "$status" -eq 0 ]
   [[ "$output" == *"destructive change allowed by @olly: https://github.com/x/pull/7#pullrequestreview-1"* ]]
@@ -198,6 +198,17 @@ add_migration() { cp "$FX/$1" "$MIG/$2"; }
   add_migration drop_column.up.sql 002_drop.up.sql
   commit_pr
   review olly APPROVED "LGTM"
+  run bash "$SCRIPT"
+  [ "$status" -eq 1 ]
+}
+
+@test "override: the phrase must be a line of its own, so a negation does not count" {
+  add_migration drop_column.up.sql 002_drop.up.sql
+  commit_pr
+  review olly APPROVED "Approving the rest, but do NOT allow-destructive-migration yet"
+  run bash "$SCRIPT"
+  [ "$status" -eq 1 ]
+  review kat APPROVED "$(printf 'not-allow-destructive-migration\nallow-destructive-migrations')"
   run bash "$SCRIPT"
   [ "$status" -eq 1 ]
 }
