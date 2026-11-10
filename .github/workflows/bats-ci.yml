@@ -5,6 +5,7 @@ on:
   pull_request:
     paths:
       - 'actions/release-train/**'
+      - 'actions/terraform-gate/**'
       - '.github/workflows/bats-ci.yml'
 
 jobs:
