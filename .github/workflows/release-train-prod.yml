@@ -112,18 +112,6 @@ on:
         required: false
         type: string
         default: 'Feature'
-      staging_passed_label:
-        required: false
-        type: string
-        default: 'Staging Passed'
-      staging_failed_label:
-        required: false
-        type: string
-        default: 'Staging Failed'
-      qa_failed_state:
-        required: false
-        type: string
-        default: 'QA Failed'
       on_prod_state:
         description: 'Linear column for tickets whose Dark Deployment passed prod smoke.'
         required: false
@@ -380,9 +368,6 @@ jobs:
           PROD_SERVICES: ${{ inputs.prod_services }}
           RELEASE_TAG_PATTERN: ${{ inputs.release_tag_pattern }}
           HOTFIX_LABEL: ${{ inputs.hotfix_label }}
-          STAGING_PASSED_LABEL: ${{ inputs.staging_passed_label }}
-          STAGING_FAILED_LABEL: ${{ inputs.staging_failed_label }}
-          QA_FAILED_STATE: ${{ inputs.qa_failed_state }}
           LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
           LINEAR_TEAM_KEY: ${{ inputs.linear_team_key }}
           GITOPS_REPO: ${{ inputs.gitops_repo }}
@@ -520,12 +505,27 @@ jobs:
             exit 1
           fi
 
+      # Installation tokens last an hour. The Terraform gate (up to 50 min,
+      # prod-apply approval included) and the deploy-prod runs (up to
+      # deploy_timeout_minutes each) can outlast the tokens minted above, so
+      # the checks after the deploy get fresh ones.
+      - name: Mint read-only app token (after the deploy)
+        id: read_after
+        if: always() && steps.plan.outputs.go == 'true'
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ inputs.read_app_id }}
+          private-key: ${{ secrets.READ_APP_PRIVATE_KEY }}
+          owner: ${{ steps.cfg.outputs.owner }}
+          repositories: ${{ steps.cfg.outputs.name }}
+          permission-contents: read
+
       # Trust the files, not the run: deploy-prod's commit is what Flux runs.
       - name: Check prod runs ${{ steps.plan.outputs.release_tag }}
         id: verify
         if: steps.plan.outputs.go == 'true'
         env:
-          GH_TOKEN: ${{ steps.read.outputs.token }}
+          GH_TOKEN: ${{ steps.read_after.outputs.token }}
           PROD_SERVICES: ${{ inputs.prod_services }}
           GITOPS_REPO: ${{ inputs.gitops_repo }}
           GITOPS_REF: ${{ inputs.gitops_ref }}
@@ -548,14 +548,27 @@ jobs:
       # scripts/prod-partial.sh waits for unfinished runs first; if it cannot
       # tell (tags unreadable, a run still going), it says unknown and nothing
       # is rolled back automatically: the alert below asks a human.
+      - name: Mint Prodzilla token (after a failed deploy)
+        id: prodzilla_after
+        if: >-
+          always() && steps.plan.outputs.go == 'true' &&
+          (steps.dispatch.outcome == 'failure' || steps.dispatch.outcome == 'cancelled' || steps.verify.outcome == 'failure')
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ inputs.prodzilla_app_id }}
+          private-key: ${{ secrets.PRODZILLA_APP_PRIVATE_KEY }}
+          owner: ${{ steps.cfg.outputs.owner }}
+          repositories: ${{ steps.cfg.outputs.name }}
+          permission-actions: write
+
       - name: Services already on ${{ steps.plan.outputs.release_tag }} after a failure
         id: partial
         if: >-
           always() && steps.plan.outputs.go == 'true' &&
           (steps.dispatch.outcome == 'failure' || steps.dispatch.outcome == 'cancelled' || steps.verify.outcome == 'failure')
         env:
-          GH_TOKEN: ${{ steps.prodzilla.outputs.token }}
-          READ_TOKEN: ${{ steps.read.outputs.token }}
+          GH_TOKEN: ${{ steps.prodzilla_after.outputs.token }}
+          READ_TOKEN: ${{ steps.read_after.outputs.token }}
           K8S_REPO: ${{ inputs.gitops_repo }}
           PROD_SERVICES: ${{ inputs.prod_services }}
           GITOPS_REPO: ${{ inputs.gitops_repo }}
@@ -741,7 +754,6 @@ jobs:
           TICKETS: ${{ needs.deploy.outputs.tickets }}
           ALLOWED_FROM: ${{ inputs.on_prod_from }}
           LINEAR_TEAM_KEY: ${{ inputs.linear_team_key }}
-          QA_FAILED_STATE: ${{ inputs.qa_failed_state }}
         run: |
           set -euo pipefail
           status=0
