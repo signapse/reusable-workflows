@@ -99,6 +99,7 @@ teardown() { rm -rf "$TMP"; }
 # synthetic ids whose trailing number mod 100 is below STUB_PERCENT.
 # STUB_CATCH_ALL=1 imitates the rejected catch-all prod condition.
 # STUB_PROD_ENVS lists the values in the prod condition (default "prod production").
+# STUB_FAIL_ON="<distinct_id> <environment>" fails only that one request.
 
 stub_curl() {
   mkdir -p "$TMP/bin"
@@ -113,6 +114,7 @@ done
 if [ -n "${STUB_MISSING:-}" ]; then echo '{"flags":{}}'; exit 0; fi
 id=$(jq -r .distinct_id <<< "$body")
 env=$(jq -r .person_properties.environment <<< "$body")
+[ -n "${STUB_FAIL_ON:-}" ] && [ "$STUB_FAIL_ON" = "$id $env" ] && exit 22
 on=false
 case "$env" in dev|development|staging) on=true ;; esac
 [ "$id" = "qa-user" ] && on=true
@@ -216,6 +218,14 @@ EOF
   STUB_FAIL=1 run "$CHECK" sig-1-thing
   [ "$status" -ne 0 ]
   [[ "$output" == *"/flags request failed"* ]]
+}
+
+@test "check: a failed request for a synthetic id in production stops the check, not counted as a mismatch" {
+  stub_curl
+  STUB_FAIL_ON="sig-flag-check-sig-1-thing-3 production" STUB_PERCENT=10 PROD_PERCENT=10 SAMPLE=100 run "$CHECK" sig-1-thing
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"/flags request failed for distinct_id=sig-flag-check-sig-1-thing-3 environment=production"* ]]
+  [[ "$output" != *"agree for"* ]]
 }
 
 @test "check: requires the token and both distinct ids" {

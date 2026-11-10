@@ -110,7 +110,9 @@ for i in $(seq 1 "$N"); do
   id="sig-flag-check-${KEY}-${i}"
   r=$(evaluate "$id" prod)
   if [ "$r" = true ]; then on=$((on + 1)); fi
-  [ "$(evaluate "$id" production)" = "$r" ] || differ=$((differ + 1))
+  # Assign first: set -e does not stop on a failed $(...) inside [ ].
+  r2=$(evaluate "$id" production)
+  [ "$r2" = "$r" ] || differ=$((differ + 1))
   r=$(evaluate "$id" unknown)
   if [ "$r" = true ]; then leaked=$((leaked + 1)); fi
 done
