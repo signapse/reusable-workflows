@@ -45,7 +45,9 @@
 #   CURRENT_TAGS      optional prod-tags.sh output read just before: a service
 #                     that no longer runs RELEASE_TAG (a newer deployment landed
 #                     after the smoke) is not rolled back, it needs a human
-#                     (result not_current), so a rollback never undoes it
+#                     (result not_current), so a rollback never undoes it.
+#                     Each dispatch passes the service's current_tag as
+#                     rollback.yml's from_tag (omitted when unknown).
 #   DEPLOY_RUN_KEY    the deploy job's run key; service S's deploy-prod key is
 #                     DEPLOY_RUN_KEY-S and its rollback key DEPLOY_RUN_KEY-S-rollback (required)
 #   K8S_REPO          default signapse/signapse-core-k8s
@@ -117,8 +119,11 @@ runs_for_key() {
 dispatch() { # dispatch <svc>
   local svc="$1" key body
   key=$(st "$svc" key)
-  body=$(jq -nc --arg ref "$K8S_REF" --arg s "$svc" --arg k "$key" \
-    '{ref: $ref, inputs: {service: $s, environment: "prod", run_key: $k}}')
+  # from_tag (signapse-core-k8s#503): the tag the service runs now.
+  # rollback.yml changes nothing unless prod is still on it, so a deploy that
+  # lands between this read and the rollback is never undone.
+  body=$(jq -nc --arg ref "$K8S_REF" --arg s "$svc" --arg k "$key" --arg f "$(st "$svc" current)" \
+    '{ref: $ref, inputs: ({service: $s, environment: "prod", run_key: $k} + (if $f != "" then {from_tag: $f} else {} end))}')
   gh api -X POST "repos/${K8S_REPO}/actions/workflows/${ROLLBACK_WORKFLOW}/dispatches" --input - <<< "$body" > /dev/null 2> "$work/err" || return 1
   st_set "$svc" '.attempts += 1 | .run_id = "" | .run_url = "" | .status = "dispatched" | .dispatched_at = $now' --argjson now "$clock"
   log "${svc}: dispatched ${ROLLBACK_WORKFLOW} (prod, run key ${key}, attempt $(st "$svc" attempts))"
@@ -207,6 +212,7 @@ while IFS= read -r svc; do
   done_ok=$(jq -c '[.[] | select(.status == "completed" and .conclusion == "success")] | first // empty' <<< "$mine")
   current=""
   [ -z "$CURRENT_TAGS" ] || current=$(jq -r --arg s "$svc" '[.[] | select(.service == $s) | .current_tag][0] // ""' <<< "$CURRENT_TAGS")
+  st_set "$svc" '.current = $c' --arg c "$current"
   if [ -n "$done_ok" ]; then
     st_set "$svc" '.run_id = ($r.id | tostring) | .run_url = $r.html_url | .attempts = 1' --argjson r "$done_ok"
     log "${svc}: already rolled back by an earlier attempt: $(st "$svc" run_url)"

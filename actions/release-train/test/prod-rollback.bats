@@ -282,3 +282,27 @@ EOS
   [ "$(field .ok)" = true ]
   [ "$(field '.results[] | select(.service == "signstream-api") | .result')" = success ]
 }
+
+@test "from_tag: each dispatch names the tag the service runs now (k8s#503), so rollback.yml refuses if prod moved" {
+  export RELEASE_TAG=1.4.0 SERVICES='["signstream-api","signstream-websocket"]'
+  export PREVIOUS_TAGS='{"signstream-api":"1.3.0","signstream-websocket":"1.3.0"}'
+  export CURRENT_TAGS='[{"service":"signstream-api","current_tag":"1.4.0","on_tag":true},{"service":"signstream-websocket","current_tag":"1.4.0","on_tag":true}]'
+  rollback
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '"\(.inputs.service)=\(.inputs.from_tag)"' "$TMP/dispatched" | sort | paste -sd, -)" = "signstream-api=1.4.0,signstream-websocket=1.4.0" ]
+}
+
+@test "from_tag: a re-dispatch after a cancel keeps it" {
+  export RELEASE_TAG=1.4.0 MAX_ATTEMPTS=3
+  export CURRENT_TAGS='[{"service":"signstream-api","current_tag":"1.4.0","on_tag":true}]'
+  printf 'cancelled cancelled -\nsuccess success 1.3.0\n' > "$TMP/plan-signstream-api"
+  rollback
+  [ "$(field .ok)" = true ]
+  [ "$(jq -r .inputs.from_tag "$TMP/dispatched" | sort -u)" = 1.4.0 ]
+  [ "$(wc -l < "$TMP/dispatched" | tr -d ' ')" = 2 ]
+}
+
+@test "from_tag: omitted when prod's tags could not be read (CURRENT_TAGS empty)" {
+  rollback
+  [ "$(jq -r '.inputs | has("from_tag")' "$TMP/dispatched")" = false ]
+}

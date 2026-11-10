@@ -576,11 +576,11 @@ rollback
 - **Only from the release tag.** Right before dispatching, the job re-reads
   the tags prod runs. A service no longer on the release tag (a newer
   deployment or a manual rollback landed after the smoke) is not rolled back:
-  `not_current`, needs a human. rollback.yml itself still picks its target
-  from the tag history when it starts, so a deployment landing in the seconds
-  between that read and rollback.yml's own resolution is not caught here;
-  closing that needs rollback.yml to take the tag it must replace
-  (signapse-core-k8s#503).
+  `not_current`, needs a human. Each dispatch also passes that tag as
+  rollback.yml's `from_tag` (signapse-core-k8s#503): if prod moved in the
+  seconds before rollback.yml resolves its target, the run fails without
+  changing anything. When prod's tags could not be read, `from_tag` is
+  omitted.
 - **rollback.yml missing.** If signapse-core-k8s has no `rollback.yml`
   (SIG-2753, signapse-core-k8s#503 not merged), listing its runs returns 404:
   nothing is dispatched, every service is reported `missing_workflow` with a
