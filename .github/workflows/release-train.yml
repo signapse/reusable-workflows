@@ -8,6 +8,11 @@ name: Release Train (reusable)
 #     (rc_sha, rc_image_tag, rc_tickets, untracked_commits, blocked_by).
 #     Callers trigger it from the event router
 #     (workflow_dispatch with `ticket` + `trigger_id`) plus an hourly schedule.
+#     The `promote` job then promotes it to staging (SIG-2764): inside the
+#     deploy window (or with a hotfix ticket) it re-tags the dev image with the
+#     next release version in ECR and git (no rebuild), waits for Flux to run
+#     it on staging, and moves the tickets to On Staging. Outside the window it
+#     reports `deferred` and does nothing; the next hourly run promotes.
 #     Caller template: docs/RELEASE-TRAIN.md.
 #
 #   ready-for-prod (default, legacy until SIG-2773): composes TrainState from
@@ -19,8 +24,9 @@ name: Release Train (reusable)
 # The caller owns `on:` and `permissions:` — a reusable workflow can only
 # downgrade the permissions it is handed, never elevate them. Legacy callers
 # grant contents: write, pull-requests: read, checks: read; qa-passed callers
-# also grant actions: read (the build lookup reads main-push runs); prod's tag
-# is read with the read-only pipeline app (read_app_id).
+# also grant actions: read (the build lookup reads main-push runs) and
+# id-token: write (the promote job assumes the ECR role); prod's tag and the
+# Flux commits are read with the read-only pipeline app (read_app_id).
 
 on:
   workflow_call:
@@ -97,6 +103,56 @@ on:
         required: false
         type: string
         default: ''
+      services:
+        description: >-
+          qa-passed: JSON array of the ECR repositories main-push builds for
+          this repo (e.g. ["http","websocket"]), joined to ecr_repo_prefix.
+          Every one is re-tagged on Promotion.
+        required: false
+        type: string
+        default: '[]'
+      ecr_repo_prefix:
+        description: 'qa-passed: ECR repo prefix, no slashes (e.g. "signstream"). Empty for none.'
+        required: false
+        type: string
+        default: ''
+      aws_region:
+        description: 'qa-passed: region of the ECR registry.'
+        required: false
+        type: string
+        default: 'eu-west-2'
+      iam_role_arn:
+        description: 'qa-passed: role with ecr:BatchGetImage, DescribeImages and PutImage on `services`.'
+        required: false
+        type: string
+        default: ''
+      staging_watch_paths:
+        description: >-
+          qa-passed: newline- or comma-separated files in gitops_repo that Flux
+          image automation rewrites with this repo's staging tags, one per
+          service (e.g. workloads/stg/signstream-api/helmrelease-patch.yaml).
+        required: false
+        type: string
+        default: ''
+      staging_version_url:
+        description: >-
+          qa-passed, required for a Promotion: newline- or comma-separated
+          URLs, one per promoted service that has one, whose JSON body names
+          the version it runs. The Promotion waits until every URL reports
+          the release tag (or newer); there is no fixed-sleep fallback.
+        required: false
+        type: string
+        default: ''
+      staging_version_jq:
+        description: 'qa-passed: jq path to the version in staging_version_url''s body.'
+        required: false
+        type: string
+        default: '.version'
+      staging_deploy_timeout_minutes:
+        description: 'qa-passed: limit on waiting for staging to run the new tag.'
+        required: false
+        type: number
+        default: 20
       gitops_repo:
         description: 'qa-passed: repo holding the prod (and Flux) image tags.'
         required: false
@@ -106,6 +162,34 @@ on:
         required: false
         type: string
         default: 'main'
+      on_staging_state:
+        description: 'qa-passed: Linear column for tickets running on staging.'
+        required: false
+        type: string
+        default: 'On Staging'
+      on_staging_from:
+        description: >-
+          qa-passed: comma-separated columns a ticket may move to
+          on_staging_state from. A ticket anywhere else (already On Prod,
+          Rolling Out, Done or QA Failed) is not moved back.
+        required: false
+        type: string
+        default: 'On Dev · Ready for QA,Ready for QA,QA in Progress,Ready for Prod'
+      staging_passed_label:
+        description: 'qa-passed: label cleared from the tickets at each Promotion (set again by the staging tests).'
+        required: false
+        type: string
+        default: 'Staging Passed'
+      staging_failed_label:
+        description: 'qa-passed: label cleared from the tickets at each Promotion.'
+        required: false
+        type: string
+        default: 'Staging Failed'
+      hotfix_label:
+        description: 'qa-passed: Linear label that lets a Promotion run outside the deploy window.'
+        required: false
+        type: string
+        default: 'hotfix'
       linear_team_key:
         description: 'Linear team key, alphanumeric (e.g. SIG)'
         required: false
@@ -198,6 +282,27 @@ on:
       selection:
         description: 'qa-passed: full selection JSON (see actions/release-train/scripts/release-candidate.sh)'
         value: ${{ jobs.select.outputs.selection }}
+      promoted:
+        description: >-
+          qa-passed: 'true' once the Release Candidate is tagged, staging runs
+          it and its tickets are On Staging; 'false' otherwise (empty when
+          the promote job did not run: outcome none or already_promoted).
+        value: ${{ jobs.promote.outputs.promoted }}
+      deferred:
+        description: "qa-passed: 'true' when nothing was done: outside the deploy window, or superseded by a newer Promotion (promotion_decision says which)."
+        value: ${{ jobs.promote.outputs.deferred }}
+      version:
+        description: 'qa-passed: semver of the Promotion, no prefix (e.g. 1.2.45). Empty unless tagged.'
+        value: ${{ jobs.promote.outputs.version }}
+      release_tag:
+        description: 'qa-passed: the tag created in git and ECR (the version, with a v only if the repo uses one).'
+        value: ${{ jobs.promote.outputs.release_tag }}
+      image_digest:
+        description: 'qa-passed: JSON object, ECR repository -> digest the release tag names (same as the dev build).'
+        value: ${{ jobs.promote.outputs.image_digest }}
+      promotion_decision:
+        description: 'qa-passed: open | hotfix | deferred | superseded | resume (see promotion-plan.sh)'
+        value: ${{ jobs.promote.outputs.decision }}
 
 # No workflow-level `permissions:` on purpose: each job declares its own. The
 # select job declares none and inherits the caller's grant, because asking for
@@ -225,6 +330,8 @@ jobs:
       rc_sha: ${{ steps.select.outputs.rc_sha }}
       rc_image_tag: ${{ steps.select.outputs.rc_image_tag }}
       rc_tickets: ${{ steps.select.outputs.rc_tickets }}
+      rc_new_tickets: ${{ steps.select.outputs.rc_new_tickets }}
+      last_release_tag: ${{ steps.select.outputs.last_release_tag }}
       untracked_commits: ${{ steps.select.outputs.untracked_commits }}
       blocked_by: ${{ steps.select.outputs.blocked_by }}
       selection: ${{ steps.select.outputs.selection }}
@@ -319,6 +426,8 @@ jobs:
             echo "rc_sha=$(jq -r '.rc.sha // ""' <<< "$sel")"
             echo "rc_image_tag=$(jq -r '.rc.image_tag // ""' <<< "$sel")"
             echo "rc_tickets=$(jq -r '[.tickets[].id] | join(",")' <<< "$sel")"
+            echo "rc_new_tickets=$(jq -r '.new_tickets | join(",")' <<< "$sel")"
+            echo "last_release_tag=$(jq -r .last_release_tag <<< "$sel")"
             echo "untracked_commits=$(jq -c .untracked_commits <<< "$sel")"
             echo "blocked_by=$(jq -r '.blocked_by.id // ""' <<< "$sel")"
             echo "selection<<$eof"
@@ -328,6 +437,225 @@ jobs:
 
           "$GITHUB_WORKSPACE/_rw/actions/release-train/scripts/release-candidate-summary.sh" \
             <<< "$sel" >> "$GITHUB_STEP_SUMMARY"
+
+  # Staging Promotion (SIG-2764). Runs only for a freshly selected Release
+  # Candidate: `already_promoted` and `none` do nothing.
+  promote:
+    needs: select
+    if: needs.select.outputs.outcome == 'selected'
+    runs-on: ubuntu-latest
+    # Backstop only; staging-deploy-wait.sh enforces staging_deploy_timeout_minutes.
+    timeout-minutes: 90
+    # One Promotion per repo at a time, never cancelled midway (spec
+    # "Guardrails", AC5). The name must differ from the caller's workflow-level
+    # group (release-train-<repo> in the template), or this job would queue
+    # behind its own run forever. See docs/RELEASE-TRAIN.md "Concurrency".
+    concurrency:
+      group: promotion-${{ github.repository }}
+      cancel-in-progress: false
+    # No `permissions:` on purpose, like select: requesting id-token here would
+    # fail legacy callers at startup. The caller grants contents: write (git
+    # tag) and id-token: write (ECR role).
+    outputs:
+      decision: ${{ steps.plan.outputs.decision }}
+      deferred: ${{ steps.plan.outputs.deferred }}
+      version: ${{ steps.tag.outputs.version }}
+      release_tag: ${{ steps.tag.outputs.release_tag }}
+      image_digest: ${{ steps.tag.outputs.image_digest }}
+      promoted: ${{ steps.done.outputs.promoted || 'false' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_branch }}
+          fetch-depth: 0          # every release tag, for the next version
+          persist-credentials: false
+
+      - name: Fetch release-train scripts
+        uses: actions/checkout@v4
+        with:
+          repository: signapse/reusable-workflows
+          # Scripts from the same commit as this workflow, not mutable main. An
+          # empty workflow_sha would silently check out main, so fail instead.
+          ref: ${{ job.workflow_sha || 'job.workflow_sha-is-empty' }}
+          path: _rw
+          persist-credentials: false
+
+      - name: Check Promotion inputs
+        env:
+          SERVICES: ${{ inputs.services }}
+          IAM_ROLE_ARN: ${{ inputs.iam_role_arn }}
+          WATCH_PATHS: ${{ inputs.staging_watch_paths }}
+          VERSION_URL: ${{ inputs.staging_version_url }}
+          READ_APP_ID: ${{ inputs.read_app_id }}
+        run: |
+          set -euo pipefail
+          missing=()
+          jq -e 'type == "array" and length > 0' <<< "$SERVICES" > /dev/null 2>&1 || missing+=(services)
+          [ -n "$IAM_ROLE_ARN" ] || missing+=(iam_role_arn)
+          [ -n "$WATCH_PATHS" ] || missing+=(staging_watch_paths)
+          [ -n "$VERSION_URL" ] || missing+=(staging_version_url)
+          [ -n "$READ_APP_ID" ] || missing+=(read_app_id)
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::qa-passed Promotion needs these inputs: ${missing[*]} (see docs/RELEASE-TRAIN.md)"
+            exit 1
+          fi
+
+      # Read-only: deploy window and version. A deferred or superseded run stops here.
+      - name: Plan Promotion
+        id: plan
+        env:
+          RC_SHA: ${{ needs.select.outputs.rc_sha }}
+          RC_TICKETS: ${{ needs.select.outputs.rc_tickets }}
+          # Only tickets new since the last Promotion can make it a hotfix.
+          HOTFIX_TICKETS: ${{ needs.select.outputs.rc_new_tickets }}
+          # A queued run whose select is stale (another Promotion tagged since)
+          # is superseded, not promoted over the newer tag.
+          SEEN_RELEASE_TAG: ${{ needs.select.outputs.last_release_tag }}
+          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+          HOTFIX_LABEL: ${{ inputs.hotfix_label }}
+          RELEASE_TAG_PATTERN: ${{ inputs.release_tag_pattern }}
+        run: |
+          set -euo pipefail
+          plan=$("$GITHUB_WORKSPACE/_rw/actions/release-train/scripts/promotion-plan.sh" "$RC_SHA" "$RC_TICKETS")
+          decision=$(jq -r .decision <<< "$plan")
+          {
+            echo "decision=$decision"
+            # superseded does nothing either, like deferred.
+            echo "deferred=$(case "$decision" in deferred | superseded) echo true ;; *) echo false ;; esac)"
+            echo "tag=$(jq -r .tag <<< "$plan")"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "## Promotion to staging"
+            echo
+            case "$decision" in
+              deferred)
+                echo "**Deferred: outside the deploy window** ($(jq -r .local_time <<< "$plan"))."
+                echo "Nothing was tagged, deployed or moved. The train's hourly run promotes"
+                echo "the Release Candidate it selects then, from $(jq -r .next_open <<< "$plan")." ;;
+              superseded)
+                echo "**Superseded:** \`$(jq -r .newer_tag <<< "$plan")\` was promoted while this run waited, so this"
+                echo "Release Candidate may be older than staging. Nothing was tagged, deployed or moved;"
+                echo "the train's next run re-selects." ;;
+              hotfix) echo "Outside the deploy window ($(jq -r .local_time <<< "$plan")), going ahead: a ticket carries \`${HOTFIX_LABEL}\`." ;;
+              resume) echo "The Release Candidate already carries \`$(jq -r .tag <<< "$plan")\`: finishing an earlier attempt." ;;
+              *) echo "Inside the deploy window ($(jq -r .local_time <<< "$plan"))." ;;
+            esac
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # SIG-2765 adds the staging Terraform gate here, before anything is tagged.
+
+      - uses: aws-actions/configure-aws-credentials@v6
+        if: steps.plan.outputs.deferred == 'false'
+        with:
+          role-to-assume: ${{ inputs.iam_role_arn }}
+          aws-region: ${{ inputs.aws_region }}
+
+      # A staging verdict belongs to one tag. Clear the tickets' Staging
+      # Passed / Staging Failed before the new tag exists, so an earlier
+      # tag's pass can never vouch for this one if its staging tests never
+      # finish (prod resume checks these labels). Before the tag: a failure
+      # here leaves nothing promoted. Not on resume: the commit already
+      # carries the tag, so its labels were cleared before it, and a verdict
+      # staging set since then belongs to this tag.
+      - name: Clear earlier staging verdicts
+        if: steps.plan.outputs.deferred == 'false' && steps.plan.outputs.decision != 'resume'
+        env:
+          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+          RC_TICKETS: ${{ needs.select.outputs.rc_tickets }}
+          LABELS: ${{ inputs.staging_passed_label }},${{ inputs.staging_failed_label }}
+        run: |
+          set -euo pipefail
+          "$GITHUB_WORKSPACE/_rw/actions/release-train/scripts/ticket-labels-remove.sh" "$LABELS" "$RC_TICKETS"
+
+      - name: Tag the Release Candidate (ECR re-put, then git)
+        id: tag
+        if: steps.plan.outputs.deferred == 'false'
+        env:
+          RC_SHA: ${{ needs.select.outputs.rc_sha }}
+          RC_IMAGE_TAG: ${{ needs.select.outputs.rc_image_tag }}
+          TAG: ${{ steps.plan.outputs.tag }}
+          SERVICES: ${{ inputs.services }}
+          ECR_REPO_PREFIX: ${{ inputs.ecr_repo_prefix }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          res=$("$GITHUB_WORKSPACE/_rw/actions/release-train/scripts/promotion-tag.sh" "$RC_SHA" "$RC_IMAGE_TAG" "$TAG")
+          {
+            echo "release_tag=$TAG"
+            echo "version=${TAG#v}"
+            echo "image_digest=$(jq -c .digests <<< "$res")"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo
+            echo "\`${RC_IMAGE_TAG}\` re-tagged as \`${TAG}\` (no rebuild); git \`${TAG}\` -> \`${RC_SHA:0:12}\`."
+            echo
+            echo "| ECR repository | \`${RC_IMAGE_TAG:0:20}…\` digest | \`${TAG}\` digest |"
+            echo "|---|---|---|"
+            jq -r '.images[] | "| `\(.repository)` | `\(.source_digest)` | `\(.tag_digest)` |"' <<< "$res"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Split GitOps repo
+        id: gitops
+        if: steps.plan.outputs.deferred == 'false'
+        env:
+          GITOPS_REPO: ${{ inputs.gitops_repo }}
+        run: |
+          set -euo pipefail
+          echo "owner=${GITOPS_REPO%%/*}" >> "$GITHUB_OUTPUT"
+          echo "name=${GITOPS_REPO#*/}" >> "$GITHUB_OUTPUT"
+
+      - name: Mint read-only app token
+        id: app
+        if: steps.plan.outputs.deferred == 'false'
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ inputs.read_app_id }}
+          private-key: ${{ secrets.READ_APP_PRIVATE_KEY }}
+          owner: ${{ steps.gitops.outputs.owner }}
+          repositories: ${{ steps.gitops.outputs.name }}
+          permission-contents: read
+
+      - name: Wait for staging to run ${{ steps.plan.outputs.tag }}
+        if: steps.plan.outputs.deferred == 'false'
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          GITOPS_REPO: ${{ inputs.gitops_repo }}
+          GITOPS_REF: ${{ inputs.gitops_ref }}
+          WATCH_PATHS: ${{ inputs.staging_watch_paths }}
+          TAG: ${{ steps.plan.outputs.tag }}
+          VERSION_URL: ${{ inputs.staging_version_url }}
+          VERSION_JQ: ${{ inputs.staging_version_jq }}
+          TIMEOUT_MINUTES: ${{ inputs.staging_deploy_timeout_minutes }}
+        run: |
+          set -euo pipefail
+          export TIMEOUT_SECONDS=$((TIMEOUT_MINUTES * 60))
+          "$GITHUB_WORKSPACE/_rw/actions/release-train/scripts/staging-deploy-wait.sh"
+
+      - name: Move tickets to ${{ inputs.on_staging_state }}
+        if: steps.plan.outputs.deferred == 'false'
+        env:
+          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+          STATE: ${{ inputs.on_staging_state }}
+          RC_TICKETS: ${{ needs.select.outputs.rc_tickets }}
+          ALLOWED_FROM: ${{ inputs.on_staging_from }}
+          LINEAR_TEAM_KEY: ${{ inputs.linear_team_key }}
+          QA_FAILED_STATE: ${{ inputs.qa_failed_state }}
+        run: |
+          set -euo pipefail
+          status=0
+          res=$("$GITHUB_WORKSPACE/_rw/actions/release-train/scripts/promotion-tickets.sh" "$STATE" "$RC_TICKETS") || status=$?
+          {
+            echo
+            echo "Tickets to **${STATE}**:"
+            jq -r 'if length == 0 then "- none (untracked commits only)" else .[]
+              | "- \(.id): \(if .moved then "moved from \(.from)" elif .success then "not moved (\(.reason))" else "failed (\(.error // "unknown"))" end)" end' <<< "${res:-[]}"
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
+
+      - name: Promoted
+        id: done
+        if: steps.plan.outputs.deferred == 'false'
+        run: echo "promoted=true" >> "$GITHUB_OUTPUT"
 
   compose:
     if: inputs.selection_mode == 'ready-for-prod' && github.event_name != 'release'
