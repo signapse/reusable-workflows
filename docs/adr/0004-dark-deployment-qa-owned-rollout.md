@@ -1,6 +1,6 @@
 # Deployment and Rollout are separate events; only Feature tickets are flagged
 
-Production Deployments run with no human approval. A Feature ticket ships dark: its PostHog flag is on only for the QA Cohort, a PostHog cohort of internal test users. After reviewing in prod, the QA team starts the Rollout (10% → 50% → 100%, an hour apart, with a Sentry check before each step). The ticket then has a 24-hour Stability Window before Done.
+Production Deployments need no action from QA. A Prod approver approves the prod jobs (ADR 0002), and a Feature ticket ships dark: its PostHog flag is on only for the QA Cohort, a PostHog cohort of internal test users. After reviewing in prod, the QA team starts the Rollout (10% → 50% → 100%, an hour apart, with a Sentry check before each step). The ticket then has a 24-hour Stability Window before Done.
 
 Bug and Improvement tickets have no flag. They go live on Deployment, and if their Stability Window fails they are fixed forward. Rolling back the Deployment would also pull every other ticket in it.
 
@@ -8,19 +8,9 @@ We rejected flagging every ticket, because fixes, backend behaviour changes, mig
 
 ## Consequences
 
-- ~~One PostHog project for all environments. Flags target an `environment` property and the account group.~~ Superseded on 2026-11-09, see below: two PostHog projects, and flags target users (PostHog persons).
-- Prodzilla creates each flag (`sig-<n>-<slug>`) when a Feature ticket moves to In Progress, and opens a removal ticket when it reaches Done.
-- Sentry events carry the active flags, so the Stability Window compares flag-on with flag-off error rates. Services without Sentry tracing fall back to "no new issues tagged with the flag".
+- Two PostHog projects, SignStream Production and SignStream Dev. Prodzilla creates each flag (`sig-<n>-<slug>`) with the same key in both when a Feature ticket moves to In Progress: on for everyone in dev; in prod, on for the QA Cohort and for the `environment` property's dev and staging, and at the Rollout percentage for prod. Rollout steps, pause, abort, the Sentry check and every flag guard act on the prod flag only. Prodzilla opens a removal ticket when the ticket reaches Done, and removal acts on both projects. Project ids, config names and thresholds are in the Prodzilla event router's README.
+- Flags target users (PostHog persons), not customer accounts. During a partial Rollout two users of one customer can see different behaviour.
+- Sentry events carry the active flags, so the Stability Window compares flag-on with flag-off error rates. Services without Sentry tracing fall back to "no new issues tagged with the flag". A Feature ticket whose service sends no flag data is never moved to Done automatically: it stays in Rolling Out and Prodzilla asks the Releasers in the releases Slack channel to confirm.
+- Each Deployment is recorded as a Linear Release and a Sentry release under one version, `<repo>@<tag>` (such as `sign-stream-api@1.4.0`), where `<tag>` is the Release Candidate's semver tag. The repo prefix is there because several repos share a product pipeline and Sentry release versions are org-wide.
+- A failed Deployment raises an incident.io incident with Cause = Deployment: P3 (Minor) when the automatic rollback restored prod, P2 (Major) when it failed. A Linear Release moves to Rolled back only when prod's image is rolled back. `/rollout-abort` turns the flag off; the code stays dark-deployed, the Release is unchanged and the ticket goes back to On Prod.
 - dora-metrics must be rewritten to count Deployments from prod deploy events instead of tickets reaching Done.
-
-## Decisions 2026-11-09
-
-- **Two PostHog projects** (Decision 10, Alex): `SignStream Production` (256388) and `SignStream Dev` (275880). Prodzilla creates each `sig-<n>-<slug>` flag with the same key in both. In the dev project it is on for everyone. In the prod project it keeps the standard template: `environment` dev or staging at 100%, the QA Cohort at 100%, `environment` prod at the Rollout percentage. Rollout steps, pause, abort, the Sentry check and every flag guard act on the prod project's flag only; removal acts on both. The `environment` property stays. Config: `posthog_project_id_prod`, `posthog_project_id_dev`, `qa_cohort_id` (a prod-project cohort).
-- **Flags target users** (PostHog persons), not customer accounts (Decision 9). During a partial Rollout two users of one customer can see different behaviour.
-- **Rollout and Stability Window thresholds** (Decision 5), to tune after the pilot: a Rollout step stops when the flag-on error rate is both above 1.5x the flag-off baseline and at least 1 percentage point above it, judged only once there are at least 200 transactions. An unflagged ticket's Stability Window fails on a new issue with at least 5 events or at least 2 users (either is enough).
-- **No flag data** (Decision 4): a Feature ticket whose service sends no flag data to Sentry is not moved to Done automatically. Prodzilla posts in the stability Slack channel (the releases channel the existing release pipelines post to, Decision 15), mentioning the Releasers, and asks one to confirm. The ticket stays in Rolling Out after the Stability Window; Prodzilla does not move it (Decision 32).
-- **Failed Deployments raise an incident.io incident** with Cause = Deployment (Decision 3): an automatic rollback that restored prod is P3 (Minor); a failed rollback is P2 (Major).
-- The deploy window gates Promotion only; Rollout steps are not window-gated (Decision 1).
-- **Prod approval** (Decisions 19 and 30): prod Terraform applies (`prod-apply` environment) and k8s prod deploys (`prod` environment) run in GitHub environments whose required reviewers are the GitHub team `prod-approvers`, the Prod approvers. They are not the Releasers, who own the Slack Rollout commands. This changes "Production Deployments run with no human approval" above: a Prod approver approves the prod jobs, and QA still does not have to act for a Deployment to happen.
-- **Automatic rollback is never held** (Decision 31): signapse-core-k8s `rollback.yml` runs prod rollbacks in the `prod-rollback` environment, which has no required reviewers.
-- **Rolled back means the image**: a Linear Release moves to Rolled back only when prod's image is actually rolled back. A `/rollout-abort` turns the flag off; the code stays dark-deployed, the Release is unchanged and the ticket goes back to On Prod.
