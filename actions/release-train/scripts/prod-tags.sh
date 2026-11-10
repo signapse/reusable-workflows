@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# prod-tags.sh
+# prod-tags.sh [<release-tag>]
 #
 # Read-only: which image tag each service runs in prod, read from
 # signapse-core-k8s the same way deploy-prod.yml picks the file it edits
@@ -7,21 +7,36 @@
 #   shared   workloads/prod-common/<svc>/image-tag-patch.yaml, when it exists
 #            and workloads/prod-us/<svc> does too (EU + US from one tag)
 #   EU-only  workloads/prod/<svc>/helmrelease-patch.yaml
-# The tag is .spec.values.image.tag (selection-base.sh, SIG-2761).
+# The tag is .spec.values.image.tag. Without <release-tag> only current_tag is
+# meaningful (selection-base.sh, SIG-2761). The file's commit history also says:
+#   rolled_back        prod ran <release-tag> on this service and no longer
+#                      does: rollback.yml replaced it (a "Rolled-back-from:
+#                      <release-tag>" trailer), or someone deployed another
+#                      tag over it by hand with deploy-prod.yml (a
+#                      "deploy(prod): <svc> → <release-tag>" commit while the
+#                      file now names another tag). The train must never
+#                      deploy that tag again by itself. The whole history of
+#                      the file is read, not its first page.
+#   deployed_previous  the "Previous:" line of deploy-prod's latest
+#                      "deploy(prod): <svc> → <release-tag>" commit, i.e. what
+#                      ran before this tag. Recovers the previous tag on a
+#                      re-run after the deploy already happened (SIG-2771
+#                      needs it for the rollback).
 #
 # Env:
 #   PROD_SERVICES  JSON array of deploy-prod.yml service names (required)
 #   GITOPS_REPO    default signapse/signapse-core-k8s
 #   GITOPS_REF     default main
 #   GH_TOKEN       contents:read on GITOPS_REPO (the read-only pipeline app)
-# Stdout: [{service, path, current_tag}]
+# Stdout: [{service, path, current_tag, on_tag, rolled_back, deployed_previous}]
 # Exits 1 when a service has no prod patch file or the API fails: a guess
 # here could deploy over, or skip, a service.
 
 # shellcheck source=SCRIPTDIR/../lib/common.sh
 source "$(dirname "$0")/../lib/common.sh"
 
-[ $# -eq 0 ] || die "usage: prod-tags.sh"
+[ $# -le 1 ] || die "usage: prod-tags.sh [<release-tag>]"
+TAG="${1:-}"
 need gh
 need jq
 need yq
@@ -60,7 +75,25 @@ while IFS= read -r svc; do
     || die "${path} is not valid YAML"
   [ -n "$current" ] && [ "$current" != null ] || die "${path} has no .spec.values.image.tag"
 
-  out=$(jq -c --argjson a "$out" --arg s "$svc" --arg p "$path" --arg c "$current" \
-    '$a + [{service: $s, path: $p, current_tag: $c}]' <<< 'null')
+  if [ -z "$TAG" ]; then
+    # current_tag is all selection-base.sh needs; skip the history.
+    out=$(jq -c --argjson a "$out" --arg s "$svc" --arg p "$path" --arg c "$current" \
+      '$a + [{service: $s, path: $p, current_tag: $c, on_tag: false, rolled_back: false, deployed_previous: ""}]' <<< 'null')
+    continue
+  fi
+  hist=$(gh api --paginate "repos/${GITOPS_REPO}/commits?sha=${GITOPS_REF}&path=${path}&per_page=100" 2> "$work/err") \
+    || die "reading the history of ${path} failed: $(cat "$work/err")"
+  # --paginate prints one array per page; -s joins them.
+  # shellcheck disable=SC2016 # jq bindings, not shell expansion.
+  facts=$(jq -sc --arg t "$TAG" --arg s "$svc" --arg c "$current" '
+    [.[][]?.commit.message | split("\n") | map(sub("^\\s+"; "") | sub("\\s+$"; ""))] as $msgs
+    | {rolled_back: ($t != "" and (any($msgs[][]; . == "Rolled-back-from: " + $t)
+                     or ($c != $t and any($msgs[]; .[0] == "deploy(prod): \($s) → \($t)")))),
+       deployed_previous: (first($msgs[] | select(.[0] == "deploy(prod): \($s) → \($t)")
+                                 | .[] | select(startswith("Previous:")) | sub("^Previous:\\s*"; "")) // "")}' \
+    <<< "$hist") || die "unexpected commit list for ${path}"
+
+  out=$(jq -c --argjson a "$out" --argjson f "$facts" --arg s "$svc" --arg p "$path" --arg c "$current" --arg t "$TAG" \
+    '$a + [{service: $s, path: $p, current_tag: $c, on_tag: ($t != "" and $c == $t)} + $f]' <<< 'null')
 done <<< "$services"
 echo "$out"

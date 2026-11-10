@@ -401,6 +401,9 @@ a_then_b() {
   run select_rc 1.0.0
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.outcome == "selected" and [.tickets[].id] == ["SIG-1","SIG-2"]' > /dev/null
+  # The newest build that already carries a release tag is what prod may resume.
+  echo "$output" | jq -e --arg a "$(sha_of "feat(SIG-1): A")" \
+    '.staged == {sha: $a, image_tag: "main-11-\($a)", release_tag: "1.0.1", tickets: ["SIG-1"]}' > /dev/null
 }
 
 @test "new_tickets: only the tickets since the last Promotion (staging's tag), for the hotfix check" {
@@ -423,7 +426,7 @@ a_then_b() {
   run select_rc 1.0.0
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.outcome == "already_promoted" and .rc.release_tag == "1.0.1"' > /dev/null
-  echo "$output" | jq -e '.blocked_by.id == "SIG-2"' > /dev/null
+  echo "$output" | jq -e '.staged.release_tag == "1.0.1" and .blocked_by.id == "SIG-2"' > /dev/null
 }
 
 @test "a base that is not on the branch is an error" {
