@@ -34,7 +34,7 @@ on:
         type: boolean
         default: false
       jscpd-threshold:
-        description: "JSCPD duplication threshold percentage (0-100). Set to 0 to use repo .jscpd.json or jscpd default"
+        description: "JSCPD duplication threshold percentage (0-100). Set to 0 to use the repo's .github/linters/.jscpd.json, or Super-Linter's default (0%)"
         required: false
         type: number
         default: 0
@@ -79,14 +79,22 @@ jobs:
 
       - name: Set JSCPD threshold
         if: ${{ inputs.jscpd-threshold > 0 && !inputs.disable-jscpd }}
+        env:
+          THRESHOLD: ${{ inputs.jscpd-threshold }}
         run: |
-          if [ ! -f .jscpd.json ]; then
-            echo '{"threshold": ${{ inputs.jscpd-threshold }}}' > .jscpd.json
-          else
-            # Update threshold in existing config
-            tmp=$(mktemp)
-            jq '.threshold = ${{ inputs.jscpd-threshold }}' .jscpd.json > "$tmp" && mv "$tmp" .jscpd.json
+          # Super-Linter reads jscpd's config only from LINTER_RULES_PATH (where
+          # "." and "/" both mean the repo root), and without one there it uses
+          # its built-in default, whose threshold is 0.
+          rules="${LINTER_RULES_PATH:-.github/linters}"
+          [ "$rules" = "/" ] && rules=.
+          config="$rules/${JSCPD_CONFIG_FILE:-.jscpd.json}"
+          if [ ! -f "$config" ]; then
+            mkdir -p "$(dirname "$config")"
+            # Super-Linter v7's built-in default, so only the threshold differs.
+            echo '{"reporters": ["consoleFull"], "ignore": ["**/__snapshots__/**", "**/node_modules/**"], "absolute": true}' > "$config"
           fi
+          tmp=$(mktemp)
+          jq --argjson t "$THRESHOLD" '.threshold = $t' "$config" > "$tmp" && mv "$tmp" "$config"
 
       - name: Run Super-Linter
         uses: super-linter/super-linter@12150456a73e248bdc94d0794898f94e23127c88 # v7
