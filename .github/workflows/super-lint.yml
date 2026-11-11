@@ -82,10 +82,12 @@ jobs:
         env:
           THRESHOLD: ${{ inputs.jscpd-threshold }}
         run: |
-          # Super-Linter reads jscpd's config only from its rules directory,
-          # never the repo root, and without one there it uses its built-in
-          # default, whose threshold is 0.
-          config="${LINTER_RULES_PATH:-.github/linters}/${JSCPD_FILE_NAME:-.jscpd.json}"
+          # Super-Linter reads jscpd's config only from LINTER_RULES_PATH (where
+          # "." and "/" both mean the repo root), and without one there it uses
+          # its built-in default, whose threshold is 0.
+          rules="${LINTER_RULES_PATH:-.github/linters}"
+          [ "$rules" = "/" ] && rules=.
+          config="$rules/${JSCPD_CONFIG_FILE:-.jscpd.json}"
           if [ ! -f "$config" ]; then
             mkdir -p "$(dirname "$config")"
             # Super-Linter v7's built-in default, so only the threshold differs.
