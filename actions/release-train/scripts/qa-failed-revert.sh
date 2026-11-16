@@ -23,10 +23,12 @@
 #      time it entered the state is the newest issue-history entry moving it
 #      there. It is due once that is at least THRESHOLD_HOURS ago.
 #   3. Dedupe: skip when an open PR from prodzilla/revert-<ticket> exists (and
-#      post the PR link on the ticket if an earlier run failed to), or the
-#      branch exists on the remote (quietly when its PR was merged and every
-#      commit of the ticket is reverted: the ticket waits in QA Failed for the
-#      fix).
+#      post the PR link on the ticket if an earlier run failed to). A merged
+#      PR from that branch covers the ticket's commits up to its merge commit,
+#      branch deleted or not and conflicts resolved by hand or not: quiet
+#      while no later commit of the ticket is unreverted (the ticket waits in
+#      QA Failed for the fix). Otherwise skip, with a warning, while the
+#      branch exists on the remote.
 #   4. On branch prodzilla/revert-<ticket> from <head-ref>, git revert the
 #      ticket's commits newest first (merge commits with -m 1). A commit is
 #      skipped as already reverted when a later revert of it is still live
@@ -133,7 +135,7 @@ merged_prs() {
 }
 
 # --- 1. Walk the commits since the walk base -------------------------------
-commits='[]'
+entries=()
 while IFS= read -r sha; do
   [ -z "$sha" ] && continue
   subject=$(git log -1 --format=%s "$sha")
@@ -147,11 +149,14 @@ while IFS= read -r sha; do
   # with the ticket's older commits leaves the ticket's code removed.
   revert=false
   [ "$(jq -r --arg s "$sha" '.[$s].kind // "normal"' <<< "$units")" = revert ] && revert=true
-  commits=$(jq -nc --argjson a "$commits" --arg sha "$sha" --arg s "$subject" \
+  entries+=("$(jq -nc --arg sha "$sha" --arg s "$subject" \
     --argjson merge "$([ "$parents" -gt 1 ] && echo true || echo false)" \
     --argjson revert "$revert" --argjson t "$refs" \
-    '$a + [{sha: $sha, subject: $s, merge: $merge, revert: $revert, tickets: $t}]')
+    '{sha: $sha, subject: $s, merge: $merge, revert: $revert, tickets: $t}')")
 done < <(git rev-list --first-parent --reverse "${LAST_TAG}..${head_sha}")
+# Built once: a growing array passed to jq as an argument is quadratic and hits
+# the 128 KiB single-argument limit after a few hundred commits.
+commits=$(printf '%s\n' "${entries[@]+"${entries[@]}"}" | jq -sc 'map(select(. != null))')
 
 ticket_ids=$(printf '%s' "$commits" | jq -r '[.[] | select(.revert | not) | .tickets[]] | unique | .[]')
 
@@ -232,6 +237,11 @@ failed=0
 repo_url="${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY}"
 threshold_s=$(awk -v h="$THRESHOLD_HOURS" 'BEGIN { printf "%d", h * 3600 }')
 
+# open_pr_url <branch>: URL of the open PR from <branch>, or "".
+open_pr_url() {
+  gh pr list --repo "$GITHUB_REPOSITORY" --head "$1" --state open --json url --jq '.[0].url // ""'
+}
+
 # Restore a clean, detached checkout whatever state a revert left behind.
 reset_checkout() {
   git revert --abort > /dev/null 2>&1 || git revert --quit > /dev/null 2>&1 || true
@@ -284,8 +294,7 @@ while IFS= read -r id <&3; do
     continue
   fi
 
-  existing=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$br" --state open --json url --jq '.[0].url // ""') \
-    || die "cannot list PRs for $br"
+  existing=$(open_pr_url "$br") || die "cannot list PRs for $br"
   if [ -n "$existing" ]; then
     log "$id: revert PR already open: $existing"
     set_r --arg u "$existing" '.action = "open_pr_exists" | .pr_url = $u'
@@ -305,21 +314,29 @@ while IFS= read -r id <&3; do
     finish
     continue
   fi
+  # A merged revert PR covers the ticket's commits up to its own merge commit,
+  # whether or not its branch was deleted and however its conflicts were
+  # resolved by hand (lib/revert.sh cannot prove such a revert). Commits after
+  # it are new work, a re-land.
+  merged_prs=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$br" --state merged --json url,mergeCommit \
+    --jq '[.[] | {url, oid: (.mergeCommit.oid // "")}]') || die "cannot list PRs for $br"
+  merged=$(printf '%s' "$merged_prs" | jq -r '.[0].url // ""')
+  covered=$(jq -nr --argjson c "$commits" --argjson m "$merged_prs" \
+    '[$m[].oid as $o | ($c | map(.sha) | index($o)) | select(. != null)] | max // -1')
+  open_commits=$(printf '%s' "$commits" | jq -c --argjson n "$covered" '.[$n + 1:]')
+  # Quiet only while the merged revert still covers the ticket: a commit of
+  # it that is not reverted (a re-landed fix that failed QA again) needs a
+  # new revert.
+  left=$(printf '%s' "$open_commits" | jq -r --arg id "$id" --argjson u "$units" \
+    '[.[] | select((.revert | not) and (.tickets | index($id)) and ($u[.sha].kind // "normal") != "reverted")] | length')
+  if [ -n "$merged" ] && [ "$left" -eq 0 ]; then
+    log "$id: revert PR merged: $merged"
+    set_r --arg u "$merged" '.action = "merged" | .pr_url = $u'
+    finish
+    continue
+  fi
   remote_branch=$(git ls-remote --heads "$REMOTE" "refs/heads/$br") || die "cannot list $REMOTE branches"
   if [ -n "$remote_branch" ]; then
-    merged=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$br" --state merged --json url --jq '.[0].url // ""') \
-      || die "cannot list PRs for $br"
-    # Quiet only while the merged revert still covers the ticket: a commit of
-    # it that is not reverted (a re-landed fix that failed QA again) needs a
-    # new revert, so warn as for any other kept branch.
-    left=$(printf '%s' "$commits" | jq -r --arg id "$id" --argjson u "$units" \
-      '[.[] | select((.revert | not) and (.tickets | index($id)) and ($u[.sha].kind // "normal") != "reverted")] | length')
-    if [ -n "$merged" ] && [ "$left" -eq 0 ]; then
-      log "$id: revert PR merged: $merged"
-      set_r --arg u "$merged" '.action = "merged" | .pr_url = $u'
-      finish
-      continue
-    fi
     log "WARNING: $id: branch $br exists with no open PR; open one from it or delete it to let Prodzilla retry"
     set_r '.action = "branch_exists"'
     finish
@@ -327,7 +344,7 @@ while IFS= read -r id <&3; do
   fi
 
   # Newest first, so each revert applies on top of everything after it.
-  mine=$(printf '%s' "$commits" | jq -c --arg id "$id" \
+  mine=$(printf '%s' "$open_commits" | jq -c --arg id "$id" \
     '[.[] | select((.revert | not) and (.tickets | index($id)))] | reverse')
   set_r --argjson m "$mine" --arg id "$id" '.shared_with = ([$m[].tickets[] | select(. != $id)] | unique)'
 
@@ -424,12 +441,25 @@ while IFS= read -r id <&3; do
   draft=()
   [ "$conflict" != null ] && draft=(--draft)
 
+  opened=false
   if ! git push -q "$REMOTE" "HEAD:refs/heads/$br"; then
     log "ERROR: $id: push of $br failed"
     set_r '.action = "failed" | .error = "push failed"'
     failed=1
-  elif ! pr_url=$(gh pr create --repo "$GITHUB_REPOSITORY" --base "$BRANCH" --head "$br" \
+  elif pr_url=$(gh pr create --repo "$GITHUB_REPOSITORY" --base "$BRANCH" --head "$br" \
       --title "$pr_title" --body "$body" "${draft[@]+"${draft[@]}"}"); then
+    opened=true
+  elif ! found=$(open_pr_url "$br"); then
+    # gh can fail after GitHub created the PR, and deleting the branch would
+    # close it: with no answer, keep the branch (the next run reports it).
+    log "ERROR: $id: gh pr create failed and the PR list could not be read; kept branch $br"
+    set_r '.action = "failed" | .error = "PR creation failed; could not check for the PR, branch kept"'
+    failed=1
+  elif [ -n "$found" ]; then
+    log "WARNING: $id: gh pr create failed but $found is open; carrying on with it"
+    pr_url="$found"
+    opened=true
+  else
     # A kept branch would dedupe every later run into branch_exists and the
     # ticket would never get its PR or comment: delete it so the next run
     # retries.
@@ -441,7 +471,8 @@ while IFS= read -r id <&3; do
       set_r '.action = "failed" | .error = "PR creation failed; branch pushed without a PR (delete it by hand)"'
     fi
     failed=1
-  else
+  fi
+  if [ "$opened" = true ]; then
     pr_url=$(printf '%s' "$pr_url" | tail -n 1)
     log "$id: opened $pr_url"
     if [ "$conflict" = null ]; then

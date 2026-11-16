@@ -5,7 +5,7 @@
 #   $TMP/linear.json   id -> issue node (state, history)
 #   $TMP/prs.json      commit subject -> [{title, head}] merged PRs
 #   $TMP/open-prs      branch names that have an open PR
-#   $TMP/merged-prs    branch names whose PR was merged
+#   $TMP/merged-prs    branch names whose PR was merged (merged-oid: its merge commit)
 #   $TMP/pr-create-N   args of the Nth `gh pr create` (one per line)
 #   $TMP/comments      Linear commentCreate variables, one JSON per line
 #   $TMP/slack         Slack chat.postMessage bodies, one JSON per line
@@ -79,16 +79,24 @@ case "$1 $2" in
   "pr list")
     head=""; st=""; prev=""
     for a in "$@"; do [ "$prev" = --head ] && head="$a"; [ "$prev" = --state ] && st="$a"; prev="$a"; done
+    filter=".[0].url // \"\""
+    prev=""; for a in "$@"; do [ "$prev" = --jq ] && filter="$a"; prev="$a"; done
+    [ -f "$TMP/gh-list-down" ] && { echo "gh: boom" >&2; exit 1; }
+    oid=""; [ -f "$TMP/merged-oid" ] && oid=$(cat "$TMP/merged-oid")
     if grep -qxF "$head" "$TMP/$st-prs"; then
-      echo "https://github.com/o/r/pull/99"
+      jq -r "$filter" <<< "[{\"url\": \"https://github.com/o/r/pull/99\", \"mergeCommit\": {\"oid\": \"$oid\"}}]"
     else
-      echo ""
+      jq -r "$filter" <<< "[]"
     fi
     ;;
   "pr create")
     [ -f "$TMP/gh-create-down" ] && { echo "gh: boom" >&2; exit 1; }
     n=$(( $(ls "$TMP" | grep -c '^pr-create-' || true) + 1 ))
     printf '%s\n' "$@" > "$TMP/pr-create-$n"
+    # The PR was created but the CLI never got the reply.
+    [ -f "$TMP/gh-create-lost-reply" ] && { grep -o -- '--head [^ ]*' <<< "$*" | cut -d' ' -f2 >> "$TMP/open-prs"; echo "gh: connection reset" >&2; exit 1; }
+    # The create fails, and so does every list after it.
+    [ -f "$TMP/gh-create-then-list-down" ] && { touch "$TMP/gh-list-down"; echo "gh: boom" >&2; exit 1; }
     echo "https://github.com/o/r/pull/$n"
     ;;
   *) echo "gh stub: unhandled $*" >&2; exit 1 ;;
@@ -557,4 +565,56 @@ EOF
   git checkout -q "$(git --git-dir="$TMP/origin.git" rev-parse prodzilla/revert-SIG-1)"
   [ "$(git show 1.0.0:f)" = "$(cat f)" ]
   [ ! -e g ]
+}
+
+@test "a merged revert whose conflicts were resolved by hand, branch deleted, is not reverted again" {
+  change f "one-a" "feat(SIG-1): A"
+  ticket SIG-1 "QA Failed" 25
+  # The revert PR was finished by hand, so lib/revert.sh cannot prove it a revert:
+  # it carries extra code next to the revert.
+  git revert --no-edit HEAD > /dev/null
+  printf 'extra\n' > g
+  git add g
+  git commit -q --amend -m "Revert SIG-1: t SIG-1" -m "This reverts commit $(sha_of "feat(SIG-1): A")."
+  git rev-parse HEAD > "$TMP/merged-oid"
+  echo "prodzilla/revert-SIG-1" > "$TMP/merged-prs"
+  run run_revert
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.tickets[0] | .action == "merged" and .pr_url == "https://github.com/o/r/pull/99"' > /dev/null
+  [ "$(created)" -eq 0 ]
+  # A fix that re-lands after the merged revert and fails QA again is reverted.
+  change h "h1" "feat(SIG-1): fix"
+  run run_revert
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.tickets[0] | .action == "opened" and ([.reverted[].subject] == ["feat(SIG-1): fix"])' > /dev/null
+}
+
+@test "PR creation that fails after GitHub created the PR keeps the branch and links the PR" {
+  change f "one-a" "feat(SIG-1): A"
+  ticket SIG-1 "QA Failed" 25
+  touch "$TMP/gh-create-lost-reply"
+  run run_revert
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.tickets[0] | .action == "opened" and .pr_url == "https://github.com/o/r/pull/99"' > /dev/null
+  [ -n "$(git --git-dir="$TMP/origin.git" branch --list 'prodzilla/revert-SIG-1')" ]
+  [ "$(jq -s 'length' "$TMP/comments")" -eq 1 ]
+}
+
+@test "PR creation fails and the PR list cannot be read -> the branch is kept" {
+  change f "one-a" "feat(SIG-1): A"
+  ticket SIG-1 "QA Failed" 25
+  touch "$TMP/gh-create-then-list-down"
+  run run_revert
+  [ "$status" -eq 1 ]
+  echo "$output" | jq -e '.tickets[0].error | test("branch kept")' > /dev/null
+  [ -n "$(git --git-dir="$TMP/origin.git" branch --list 'prodzilla/revert-SIG-1')" ]
+}
+
+@test "a long walk does not pass the commit list to jq as an argument" {
+  for i in $(seq 1 700); do git commit -q --allow-empty -m "chore: filler $i padding padding padding padding padding padding padding padding padding"; done
+  change f "one-a" "feat(SIG-1): A"
+  ticket SIG-1 "QA Failed" 25
+  run run_revert
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.tickets[0].action == "opened"' > /dev/null
 }

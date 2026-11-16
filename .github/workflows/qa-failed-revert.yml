@@ -95,6 +95,9 @@ on:
 jobs:
   revert:
     runs-on: ubuntu-latest
+    # One hung call would otherwise hold the concurrency group for the default
+    # six hours, and every later hourly run queues behind it.
+    timeout-minutes: 20
     permissions:
       contents: read
     # Two overlapping runs could both pass the dedupe check; the second push to

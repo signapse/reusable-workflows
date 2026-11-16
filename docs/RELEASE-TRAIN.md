@@ -252,10 +252,12 @@ How it decides (details in `actions/release-train/scripts/qa-failed-revert.sh`):
   commits not attempted, and how to finish. A
   comment goes on the ticket, and a Slack alert goes to `slack_channel` if it
   is set. The branch dedupes later runs, so each of those is sent once.
-- **Failures are loud.** Linear or GitHub read errors fail the run before
-  anything is opened. A failed push, PR, comment or alert fails the run after
-  the other tickets are handled, and is named in the job summary. When the PR
-  cannot be opened, the pushed branch is deleted so the next run retries.
+- **Failures are loud.** A Linear or GitHub read error stops the run at the
+  ticket being read: tickets handled before it may already have their PRs, and
+  the job summary is empty, so check the run log. A failed push, PR, comment or
+  alert fails the run after the other tickets are handled, and is named in the
+  job summary. When the PR cannot be opened, the pushed branch is deleted so
+  the next run retries (unless an open PR from it is found, which is kept).
 
 ### Caller template (`.github/workflows/qa-failed-revert.yml` in the product repo)
 
