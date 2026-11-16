@@ -243,7 +243,11 @@ How it decides (details in `actions/release-train/scripts/qa-failed-revert.sh`):
 - **Once per ticket.** No PR is opened while an open PR from
   `prodzilla/revert-<ticket>` exists, or while that branch exists. With an open
   PR, the run still posts the PR link on the ticket if an earlier run failed
-  to. A branch whose PR was merged is reported quietly as `merged`. If the
+  to. A merged revert PR covers the ticket's commits merged before it was opened,
+  and is reported quietly as `merged`, branch deleted or not. A commit that
+  landed while it was open, or later, is reverted by a new PR. If the PR was
+  finished by hand, selection cannot prove it a revert and may still block on
+  the ticket; the run warns. If the
   branch is left without an open or merged PR, the run summary warns; reopen
   the PR or delete the branch.
 - **Conflict.** The revert stops at the conflicting commit. The newer commits
