@@ -4,6 +4,9 @@
 # Reads commits in the range, plus optional PR body on stdin. Emits a JSON
 # array of <TEAM>-\d+ refs, uppercase, sorted numerically, deduped.
 #
+# A ref must end at a non-alphanumeric character: SIG-123abc is not SIG-123,
+# while a branch such as sig-7-fix-header still yields SIG-7.
+#
 # LINEAR_TEAM_KEY selects the team prefix (default SIG). Alphanumeric only —
 # the numeric sort splits on '-'.
 
@@ -30,7 +33,8 @@ if [ ! -t 0 ]; then
 fi
 
 printf '%s\n%s\n' "$commits" "$pr_body" \
-  | (grep -oiE "${TEAM_KEY}-[0-9]+" || true) \
+  | (grep -oiE "${TEAM_KEY}-[0-9]+[A-Za-z0-9]*" || true) \
+  | (grep -iE "^${TEAM_KEY}-[0-9]+$" || true) \
   | tr '[:lower:]' '[:upper:]' \
   | awk -F- '!seen[$0]++ { print $2, $0 }' \
   | sort -n -k1,1 \

@@ -82,3 +82,10 @@ teardown() { rm -rf "$TMP"; }
   [ "$status" -ne 0 ]
   [[ "$output" == *"alphanumeric"* ]]
 }
+
+@test "a ref must end at a non-alphanumeric; branch names still match" {
+  git commit -q --allow-empty -m "chore: SIG-123abc is a fixture name"
+  run "$SCRIPT" HEAD~1 HEAD <<< "alex/sig-7-fix-header"
+  [ "$status" -eq 0 ]
+  [ "$output" = '["SIG-7"]' ]
+}
