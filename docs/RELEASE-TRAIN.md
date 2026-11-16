@@ -130,14 +130,20 @@ The `promote` job runs after `select` when `outcome` is `selected`:
      Flux's staging ImagePolicy deploys the highest semver tag. The new tag
      keeps the repo's prefix: bare (`1.2.45`) for every Signapse repo today,
      which some staging ImagePolicies require.
-2. **Terraform gate** (SIG-2765, not yet): slots in here, before any tag.
+2. **Terraform gate** (SIG-2765, `actions/terraform-gate`): plans and
+   applies the product's `stg` stack in signapse-core-terraform and checks
+   that every ticket's merged Terraform PRs are applied in `stg`. A destroy
+   or replace of a stateful resource, a failed run or an unapplied PR alerts
+   Slack and fails the job here,
+   before any tag. Skipped on `resume`. See [Terraform gate](#terraform-gate).
 3. **Clear staging verdicts** (`ticket-labels-remove.sh`): every ticket in
    `rc_tickets` loses `Staging Passed` and `Staging Failed`. A staging
    verdict belongs to one tag; without this, a ticket that passed staging in
    an earlier tag would still look passed if this tag's staging tests never
    finished, and prod's resume mode would deploy an untested build. Runs
-   before the tag, so a Linear failure here leaves nothing promoted. Skipped
-   on `resume`: the tag already exists, so any verdict is this tag's.
+   after the gate and before the tag, so a Linear failure here leaves nothing
+   promoted. Skipped on `resume`: the tag already exists, so any verdict is
+   this tag's.
 4. **Tag** (`promotion-tag.sh`): for each repository in `services`,
    `ecr-retag.sh` re-puts the Release Candidate's manifest
    (`main-<n>-<sha>`) under the release tag. No rebuild: the bytes are the
@@ -169,6 +175,91 @@ The `promote` job runs after `select` when `outcome` is `selected`:
    stays where it is. The Ticket Transitioner never moves a ticket out of
    `QA Failed` or `Done` (ADR 0001: only QA takes a ticket out of QA Failed),
    and works on the team `linear_team_key`.
+
+## Terraform gate
+
+Terraform must pass before every Promotion (ADR 0002). The composite action
+`actions/terraform-gate` does it in four steps, all stateless:
+
+1. **Product.** Read `product:` from the repo's `.signapse/pipeline.yml`
+   (`pipeline-config.sh product --required`: a missing file or key fails the
+   gate; without `--required` the script prints nothing, which SIG-2760 uses
+   for optional keys such as `sentry_project`); it names the directory under
+   `terragrunt/products/` in signapse-core-terraform. The product is bound
+   to the repo there: the gate sends `source_repo` (always
+   `github.repository`, not an input) and `terraform-deploy.yml` refuses the
+   run unless `.github/product-repos.txt` in signapse-core-terraform lists
+   that repo for the product (signapse-core-terraform#508). A repo whose
+   `pipeline.yml` names another product gets a `failed` verdict, never a plan.
+2. **Token.** Mint a Prodzilla installation token narrowed to
+   signapse-core-terraform with `actions: write` (dispatch, and read runs,
+   logs and the artifact) and `pull-requests: read` (step 4). The train never
+   holds the Terraform AWS role (ADR 0005).
+3. **Dispatch and wait** (`terraform-gate.sh`). Dispatch
+   `terraform-deploy.yml` on `main` with `product`, `environment`,
+   `region: eu`, `action: plan`, `apply: true`, `source_repo` and a unique `run_key`
+   (`<repo>-<run_id>-<attempt>-<env>-<n>`). Find the run whose title carries
+   `[run_key]`, wait for it (`terraform_timeout_minutes`, default 45, at most
+   50: wall clock including API calls, so the hour-long Prodzilla token
+   outlives the wait and step 4) and read `verdict.json` from its
+   `terraform-verdict` artifact:
+
+   | Verdict | Gate |
+   |---|---|
+   | `no_changes`, run concluded `success` | pass, nothing applied |
+   | `safe` and `applied`, run concluded `success` | pass, the run applied the creates and updates |
+   | `no_changes` or `safe` from a run that did not conclude `success` | stop; Slack names the conclusion |
+   | `blocked` | stop; Slack names the product, environment and the destroyed, replaced or unclassified resources (25 of each, then a count); the job summary lists them all |
+
+   signapse-core-terraform decides `blocked` per environment (ADR 0002
+   Decisions 19 and 33): prod blocks on any destroy or replace, stg only on a
+   destroy or replace of a stateful resource type, dev never. The gate passes
+   the verdict through.
+   | `failed`, missing artifact, wrong product/environment, timeout | stop; Slack names the reason |
+
+   A run that concludes `cancelled` was superseded in its concurrency group
+   (GitHub keeps one pending run per product+environment), so it is
+   re-dispatched, at most 4 dispatches in all. A `failed` run whose apply
+   started and whose log says `Saved plan is stale` is re-dispatched once. A
+   run still going at the timeout is left alone: it may be mid-apply.
+4. **Unapplied Terraform PRs** (`terraform-pending.sh`, AC4). For each ticket
+   in the Release Candidate, its Linear attachments that link a
+   signapse-core-terraform PR. A merged PR is applied in the environment if,
+   for every product it changes (every attachment is read; a ticket with more
+   than 250 fails the gate rather than skip any) (`terragrunt/products/<P>/`; other
+   `terraform/` or `terragrunt/` paths count as the promoted product), a
+   successful `terraform-deploy.yml` apply run on `main` for that product (or
+   `all`) and environment was created after the PR merged (every page of runs
+   since the merge is read). A dispatch on
+   `main` runs main's tip, so it contains every PR merged before it. In `dev`,
+   orchestration's merge-apply run on the PR's merge commit also counts. This
+   runs after step 3, so the gate's own run covers the promoted product; what
+   it catches is a PR for another product, or one merged while the gate ran.
+   Unmerged PRs only warn. `/apply-stg` and `/apply-prod` comment runs of
+   orchestration.yml are not counted (their runs do not record which PR or
+   environment they applied); dispatch `terraform-deploy.yml` for that
+   product to clear the block.
+
+Any stop posts the Slack alert, including one before the gate had a verdict
+(missing inputs, product lookup, token mint).
+
+The gate runs on every Promotion inside the window. Applying a safe plan
+before a later check stops the Promotion is fine: infrastructure may run
+ahead of code, never behind it.
+
+### Prod (SIG-2769)
+
+This PR gates staging only. The prod Deployment (SIG-2769) calls the same
+action with `environment: prod` before it deploys. terraform-deploy.yml runs
+every prod apply in signapse-core-terraform's `prod-apply` environment, which
+waits for a `prod-approvers` reviewer (ADR 0002 Decisions 19 and 30). The
+gate's wait (`timeout_minutes`, at most 50) includes that approval: with no
+approval in time the gate fails and nothing is deployed.
+
+### Dev
+
+Not gated (a deviation from SIG-2765's summary, to be confirmed): dev is not
+a Promotion, and orchestration.yml already applies a merged Terraform PR in dev.
 
 ### "Waits for the next window"
 
@@ -228,6 +319,70 @@ re-selects.
   images and finishes the wait and the ticket moves. A fresh run would report
   `already_promoted` and do nothing, by design: the hourly run must never move
   tickets back to On Staging after staging tests or prod have moved them on.
+
+## Staging tests (SIG-2767)
+
+`release-train-staging.yml` verifies a promoted Release Candidate on staging
+(spec step 5). The caller runs it after the `train` job when `promoted` is
+`'true'` (see the template below).
+
+1. **Suite.** It calls signapse-e2e (`playwright.yml@main`, ADR 0002) with
+   `environment: staging` and `tickets` = the train's `rc_tickets`: every
+   live ticket from the tag prod runs to the Release Candidate, not only the
+   ones new since the last Promotion. A tag that passed staging but has not
+   reached prod is tested again with the new one, and the verdict lands on
+   the same set prod deploys. On staging the suite runs those tickets' tests,
+   `@smoke`, and the product suites the tickets' Linear labels point at, not
+   the whole suite.
+2. **Verdict** (job "Staging verdict", runs whatever the suite did,
+   `scripts/staging-verdict.sh`). Pass means the suite job succeeded *and*
+   reported `passed`. A failure, an error, a cancelled run (the suite reports
+   `failed`) or a skipped job is a failure: an untested build never passes.
+   - Pass: every ticket gets `Staging Passed`, loses `Staging Failed`, and
+     gets a comment with the run and report links. The column stays On
+     Staging. A ticket an earlier attempt sent to QA Failed (a re-run that
+     flips the verdict) stays there, and `staging_passed` stays false until
+     QA re-passes it.
+   - Fail: every ticket gets `Staging Failed`, loses `Staging Passed`, gets
+     the comment and moves to `QA Failed` (ADR 0001: the pipeline cannot
+     blame one ticket), losing `QA Passed` (`scripts/qa-failed-tickets.sh`).
+     QA approval does not survive QA Failed (spec "Board and labels"):
+     without this, a fix merged later would be selectable on the old
+     approval. A ticket in `Done` (a follow-up commit) stays in Done and
+     keeps `QA Passed`, since it never went back to QA. A ticket whose move
+     failed loses `QA Passed` anyway, so it still blocks the line. A Slack
+     alert goes to `slack_channel`, naming which tickets are in QA Failed,
+     which stayed where they were, and which Linear could not move. The run
+     fails.
+3. **Outputs.** `staging_passed` is `'true'` only on a pass that was recorded
+   on every ticket, with no ticket in QA Failed; `report_url` links the Playwright report. Production
+   (SIG-2769) runs only when `staging_passed == 'true'`.
+
+Labels are added and removed one at a time (`issueAddLabel` /
+`issueRemoveLabel`), so a ticket's other labels stay. The label to add is
+looked up by name in the ticket's team, then in the workspace, once per team
+and label. The comment is not repeated when the ticket already has one with
+the same verdict and the same `Run:` line (exact match). Any Linear or
+Slack error fails the job (and leaves `staging_passed` false) after every
+ticket was attempted.
+
+**Re-runs.** "Re-run failed jobs" re-runs the suite and the verdict. Labels
+already right are left alone, the move to QA Failed is a no-op, and a ticket
+that already has a comment for this run URL and verdict gets no second one. A
+re-run that flips the verdict swaps the labels and comments the new verdict.
+A failure alert goes to Slack on every failed attempt.
+
+It is a separate workflow file, not jobs in `release-train.yml`, because
+GitHub resolves every `uses:` workflow when a run is queued, even for jobs
+that will be skipped. Referencing signapse-e2e from `release-train.yml` would
+make every legacy `ready-for-prod` caller depend on it.
+
+Inputs: `tickets` (required), `slack_channel` (required), `release_tag`. The
+label and column names are the defaults `release-train.yml` uses, so the two
+cannot disagree. Secrets:
+`LINEAR_API_KEY`, `SLACK_BOT_TOKEN`, and the four forwarded to the suite
+(`E2E_STAGING_SIGNSTUDIO_ADMIN_API_TOKEN`, `E2E_STAGING_SIGNSTUDIO_USER_EMAIL`,
+`E2E_STAGING_SIGNSTUDIO_USER_PASSWORD`, `E2E_LINEAR_API_KEY`).
 
 ## Caller template (`.github/workflows/release-train.yml` in the product repo)
 
@@ -302,9 +457,32 @@ jobs:
       staging_version_url: |   # required; one per service with a version endpoint, JSON body with .version
         https://api.stg.signstream.example/version
       read_app_id: ${{ vars.PIPELINE_READ_APP_ID }}
+      prodzilla_app_id: ${{ vars.PRODZILLA_APP_ID }}   # Terraform gate (SIG-2765)
     secrets:
       LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
       READ_APP_PRIVATE_KEY: ${{ secrets.READ_APP_PRIVATE_KEY }}
+      PRODZILLA_APP_PRIVATE_KEY: ${{ secrets.PRODZILLA_APP_PRIVATE_KEY }}
+      SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}   # Terraform gate alerts
+
+  # Verify on staging (SIG-2767). Production (SIG-2769) needs
+  # needs.staging.outputs.staging_passed == 'true'.
+  staging:
+    needs: train
+    if: needs.train.outputs.promoted == 'true'
+    uses: signapse/reusable-workflows/.github/workflows/release-train-staging.yml@main
+    permissions:
+      contents: read     # every job inside needs only this; do not hand it the train's writes
+    with:
+      tickets: ${{ needs.train.outputs.rc_tickets }}
+      release_tag: ${{ needs.train.outputs.release_tag }}
+      slack_channel: '#signstream-releases'   # the repo's channel for failure alerts
+    secrets:
+      LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+      SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+      E2E_STAGING_SIGNSTUDIO_ADMIN_API_TOKEN: ${{ secrets.E2E_STAGING_SIGNSTUDIO_ADMIN_API_TOKEN }}
+      E2E_STAGING_SIGNSTUDIO_USER_EMAIL: ${{ secrets.E2E_STAGING_SIGNSTUDIO_USER_EMAIL }}
+      E2E_STAGING_SIGNSTUDIO_USER_PASSWORD: ${{ secrets.E2E_STAGING_SIGNSTUDIO_USER_PASSWORD }}
+      E2E_LINEAR_API_KEY: ${{ secrets.E2E_LINEAR_API_KEY }}
 ```
 
 `prod_services` and `read_app_id` (with secret `READ_APP_PRIVATE_KEY`) are
@@ -316,8 +494,9 @@ Optional inputs: `qa_passed_label`, `qa_failed_state`, `build_workflow`,
 (default `eu-west-2`), `staging_version_jq`, `on_staging_from`,
 `staging_passed_label`, `staging_failed_label`,
 `staging_deploy_timeout_minutes`, `gitops_repo`, `gitops_ref`,
-`selection_base`, `on_staging_state`, `hotfix_label`. The Linear defaults
-match the board after SIG-2747.
+`selection_base`, `on_staging_state`, `hotfix_label`,
+`terraform_timeout_minutes` (default 45), `slack_releases_channel`. The Linear
+defaults match the board after SIG-2747.
 
 ### Note for stages that dispatch other workflows (SIG-2765)
 
@@ -328,7 +507,8 @@ But `terraform-deploy.yml` in signapse-core-terraform is serialised per
 product and environment, so a run the train dispatched can conclude
 `cancelled` without ever starting. Treat `cancelled` as "superseded, not
 failed". Find the run that replaced it (or dispatch again) and wait for its
-verdict. Do not report a Terraform failure or block the Promotion on it.
+verdict. Do not report a Terraform failure or block the Promotion on it. The
+Terraform gate re-dispatches (see [Terraform gate](#terraform-gate)).
 
 ## Prerequisites for switching a repo
 
@@ -347,6 +527,12 @@ verdict. Do not report a Terraform failure or block the Promotion on it.
   `main-<n>-<sha>` would never wait for the release tag.
 - No ECR semver tag above the repo's highest git release tag. Flux picks the
   highest; the version is computed from git.
+- `.signapse/pipeline.yml` declares `product:` (a `terragrunt/products/`
+  directory with a `config/stg.yml` in signapse-core-terraform), the repo is
+  listed for that product in signapse-core-terraform's
+  `.github/product-repos.txt`, and the
+  Prodzilla app is installed on signapse-core-terraform with
+  `PRODZILLA_APP_ID`/`PRODZILLA_APP_PRIVATE_KEY` visible to the repo.
 - The read-only pipeline app (ADR 0005) is installed on signapse-core-k8s,
   and the ECR role allows `ecr:BatchGetImage`, `ecr:DescribeImages` and
   `ecr:PutImage` on the service repositories.
@@ -367,4 +553,5 @@ Repos that do not meet these yet stay on `ready-for-prod`:
 - To switch, check the prerequisites above, then replace the caller's
   `release-train.yml` with the template. Drop the Tue/Thu cron and the
   `release: published` trigger; in `qa-passed` mode a release event runs
-  nothing. Add `actions: read`. `SLACK_BOT_TOKEN` is no longer needed.
+  nothing. Add `actions: read`. Keep `SLACK_BOT_TOKEN`: the Terraform gate
+  posts its alerts with it.
