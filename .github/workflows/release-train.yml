@@ -16,6 +16,8 @@ name: Release Train (reusable)
 #     image with the next release version in ECR and git (no rebuild), waits for Flux to run
 #     it on staging, and moves the tickets to On Staging. Outside the window it
 #     reports `deferred` and does nothing; the next hourly run promotes.
+#     When `promoted` is 'true', the caller runs release-train-staging.yml
+#     (SIG-2767: signapse-e2e on staging, Staging Passed/Failed on the tickets).
 #     Caller template: docs/RELEASE-TRAIN.md.
 #
 #   ready-for-prod (default, legacy until SIG-2773): composes TrainState from
