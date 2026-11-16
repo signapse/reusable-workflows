@@ -403,6 +403,17 @@ a_then_b() {
   echo "$output" | jq -e '.outcome == "selected" and [.tickets[].id] == ["SIG-1","SIG-2"]' > /dev/null
 }
 
+@test "new_tickets: only the tickets since the last Promotion (staging's tag), for the hotfix check" {
+  commit "feat(SIG-1): A"; built "feat(SIG-1): A" 11
+  git tag 1.0.1
+  commit "feat(SIG-2): B"; built "feat(SIG-2): B" 12
+  ticket SIG-1 "On Staging" "QA Passed" "hotfix"
+  ticket SIG-2 "On Dev · Ready for QA" "QA Passed"
+  run select_rc 1.0.0
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '[.tickets[].id] == ["SIG-1","SIG-2"] and .new_tickets == ["SIG-2"]' > /dev/null
+}
+
 @test "already_promoted: the newest selectable build is the tag on staging" {
   commit "feat(SIG-1): A"; built "feat(SIG-1): A" 11
   git tag 1.0.1
