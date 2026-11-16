@@ -62,7 +62,7 @@ on:
         default: '.'
 
       enable_private_repos:
-        description: 'Enable access to private repos using PAT'
+        description: 'Enable access to private signapse/* modules (GitHub App token, or github_pat fallback)'
         required: false
         type: boolean
         default: false
@@ -74,8 +74,11 @@ on:
         default: 'github.com/signapse/*'
 
     secrets:
+      CI_GITHUB_APP_PRIVATE_KEY:
+        description: 'Private key of the read-only CI GitHub App (SIG-2792). With the org variable CI_GITHUB_APP_ID it mints a per-run token for private signapse/* modules. Preferred over github_pat.'
+        required: false
       github_pat:
-        description: 'GitHub PAT for accessing private repositories'
+        description: 'DEPRECATED fallback: GitHub PAT for private repositories, used only when the App credentials are absent. Remove once every caller passes CI_GITHUB_APP_PRIVATE_KEY.'
         required: false
 
 permissions:
@@ -97,51 +100,70 @@ jobs:
           go-version-file: ${{ inputs.go_version == '' && 'go.mod' || '' }}
           cache: true
 
-      - name: Verify private-repo credentials are available
+      # Private-module access. When the org variable CI_GITHUB_APP_ID and the
+      # CI_GITHUB_APP_PRIVATE_KEY secret are both present, mint a read-only
+      # GitHub App token (valid one hour, scoped to the repos the App is
+      # installed on). Otherwise fall back to the github_pat secret so callers
+      # that have not migrated yet keep working. The secret goes through env
+      # because `if:` cannot read secrets.
+      - name: Check for GitHub App credentials
+        id: app
         if: ${{ inputs.enable_private_repos }}
+        env:
+          APP_ID: ${{ vars.CI_GITHUB_APP_ID }}
+          APP_KEY: ${{ secrets.CI_GITHUB_APP_PRIVATE_KEY }}
+        run: |
+          if [ -n "$APP_ID" ] && [ -n "$(printf '%s' "$APP_KEY" | tr -d '[:space:]')" ]; then
+            echo "use_app=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Mint read-only GitHub App token
+        id: deps
+        if: ${{ steps.app.outputs.use_app == 'true' }}
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349  # v2.2.2
+        with:
+          app-id: ${{ vars.CI_GITHUB_APP_ID }}
+          private-key: ${{ secrets.CI_GITHUB_APP_PRIVATE_KEY }}
+          owner: signapse
+          permission-contents: read
+
+      - name: Verify private-repo credentials are available
+        if: ${{ inputs.enable_private_repos && steps.app.outputs.use_app != 'true' }}
         env:
           GITHUB_PAT: ${{ secrets.github_pat }}
         run: |
           # A whitespace-only secret is as unusable as an empty one and would
           # produce the same credential-less rewrite, so trim before testing.
           if [ -n "$(printf '%s' "$GITHUB_PAT" | tr -d '[:space:]')" ]; then
-            echo "github_pat is present; private module access will be configured."
+            echo "No GitHub App credentials; falling back to github_pat."
             exit 0
           fi
 
-          echo "::error title=github_pat is empty::enable_private_repos is true but no github_pat was passed to go-ci.yml. See this step's log for the likely cause and the fix."
+          echo "::error title=No private-module credentials::enable_private_repos is true but neither the GitHub App credentials nor github_pat reached go-ci.yml. See this step's log for the fix."
 
           {
             echo "=================================================================="
-            echo "  go-ci.yml: required secret 'github_pat' is empty"
+            echo "  go-ci.yml: no credentials for private Go modules"
             echo "=================================================================="
             echo
-            echo "This workflow was called with input:"
-            echo "    enable_private_repos: true"
-            echo "but secret 'github_pat' resolved to an EMPTY string."
-            echo
-            echo "Failing here deliberately. If we continued, the next step would run:"
-            echo "    git config --global url.\"https://@github.com/\".insteadOf \"https://github.com/\""
-            echo "which is a URL rewrite containing no credential. The job would then"
-            echo "fail much later, at the first private module fetch, with this"
-            echo "misleading error:"
+            echo "enable_private_repos is true, but the org variable CI_GITHUB_APP_ID"
+            echo "and the secret CI_GITHUB_APP_PRIVATE_KEY were not both available,"
+            echo "and the fallback secret 'github_pat' resolved to an EMPTY string."
+            echo "Continuing would write a credential-less git URL rewrite and fail"
+            echo "at the first private module fetch with this misleading error:"
             echo "    fatal: could not read Password for 'https://github.com': terminal prompts disabled"
             echo
-            echo "MOST LIKELY CAUSE"
-            echo "  The calling workflow references a REPOSITORY-level secret owned by a"
-            echo "  different repository. Repository secrets are not shared across"
-            echo "  repositories, so such a reference is not an error - it silently"
-            echo "  expands to an empty string."
-            echo "  A known example is HUB_PLATFORM_API_PAT, which is not resolvable"
-            echo "  from every repo that references it."
-            echo
-            echo "FIX - pass the organisation-level MACHINE_TOKEN in the caller:"
+            echo "FIX - pass the App private key in the caller (the org variable"
+            echo "CI_GITHUB_APP_ID must also be visible to the calling repo):"
             echo
             printf '    secrets:\n'
-            printf '      github_pat: %s{ secrets.MACHINE_TOKEN }}\n' '${'
+            printf '      CI_GITHUB_APP_PRIVATE_KEY: %s{ secrets.CI_GITHUB_APP_PRIVATE_KEY }}\n' '${'
             echo
-            echo "ALTERNATIVE - if this repository has no private Go dependencies,"
-            echo "switch the feature off instead of passing a token:"
+            echo "or use 'secrets: inherit'. A reference to a repository-level secret"
+            echo "owned by another repository is not an error; it silently expands to"
+            echo "an empty string."
+            echo
+            echo "ALTERNATIVE - if this repository has no private Go dependencies:"
             echo
             printf '    with:\n'
             printf '      enable_private_repos: false\n'
@@ -152,10 +174,19 @@ jobs:
 
       - name: Configure access to private repos
         if: ${{ inputs.enable_private_repos }}
-        run: |
-          git config --global url."https://${{ secrets.github_pat }}@github.com/".insteadOf "https://github.com/"
         env:
-          GOPRIVATE: ${{ inputs.goprivate }}
+          DEPS_TOKEN: ${{ steps.deps.outputs.token || secrets.github_pat }}
+          USE_APP: ${{ steps.app.outputs.use_app }}
+        run: |
+          if [ "$USE_APP" = "true" ]; then
+            # An installation token only reaches the repos the App is installed on,
+            # all under signapse, so scope the rewrite to that owner.
+            git config --global url."https://x-access-token:${DEPS_TOKEN}@github.com/signapse/".insteadOf "https://github.com/signapse/"
+          else
+            # PAT fallback: unchanged behaviour. A PAT can also read private modules
+            # in other orgs listed in goprivate, so keep the github.com-wide rewrite.
+            git config --global url."https://${DEPS_TOKEN}@github.com/".insteadOf "https://github.com/"
+          fi
 
       # golangci-lint v2 lives on a /v2 module path, which `install-mode:
       # goinstall` cannot reach: it runs
@@ -180,6 +211,8 @@ jobs:
         with:
           version: ${{ inputs.golangci_lint_version }}
           args: --timeout=5m
+        env:
+          GOPRIVATE: ${{ inputs.goprivate }}
 
       - name: Check formatting
         run: |
@@ -205,51 +238,70 @@ jobs:
           go-version-file: ${{ inputs.go_version == '' && 'go.mod' || '' }}
           cache: true
 
-      - name: Verify private-repo credentials are available
+      # Private-module access. When the org variable CI_GITHUB_APP_ID and the
+      # CI_GITHUB_APP_PRIVATE_KEY secret are both present, mint a read-only
+      # GitHub App token (valid one hour, scoped to the repos the App is
+      # installed on). Otherwise fall back to the github_pat secret so callers
+      # that have not migrated yet keep working. The secret goes through env
+      # because `if:` cannot read secrets.
+      - name: Check for GitHub App credentials
+        id: app
         if: ${{ inputs.enable_private_repos }}
+        env:
+          APP_ID: ${{ vars.CI_GITHUB_APP_ID }}
+          APP_KEY: ${{ secrets.CI_GITHUB_APP_PRIVATE_KEY }}
+        run: |
+          if [ -n "$APP_ID" ] && [ -n "$(printf '%s' "$APP_KEY" | tr -d '[:space:]')" ]; then
+            echo "use_app=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Mint read-only GitHub App token
+        id: deps
+        if: ${{ steps.app.outputs.use_app == 'true' }}
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349  # v2.2.2
+        with:
+          app-id: ${{ vars.CI_GITHUB_APP_ID }}
+          private-key: ${{ secrets.CI_GITHUB_APP_PRIVATE_KEY }}
+          owner: signapse
+          permission-contents: read
+
+      - name: Verify private-repo credentials are available
+        if: ${{ inputs.enable_private_repos && steps.app.outputs.use_app != 'true' }}
         env:
           GITHUB_PAT: ${{ secrets.github_pat }}
         run: |
           # A whitespace-only secret is as unusable as an empty one and would
           # produce the same credential-less rewrite, so trim before testing.
           if [ -n "$(printf '%s' "$GITHUB_PAT" | tr -d '[:space:]')" ]; then
-            echo "github_pat is present; private module access will be configured."
+            echo "No GitHub App credentials; falling back to github_pat."
             exit 0
           fi
 
-          echo "::error title=github_pat is empty::enable_private_repos is true but no github_pat was passed to go-ci.yml. See this step's log for the likely cause and the fix."
+          echo "::error title=No private-module credentials::enable_private_repos is true but neither the GitHub App credentials nor github_pat reached go-ci.yml. See this step's log for the fix."
 
           {
             echo "=================================================================="
-            echo "  go-ci.yml: required secret 'github_pat' is empty"
+            echo "  go-ci.yml: no credentials for private Go modules"
             echo "=================================================================="
             echo
-            echo "This workflow was called with input:"
-            echo "    enable_private_repos: true"
-            echo "but secret 'github_pat' resolved to an EMPTY string."
-            echo
-            echo "Failing here deliberately. If we continued, the next step would run:"
-            echo "    git config --global url.\"https://@github.com/\".insteadOf \"https://github.com/\""
-            echo "which is a URL rewrite containing no credential. The job would then"
-            echo "fail much later, at the first private module fetch, with this"
-            echo "misleading error:"
+            echo "enable_private_repos is true, but the org variable CI_GITHUB_APP_ID"
+            echo "and the secret CI_GITHUB_APP_PRIVATE_KEY were not both available,"
+            echo "and the fallback secret 'github_pat' resolved to an EMPTY string."
+            echo "Continuing would write a credential-less git URL rewrite and fail"
+            echo "at the first private module fetch with this misleading error:"
             echo "    fatal: could not read Password for 'https://github.com': terminal prompts disabled"
             echo
-            echo "MOST LIKELY CAUSE"
-            echo "  The calling workflow references a REPOSITORY-level secret owned by a"
-            echo "  different repository. Repository secrets are not shared across"
-            echo "  repositories, so such a reference is not an error - it silently"
-            echo "  expands to an empty string."
-            echo "  A known example is HUB_PLATFORM_API_PAT, which is not resolvable"
-            echo "  from every repo that references it."
-            echo
-            echo "FIX - pass the organisation-level MACHINE_TOKEN in the caller:"
+            echo "FIX - pass the App private key in the caller (the org variable"
+            echo "CI_GITHUB_APP_ID must also be visible to the calling repo):"
             echo
             printf '    secrets:\n'
-            printf '      github_pat: %s{ secrets.MACHINE_TOKEN }}\n' '${'
+            printf '      CI_GITHUB_APP_PRIVATE_KEY: %s{ secrets.CI_GITHUB_APP_PRIVATE_KEY }}\n' '${'
             echo
-            echo "ALTERNATIVE - if this repository has no private Go dependencies,"
-            echo "switch the feature off instead of passing a token:"
+            echo "or use 'secrets: inherit'. A reference to a repository-level secret"
+            echo "owned by another repository is not an error; it silently expands to"
+            echo "an empty string."
+            echo
+            echo "ALTERNATIVE - if this repository has no private Go dependencies:"
             echo
             printf '    with:\n'
             printf '      enable_private_repos: false\n'
@@ -260,10 +312,19 @@ jobs:
 
       - name: Configure access to private repos
         if: ${{ inputs.enable_private_repos }}
-        run: |
-          git config --global url."https://${{ secrets.github_pat }}@github.com/".insteadOf "https://github.com/"
         env:
-          GOPRIVATE: ${{ inputs.goprivate }}
+          DEPS_TOKEN: ${{ steps.deps.outputs.token || secrets.github_pat }}
+          USE_APP: ${{ steps.app.outputs.use_app }}
+        run: |
+          if [ "$USE_APP" = "true" ]; then
+            # An installation token only reaches the repos the App is installed on,
+            # all under signapse, so scope the rewrite to that owner.
+            git config --global url."https://x-access-token:${DEPS_TOKEN}@github.com/signapse/".insteadOf "https://github.com/signapse/"
+          else
+            # PAT fallback: unchanged behaviour. A PAT can also read private modules
+            # in other orgs listed in goprivate, so keep the github.com-wide rewrite.
+            git config --global url."https://${DEPS_TOKEN}@github.com/".insteadOf "https://github.com/"
+          fi
 
       - name: Download dependencies
         run: |
@@ -322,51 +383,70 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Verify private-repo credentials are available
+      # Private-module access. When the org variable CI_GITHUB_APP_ID and the
+      # CI_GITHUB_APP_PRIVATE_KEY secret are both present, mint a read-only
+      # GitHub App token (valid one hour, scoped to the repos the App is
+      # installed on). Otherwise fall back to the github_pat secret so callers
+      # that have not migrated yet keep working. The secret goes through env
+      # because `if:` cannot read secrets.
+      - name: Check for GitHub App credentials
+        id: app
         if: ${{ inputs.enable_private_repos }}
+        env:
+          APP_ID: ${{ vars.CI_GITHUB_APP_ID }}
+          APP_KEY: ${{ secrets.CI_GITHUB_APP_PRIVATE_KEY }}
+        run: |
+          if [ -n "$APP_ID" ] && [ -n "$(printf '%s' "$APP_KEY" | tr -d '[:space:]')" ]; then
+            echo "use_app=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Mint read-only GitHub App token
+        id: deps
+        if: ${{ steps.app.outputs.use_app == 'true' }}
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349  # v2.2.2
+        with:
+          app-id: ${{ vars.CI_GITHUB_APP_ID }}
+          private-key: ${{ secrets.CI_GITHUB_APP_PRIVATE_KEY }}
+          owner: signapse
+          permission-contents: read
+
+      - name: Verify private-repo credentials are available
+        if: ${{ inputs.enable_private_repos && steps.app.outputs.use_app != 'true' }}
         env:
           GITHUB_PAT: ${{ secrets.github_pat }}
         run: |
           # A whitespace-only secret is as unusable as an empty one and would
           # produce the same credential-less rewrite, so trim before testing.
           if [ -n "$(printf '%s' "$GITHUB_PAT" | tr -d '[:space:]')" ]; then
-            echo "github_pat is present; private module access will be configured."
+            echo "No GitHub App credentials; falling back to github_pat."
             exit 0
           fi
 
-          echo "::error title=github_pat is empty::enable_private_repos is true but no github_pat was passed to go-ci.yml. See this step's log for the likely cause and the fix."
+          echo "::error title=No private-module credentials::enable_private_repos is true but neither the GitHub App credentials nor github_pat reached go-ci.yml. See this step's log for the fix."
 
           {
             echo "=================================================================="
-            echo "  go-ci.yml: required secret 'github_pat' is empty"
+            echo "  go-ci.yml: no credentials for private Go modules"
             echo "=================================================================="
             echo
-            echo "This workflow was called with input:"
-            echo "    enable_private_repos: true"
-            echo "but secret 'github_pat' resolved to an EMPTY string."
-            echo
-            echo "Failing here deliberately. If we continued, the next step would run:"
-            echo "    git config --global url.\"https://@github.com/\".insteadOf \"https://github.com/\""
-            echo "which is a URL rewrite containing no credential, and the Docker build"
-            echo "would fail later at the first private module fetch with this"
-            echo "misleading error:"
+            echo "enable_private_repos is true, but the org variable CI_GITHUB_APP_ID"
+            echo "and the secret CI_GITHUB_APP_PRIVATE_KEY were not both available,"
+            echo "and the fallback secret 'github_pat' resolved to an EMPTY string."
+            echo "Continuing would write a credential-less git URL rewrite and fail"
+            echo "at the first private module fetch with this misleading error:"
             echo "    fatal: could not read Password for 'https://github.com': terminal prompts disabled"
             echo
-            echo "MOST LIKELY CAUSE"
-            echo "  The calling workflow references a REPOSITORY-level secret owned by a"
-            echo "  different repository. Repository secrets are not shared across"
-            echo "  repositories, so such a reference is not an error - it silently"
-            echo "  expands to an empty string."
-            echo "  A known example is HUB_PLATFORM_API_PAT, which is not resolvable"
-            echo "  from every repo that references it."
-            echo
-            echo "FIX - pass the organisation-level MACHINE_TOKEN in the caller:"
+            echo "FIX - pass the App private key in the caller (the org variable"
+            echo "CI_GITHUB_APP_ID must also be visible to the calling repo):"
             echo
             printf '    secrets:\n'
-            printf '      github_pat: %s{ secrets.MACHINE_TOKEN }}\n' '${'
+            printf '      CI_GITHUB_APP_PRIVATE_KEY: %s{ secrets.CI_GITHUB_APP_PRIVATE_KEY }}\n' '${'
             echo
-            echo "ALTERNATIVE - if this repository has no private Go dependencies,"
-            echo "switch the feature off instead of passing a token:"
+            echo "or use 'secrets: inherit'. A reference to a repository-level secret"
+            echo "owned by another repository is not an error; it silently expands to"
+            echo "an empty string."
+            echo
+            echo "ALTERNATIVE - if this repository has no private Go dependencies:"
             echo
             printf '    with:\n'
             printf '      enable_private_repos: false\n'
@@ -375,22 +455,29 @@ jobs:
           } >&2
           exit 1
 
-      - name: Configure access to private repos
-        if: ${{ inputs.enable_private_repos }}
-        run: |
-          git config --global url."https://${{ secrets.github_pat }}@github.com/".insteadOf "https://github.com/"
-
       - name: Build Docker image
         env:
-          DOCKER_BUILDKIT: 0
-          GITHUB_TOKEN_SECRET: ${{ secrets.github_pat }}
+          DOCKER_BUILDKIT: 1
+          # App token when minted, else the legacy PAT.
+          DEPS_TOKEN: ${{ steps.deps.outputs.token || secrets.github_pat }}
+          USE_APP: ${{ steps.app.outputs.use_app }}
         run: |
-          BUILD_ARGS=""
-          if [ -n "$GITHUB_TOKEN_SECRET" ]; then
-            BUILD_ARGS="--build-arg GITHUB_TOKEN=$GITHUB_TOKEN_SECRET"
+          # The token is a BuildKit secret (RUN --mount=type=secret,id=gh_token),
+          # never a build-arg, so it cannot land in a layer or `docker history`.
+          # github_token is the same value under the id older Dockerfiles use.
+          SECRET_ARGS=()
+          if [ -n "$DEPS_TOKEN" ]; then
+            SECRET_ARGS+=(--secret "id=gh_token,env=DEPS_TOKEN" --secret "id=github_token,env=DEPS_TOKEN")
           fi
 
-          docker build $BUILD_ARGS \
+          # Callers not yet migrated to the App token still have Dockerfiles that
+          # read ARG GITHUB_TOKEN; keep that working on the PAT fallback only.
+          BUILD_ARGS=()
+          if [ "$USE_APP" != "true" ] && [ -n "$DEPS_TOKEN" ]; then
+            BUILD_ARGS+=(--build-arg "GITHUB_TOKEN=$DEPS_TOKEN")
+          fi
+
+          docker build "${BUILD_ARGS[@]}" "${SECRET_ARGS[@]}" \
             -f ${{ inputs.dockerfile_path }} \
             -t ci-build-test:${{ github.sha }} \
             ${{ inputs.docker_context }}

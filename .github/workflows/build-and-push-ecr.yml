@@ -80,8 +80,11 @@ on:
         default: '0'
 
     secrets:
+      CI_GITHUB_APP_PRIVATE_KEY:
+        description: 'Private key of the read-only CI GitHub App (SIG-2792). With the org variable CI_GITHUB_APP_ID it mints a per-run token for private signapse/* modules, exposed ONLY as BuildKit secrets id=gh_token (and id=github_token, same value, for Dockerfiles not yet renamed); never as a build-arg. Used only with use_buildx: true and when private_modules_token is not passed; a caller that still passes the PAT keeps the PAT path.'
+        required: false
       private_modules_token:
-        description: 'Token for private Go/npm modules. On the buildx path it is exposed both as build-arg GITHUB_TOKEN and as BuildKit secret id=github_token (use --mount=type=secret,id=github_token to keep it out of image layers). On the legacy path it is only passed as --build-arg GITHUB_TOKEN.'
+        description: 'DEPRECATED fallback: PAT for private Go/npm modules, used only when the App credentials are absent. On the buildx path it is exposed as build-arg GITHUB_TOKEN and as BuildKit secrets id=gh_token and id=github_token. On the legacy path it is only passed as --build-arg GITHUB_TOKEN. Non-Go callers (npm) still use this.'
         required: false
 
 permissions:
@@ -151,6 +154,45 @@ jobs:
             echo "ARGS_EOF"
           } >> "${GITHUB_OUTPUT}"
 
+      # Private-module access: mint a read-only GitHub App token only when ALL of
+      #   * the org variable CI_GITHUB_APP_ID and the CI_GITHUB_APP_PRIVATE_KEY
+      #     secret are present (secrets go through env because `if:` cannot read
+      #     them),
+      #   * the caller passed no private_modules_token, and
+      #   * use_buildx is true (the App token only ever travels as a BuildKit
+      #     secret, which the legacy docker build path cannot take).
+      # Otherwise behaviour is exactly as before this change. In particular a
+      # caller that still passes its PAT keeps the PAT and the GITHUB_TOKEN
+      # build-arg even if the org App key reaches it (e.g. via `secrets: inherit`),
+      # so passing the key and dropping the PAT is the opt-in.
+      - name: Check for GitHub App credentials
+        id: app
+        env:
+          APP_ID: ${{ vars.CI_GITHUB_APP_ID }}
+          APP_KEY: ${{ secrets.CI_GITHUB_APP_PRIVATE_KEY }}
+          PAT: ${{ secrets.private_modules_token }}
+          USE_BUILDX: ${{ inputs.use_buildx }}
+        run: |
+          if [ -n "$APP_ID" ] && [ -n "$(printf '%s' "$APP_KEY" | tr -d '[:space:]')" ]; then
+            if [ -n "$(printf '%s' "$PAT" | tr -d '[:space:]')" ]; then
+              echo "::notice title=GitHub App token not used::private_modules_token was passed, so the PAT path is kept. Stop passing it to move this build to the App token."
+            elif [ "$USE_BUILDX" != "true" ]; then
+              echo "::warning title=GitHub App token not used::use_buildx is false. The App token is only passed as a BuildKit secret, so set use_buildx: true to use it. Private-module downloads in this build get no credentials."
+            else
+              echo "use_app=true" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
+      - name: Mint read-only GitHub App token
+        id: deps
+        if: ${{ steps.app.outputs.use_app == 'true' }}
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349  # v2.2.2
+        with:
+          app-id: ${{ vars.CI_GITHUB_APP_ID }}
+          private-key: ${{ secrets.CI_GITHUB_APP_PRIVATE_KEY }}
+          owner: signapse
+          permission-contents: read
+
       # --- Buildx path (when use_buildx is true) ---
 
       - name: Set up Docker Buildx
@@ -178,9 +220,13 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             ${{ steps.collect-args.outputs.build_args }}
-            ${{ secrets.private_modules_token && format('GITHUB_TOKEN={0}', secrets.private_modules_token) || '' }}
+            ${{ steps.deps.outputs.token == '' && secrets.private_modules_token && format('GITHUB_TOKEN={0}', secrets.private_modules_token) || '' }}
+          # BuildKit secrets, never build-args when the App token is in use.
+          # gh_token is the canonical id; github_token is the same value for
+          # Dockerfiles that have not been renamed yet.
           secrets: |
-            ${{ secrets.private_modules_token && format('github_token={0}', secrets.private_modules_token) || '' }}
+            ${{ (steps.deps.outputs.token || secrets.private_modules_token) && format('gh_token={0}', steps.deps.outputs.token || secrets.private_modules_token) || '' }}
+            ${{ (steps.deps.outputs.token || secrets.private_modules_token) && format('github_token={0}', steps.deps.outputs.token || secrets.private_modules_token) || '' }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
