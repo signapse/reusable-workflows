@@ -321,8 +321,8 @@ while IFS= read -r id <&3; do
   merged_prs=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$br" --state merged --json url,mergeCommit \
     --jq '[.[] | {url, oid: (.mergeCommit.oid // "")}]') || die "cannot list PRs for $br"
   merged=$(printf '%s' "$merged_prs" | jq -r '.[0].url // ""')
-  covered=$(jq -nr --argjson c "$commits" --argjson m "$merged_prs" \
-    '[$m[].oid as $o | ($c | map(.sha) | index($o)) | select(. != null)] | max // -1')
+  covered=$(printf '%s' "$commits" | jq -r --argjson m "$merged_prs" \
+    '(map(.sha)) as $c | [$m[].oid as $o | ($c | index($o)) | select(. != null)] | max // -1')
   open_commits=$(printf '%s' "$commits" | jq -c --argjson n "$covered" '.[$n + 1:]')
   # Quiet only while the merged revert still covers the ticket: a commit of
   # it that is not reverted (a re-landed fix that failed QA again) needs a

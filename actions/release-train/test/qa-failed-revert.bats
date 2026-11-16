@@ -611,6 +611,14 @@ EOF
 }
 
 @test "a long walk does not pass the commit list to jq as an argument" {
+  # Linux refuses a single argument over 128 KiB; macOS does not, so enforce it.
+  real_jq=$(command -v jq)
+  cat > "$TMP/stub/jq" <<EOS
+#!/usr/bin/env bash
+for a in "\$@"; do [ "\${#a}" -gt 100000 ] && { echo "jq: Argument list too long" >&2; exit 126; }; done
+exec "$real_jq" "\$@"
+EOS
+  chmod +x "$TMP/stub/jq"
   for i in $(seq 1 700); do git commit -q --allow-empty -m "chore: filler $i padding padding padding padding padding padding padding padding padding"; done
   change f "one-a" "feat(SIG-1): A"
   ticket SIG-1 "QA Failed" 25
