@@ -149,10 +149,10 @@ while IFS= read -r sha; do
   # with the ticket's older commits leaves the ticket's code removed.
   revert=false
   [ "$(jq -r --arg s "$sha" '.[$s].kind // "normal"' <<< "$units")" = revert ] && revert=true
-  entries+=("$(jq -nc --arg sha "$sha" --arg s "$subject" --argjson time "$(git log -1 --format=%ct "$sha")" \
+  entries+=("$(jq -nc --arg sha "$sha" --arg s "$subject" \
     --argjson merge "$([ "$parents" -gt 1 ] && echo true || echo false)" \
     --argjson revert "$revert" --argjson t "$refs" \
-    '{sha: $sha, subject: $s, time: $time, merge: $merge, revert: $revert, tickets: $t}')")
+    '{sha: $sha, subject: $s, merge: $merge, revert: $revert, tickets: $t}')")
 done < <(git rev-list --first-parent --reverse "${LAST_TAG}..${head_sha}")
 # Built once: a growing array passed to jq as an argument is quadratic and hits
 # the 128 KiB single-argument limit after a few hundred commits.
@@ -314,16 +314,22 @@ while IFS= read -r id <&3; do
     finish
     continue
   fi
-  # A merged revert PR covers what existed when it was opened: commits merged
-  # before it was created, plus its own merge commit. That holds whether or not
-  # its branch was deleted and however its conflicts were resolved by hand
-  # (lib/revert.sh cannot prove such a revert). A commit that landed while the
-  # PR was open was never reverted by it, and neither was a later re-land.
-  merged_prs=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$br" --state merged --json url,mergeCommit,createdAt \
-    --jq '[.[] | {url, oid: (.mergeCommit.oid // ""), created: .createdAt}]') || die "cannot list PRs for $br"
+  # A merged revert PR covers what its run saw: the first-parent commits up to
+  # the head it was made from (named in its body), plus its own merge commit.
+  # That holds whether or not its branch was deleted and however its conflicts
+  # were resolved by hand (lib/revert.sh cannot prove such a revert). A commit
+  # that landed after that head was never reverted by it, and neither was a
+  # later re-land.
+  merged_prs=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$br" --state merged --json url,mergeCommit,body \
+    --jq '[.[] | {url, oid: (.mergeCommit.oid // ""), seen: ((.body // "") | capture("at head `(?<h>[0-9a-f]{40})`").h? // "")}]') \
+    || die "cannot list PRs for $br"
   merged=$(printf '%s' "$merged_prs" | jq -r '.[0].url // ""')
-  by_pr='def by_pr($m): . as $c | any($m[]; .oid == $c.sha or $c.time < (.created | fromdateiso8601));'
-  open_commits=$(printf '%s' "$commits" | jq -c --argjson m "$merged_prs" "$by_pr"' map(select(by_pr($m) | not))')
+  covered_shas=$({
+    printf '%s' "$merged_prs" | jq -r '.[] | .oid, .seen' | grep . || true
+    printf '%s' "$merged_prs" | jq -r '.[].seen | select(. != "")' \
+      | while IFS= read -r seen; do git rev-list --first-parent "${LAST_TAG}..${seen}" 2> /dev/null || true; done
+  } | jq -R . | jq -sc .)
+  open_commits=$(printf '%s' "$commits" | jq -c --argjson cov "$covered_shas" 'map(select(.sha as $s | $cov | index($s) | not))')
   # Quiet only while the merged revert still covers the ticket: a commit of
   # it that is not reverted (a re-landed fix that failed QA again) needs a
   # new revert.
@@ -331,12 +337,12 @@ while IFS= read -r id <&3; do
     '[.[] | select((.revert | not) and (.tickets | index($id)) and ($u[.sha].kind // "normal") != "reverted")] | length')
   # Covered by hand-resolved reverts lib/revert.sh does not prove: Release
   # Candidate selection still blocks on them.
-  unproven=$(printf '%s' "$commits" | jq -r --argjson m "$merged_prs" --arg id "$id" --argjson u "$units" "$by_pr"'
-    [.[] | select(by_pr($m) and (.revert | not) and (.tickets | index($id)) and ($u[.sha].kind // "normal") != "reverted"
-      and (.sha as $s | $m | all(.oid != $s)))] | length')
+  unproven=$(printf '%s' "$commits" | jq -r --argjson cov "$covered_shas" --argjson m "$merged_prs" --arg id "$id" --argjson u "$units" '
+    [.[] | select((.sha as $s | $cov | index($s)) and (.revert | not) and (.tickets | index($id))
+      and ($u[.sha].kind // "normal") != "reverted" and (.sha as $s | $m | all(.oid != $s))) | .sha[0:7]] | join(", ")')
   if [ -n "$merged" ] && [ "$left" -eq 0 ]; then
     log "$id: revert PR merged: $merged"
-    [ "$unproven" -eq 0 ] || log "WARNING: $id: $unproven covered commit(s) are not provable reverts (lib/revert.sh), so Release Candidate selection may still block on them"
+    [ -z "$unproven" ] || log "WARNING: $id: covered commit(s) $unproven are not provable reverts (lib/revert.sh), so Release Candidate selection may still block on them"
     set_r --arg u "$merged" '.action = "merged" | .pr_url = $u'
     finish
     continue
@@ -412,7 +418,7 @@ while IFS= read -r id <&3; do
   # PR body.
   body=$(printf '%s' "$r" | jq -r \
     --arg state "$QA_FAILED_STATE" --arg th "$THRESHOLD_HOURS" --arg base "$BRANCH" \
-    --arg tag "$LAST_TAG" --arg run "$RUN_URL" --arg repo "$repo_url" '
+    --arg tag "$LAST_TAG" --arg head "$head_sha" --arg run "$RUN_URL" --arg repo "$repo_url" '
     def c: "- \(.sha[0:7]) \(.subject)";
     "## Why\n\n"
     + "[\(.id)](\(.url)) (\(.title)) has been in **\($state)** since \(.entered_at) "
@@ -441,7 +447,7 @@ while IFS= read -r id <&3; do
     + "- Review and merge this PR to unblock the line. Re-land the fix as a new PR.\n"
     + "- If the ticket is fixed forward and QA re-passes it, close this PR and delete the branch.\n"
     + "- While the branch `\(.branch)` exists, Prodzilla opens no other revert PR for \(.id).\n\n"
-    + "Commits considered: first-parent commits on `\($base)` since `\($tag)` that reference \(.id)."
+    + "Commits considered: first-parent commits on `\($base)` since `\($tag)`, at head `\($head)`, that reference \(.id)."
     + (if $run != "" then "\n\nOpened by Prodzilla ([run](\($run)))." else "\n\nOpened by Prodzilla." end)')
   pr_title="Revert ${id}: ${title}"
   draft=()

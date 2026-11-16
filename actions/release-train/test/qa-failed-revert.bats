@@ -5,7 +5,7 @@
 #   $TMP/linear.json   id -> issue node (state, history)
 #   $TMP/prs.json      commit subject -> [{title, head}] merged PRs
 #   $TMP/open-prs      branch names that have an open PR
-#   $TMP/merged-prs    branch names whose PR was merged (merged-oid, merged-created: its merge commit and creation time)
+#   $TMP/merged-prs    branch names whose PR was merged (merged-oid, merged-head: its merge commit and the head named in its body)
 #   $TMP/pr-create-N   args of the Nth `gh pr create` (one per line)
 #   $TMP/comments      Linear commentCreate variables, one JSON per line
 #   $TMP/slack         Slack chat.postMessage bodies, one JSON per line
@@ -83,9 +83,9 @@ case "$1 $2" in
     prev=""; for a in "$@"; do [ "$prev" = --jq ] && filter="$a"; prev="$a"; done
     [ -f "$TMP/gh-list-down" ] && { echo "gh: boom" >&2; exit 1; }
     oid=""; [ -f "$TMP/merged-oid" ] && oid=$(cat "$TMP/merged-oid")
-    created="2026-01-01T00:00:00Z"; [ -f "$TMP/merged-created" ] && created=$(cat "$TMP/merged-created")
+    body=""; [ -f "$TMP/merged-head" ] && body="Commits considered: ... at head \`$(cat "$TMP/merged-head")\`, that reference X."
     if grep -qxF "$head" "$TMP/$st-prs"; then
-      jq -r "$filter" <<< "[{\"url\": \"https://github.com/o/r/pull/99\", \"createdAt\": \"$created\", \"mergeCommit\": {\"oid\": \"$oid\"}}]"
+      jq -r "$filter" <<< "[{\"url\": \"https://github.com/o/r/pull/99\", \"body\": $(jq -nc --arg b "$body" '$b'), \"mergeCommit\": {\"oid\": \"$oid\"}}]"
     else
       jq -r "$filter" <<< "[]"
     fi
@@ -569,13 +569,11 @@ EOF
 }
 
 @test "a merged revert whose conflicts were resolved by hand, branch deleted, is not reverted again" {
-  at() { export GIT_COMMITTER_DATE="2026-11-01T$1:00Z"; }
-  at 10:00; change f "one-a" "feat(SIG-1): A"
+  change f "one-a" "feat(SIG-1): A"
   ticket SIG-1 "QA Failed" 25
-  # The revert PR (opened 11:00) was finished by hand, so lib/revert.sh cannot
-  # prove it a revert: it carries extra code next to the revert.
-  echo "2026-11-01T11:00:00Z" > "$TMP/merged-created"
-  at 12:00
+  git rev-parse HEAD > "$TMP/merged-head"   # the run's head when it opened the PR
+  # The PR was finished by hand, so lib/revert.sh cannot prove it a revert:
+  # it carries extra code next to the revert.
   git revert --no-edit HEAD > /dev/null
   printf 'extra\n' > g
   git add g
@@ -586,28 +584,34 @@ EOF
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.tickets[0] | .action == "merged" and .pr_url == "https://github.com/o/r/pull/99"' > /dev/null
   [ "$(created)" -eq 0 ]
-  # Selection cannot prove that revert, and the run says so.
-  grep -q 'WARNING.*not provable' "$TMP/stderr"
+  # Selection cannot prove that revert; the run names the commit.
+  grep -q "WARNING.*$(sha_of "feat(SIG-1): A" | cut -c1-7).*not provable" "$TMP/stderr"
   # A fix that re-lands after the merged revert and fails QA again is reverted.
-  at 13:00; change h "h1" "feat(SIG-1): fix"
+  change h "h1" "feat(SIG-1): fix"
   run run_revert
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.tickets[0] | .action == "opened" and ([.reverted[].subject] == ["feat(SIG-1): fix"])' > /dev/null
 }
 
-@test "a commit that landed while the revert PR was open is not covered by it" {
-  at() { export GIT_COMMITTER_DATE="2026-11-01T$1:00Z"; }
-  at 10:00; change f "one-a" "feat(SIG-1): A"
+@test "a commit that landed after the head the revert PR was made from is not covered by it" {
+  change f "one-a" "feat(SIG-1): A"
   ticket SIG-1 "QA Failed" 25
-  echo "2026-11-01T11:00:00Z" > "$TMP/merged-created"
-  at 11:30; change g "b1" "feat(SIG-1): B"   # lands after the PR was opened
-  at 12:00
-  git revert --no-edit "$(sha_of "feat(SIG-1): A")" > /dev/null   # the revert PR reverts only A
+  git rev-parse HEAD > "$TMP/merged-head"
+  change g "b1" "feat(SIG-1): B"   # lands after the run's snapshot, before or during the PR
+  git revert --no-edit "$(sha_of "feat(SIG-1): A")" > /dev/null   # the PR reverts only A
   git rev-parse HEAD > "$TMP/merged-oid"
   echo "prodzilla/revert-SIG-1" > "$TMP/merged-prs"
   run run_revert
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.tickets[0] | .action == "opened" and ([.reverted[].subject] == ["feat(SIG-1): B"])' > /dev/null
+}
+
+@test "the revert PR body names the head it was made from" {
+  change f "one-a" "feat(SIG-1): A"
+  ticket SIG-1 "QA Failed" 25
+  run run_revert
+  [ "$status" -eq 0 ]
+  grep -qF "at head \`$(git rev-parse HEAD)\`" "$TMP/pr-create-1"
 }
 
 @test "PR creation that fails after GitHub created the PR keeps the branch and links the PR" {
