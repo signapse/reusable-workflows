@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # prod-tags.sh [<release-tag>]
+# prod-tags.sh --require-all <release-tag>
 #
 # Read-only: which image tag each service runs in prod, read from
 # signapse-core-k8s the same way deploy-prod.yml picks the file it edits
@@ -31,10 +32,18 @@
 # Stdout: [{service, path, current_tag, on_tag, rolled_back, deployed_previous}]
 # Exits 1 when a service has no prod patch file or the API fails: a guess
 # here could deploy over, or skip, a service.
+# --require-all: prints nothing when prod runs <release-tag> on every service;
+# otherwise prints "<svc> runs <tag>, ..." for the others and exits 2.
 
 # shellcheck source=SCRIPTDIR/../lib/common.sh
 source "$(dirname "$0")/../lib/common.sh"
 
+REQUIRE_ALL=false
+if [ "${1:-}" = --require-all ]; then
+  REQUIRE_ALL=true
+  shift
+  [ $# -eq 1 ] && [ -n "$1" ] || die "usage: prod-tags.sh --require-all <release-tag>"
+fi
 [ $# -le 1 ] || die "usage: prod-tags.sh [<release-tag>]"
 TAG="${1:-}"
 need gh
@@ -96,4 +105,9 @@ while IFS= read -r svc; do
   out=$(jq -c --argjson a "$out" --argjson f "$facts" --arg s "$svc" --arg p "$path" --arg c "$current" --arg t "$TAG" \
     '$a + [{service: $s, path: $p, current_tag: $c, on_tag: ($t != "" and $c == $t)} + $f]' <<< 'null')
 done <<< "$services"
+if [ "$REQUIRE_ALL" = true ]; then
+  off=$(jq -r '[.[] | select(.on_tag | not) | "\(.service) runs \(.current_tag)"] | join(", ")' <<< "$out")
+  [ -z "$off" ] || { echo "$off"; exit 2; }
+  exit 0
+fi
 echo "$out"
