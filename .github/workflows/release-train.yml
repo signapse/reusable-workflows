@@ -5,7 +5,8 @@ name: Release Train (reusable)
 #   qa-passed (ADR 0001, the Autonomous Delivery Pipeline): the `select` job
 #     picks the Release Candidate, the newest main build whose tickets all
 #     carry QA Passed, walking from the release tag prod runs, and outputs it
-#     (rc_sha, rc_image_tag, rc_tickets, untracked_commits, blocked_by).
+#     (rc_sha, rc_image_tag, rc_tickets, untracked_commits, blocked_by,
+#     staged_tag for prod's resume mode, SIG-2769).
 #     Callers trigger it from the event router (workflow_dispatch with
 #     `ticket` + `trigger_id`) plus an hourly schedule.
 #     The `promote` job then promotes it to staging (SIG-2764): inside the
@@ -301,6 +302,14 @@ on:
       selection_base:
         description: 'qa-passed: where the walk started: the release tag prod runs (or selection_base)'
         value: ${{ jobs.select.outputs.selection_base }}
+      staged_tag:
+        description: >-
+          qa-passed: newest selectable build that already carries a release
+          tag (what staging runs and prod may resume), empty when none
+        value: ${{ jobs.select.outputs.staged_tag }}
+      staged_tickets:
+        description: 'qa-passed: comma-separated tickets from selection_base to staged_tag'
+        value: ${{ jobs.select.outputs.staged_tickets }}
       selection:
         description: 'qa-passed: full selection JSON (see actions/release-train/scripts/release-candidate.sh)'
         value: ${{ jobs.select.outputs.selection }}
@@ -358,6 +367,8 @@ jobs:
       blocked_by: ${{ steps.select.outputs.blocked_by }}
       selection: ${{ steps.select.outputs.selection }}
       selection_base: ${{ steps.base.outputs.base }}
+      staged_tag: ${{ steps.select.outputs.staged_tag }}
+      staged_tickets: ${{ steps.select.outputs.staged_tickets }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -452,6 +463,8 @@ jobs:
             echo "last_release_tag=$(jq -r .last_release_tag <<< "$sel")"
             echo "untracked_commits=$(jq -c .untracked_commits <<< "$sel")"
             echo "blocked_by=$(jq -r '.blocked_by.id // ""' <<< "$sel")"
+            echo "staged_tag=$(jq -r '.staged.release_tag // ""' <<< "$sel")"
+            echo "staged_tickets=$(jq -r '.staged.tickets // [] | join(",")' <<< "$sel")"
             echo "selection<<$eof"
             echo "$sel"
             echo "$eof"

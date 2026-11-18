@@ -70,7 +70,9 @@ does nothing then.
 
 `rc_tickets` are all the live tickets from prod's tag to the Release
 Candidate, not only the ones new since the last Promotion. Staging tests and
-prod act on that same set.
+prod act on that same set. `staged_tag` and `staged_tickets` name the newest
+selectable build that already carries a release tag (and its tickets from
+prod's tag): what prod deploys when a run promotes nothing new.
 
 ### Why a successful main-push run, not an ECR lookup
 
@@ -93,6 +95,8 @@ prod act on that same set.
 | `untracked_commits` | `[{"sha":"…","subject":"chore(deps): …"}, {"sha":"…","subject":"Revert …","revert":true}]` | Commits riding along without a ticket check: ticketless commits, and revert commits (`revert: true`) even when their message, PR title or branch names a ticket |
 | `blocked_by` | `SIG-3` | Ticket that stopped the line, empty when none |
 | `selection_base` | `1.2.40` | Where the walk started: the release tag prod runs |
+| `staged_tag` | `1.2.44` | Newest selectable build already carrying a release tag, empty when none (prod resume, SIG-2769) |
+| `staged_tickets` | `SIG-1,SIG-2` | Tickets from `selection_base` to `staged_tag` |
 | `selection` | JSON | Everything above plus every walked commit, its tickets and build, and the blocking commit (`blocked_by.sha`) |
 
 The job summary shows the same data with links.
@@ -249,12 +253,13 @@ ahead of code, never behind it.
 
 ### Prod (SIG-2769)
 
-This PR gates staging only. The prod Deployment (SIG-2769) calls the same
-action with `environment: prod` before it deploys. terraform-deploy.yml runs
-every prod apply in signapse-core-terraform's `prod-apply` environment, which
-waits for a `prod-approvers` reviewer (ADR 0002 Decisions 19 and 30). The
-gate's wait (`timeout_minutes`, at most 50) includes that approval: with no
-approval in time the gate fails and nothing is deployed.
+`release-train-prod.yml` runs the same action with `environment: prod`
+before the prod deploy (see [Dark Deployment to prod](#dark-deployment-to-prod-sig-2769)).
+terraform-deploy.yml runs every prod apply in signapse-core-terraform's
+`prod-apply` environment, which waits for a `prod-approvers` reviewer (ADR
+0002 Decisions 19 and 30). The gate's wait (`timeout_minutes`, at most 50)
+includes that approval: with no approval in time the gate fails and nothing
+is deployed.
 
 ### Dev
 
@@ -384,6 +389,148 @@ cannot disagree. Secrets:
 (`E2E_STAGING_SIGNSTUDIO_ADMIN_API_TOKEN`, `E2E_STAGING_SIGNSTUDIO_USER_EMAIL`,
 `E2E_STAGING_SIGNSTUDIO_USER_PASSWORD`, `E2E_LINEAR_API_KEY`).
 
+## Dark Deployment to prod (SIG-2769)
+
+When staging passes, `release-train-prod.yml` deploys the Release Candidate to
+prod with no human approval (spec step 6, ADR 0004). Feature tickets' flags
+stay QA Cohort only, so customers see nothing new until a Rollout.
+
+```text
+prod (caller job, needs: [train, staging])
+  deploy    prod-plan.sh          window (or hotfix) / deferred / already_deployed / nothing / refused
+            feature-flag-guard    AC5: Feature flags QA Cohort only in prod (read-only)
+            terraform-gate        AC2: product's prod stack, environment prod
+            prod-deploy.sh        AC1: dispatch signapse-core-k8s deploy-prod.yml per service, wait
+            prod-tags.sh          prod now runs the tag on every service
+  release   deployment-release.yml@main   AC3: Linear Release (Deployed), Sentry release + production deploy
+  smoke     signapse-e2e playwright.yml@main, environment prod, grep @prod-safe   AC4
+  verdict   pass: flag guard again, tickets -> On Prod (only from on_prod_from)
+            fail: prod_smoke_passed=false, run red (SIG-2771 rolls back)
+```
+
+### Every ticket since prod's tag must have passed staging (both modes)
+
+`prod-plan.sh` takes the tickets of every commit from the tag prod runs to
+the tag it deploys (plus the `tickets` input), and checks each one in
+Linear: it carries `Staging Passed`, does not carry `Staging Failed`, and is
+not in `QA Failed`. Commits reverted later in that range, and revert commits,
+add no tickets (`lib/revert.sh`, the same rule as the selection).
+
+- **Fresh** (`release_tag` set, staging just passed): any ticket without a
+  staging pass on record makes the decision `refused` and the run red. This
+  is what stops a tag that failed staging (or was rolled back) from reaching
+  prod inside a newer tag: its tickets are still in `QA Failed`.
+- **Resume**: the same check gives `nothing`.
+
+Neither mode deploys over a release tag the candidate does not contain (for
+example a newer tag deployed by hand with deploy-prod.yml): fresh refuses,
+resume gives `nothing`.
+
+`Staging Passed` is cleared at every Promotion (SIG-2764), so it always
+belongs to the newest tag's staging run.
+
+### Deferral and resume (AC6)
+
+Nothing is stored. A staging pass outside the deploy window ends with
+`decision=deferred` and nothing done. The caller calls the prod workflow on
+every run where staging was not attempted (`needs.staging.result ==
+'skipped'`: nothing new promoted, a deferred Promotion, or a train that
+failed), with `release_tag` empty. That is **resume mode**: take
+`resume_tag` (the train's `staged_tag`: the newest selectable build that
+already carries a release tag), or else the newest release tag on the
+branch, and deploy it when, read fresh from Linear and signapse-core-k8s:
+
+- prod does not run it yet on every service,
+- prod never ran it and moved off it: no `Rolled-back-from: <tag>` trailer
+  (rollback.yml) and no `deploy(prod): <svc> → <tag>` commit followed by
+  another tag (a manual deploy-prod.yml rollback) in the service's prod file
+  history (every page of it),
+- it has at least one ticket, and every ticket since prod's tag has its
+  staging pass on record (above),
+- the deploy window is open (or a ticket carries `hotfix`).
+
+The template's hourly and 09:01 schedules are the resume trigger. A
+ticketless tag cannot prove its staging pass from Linear, so it waits for the
+next Release Candidate (or a manual deploy). A train run that fails (a
+blocked Terraform gate, a staging wait that timed out) no longer stops prod
+from deploying an earlier tag that already passed staging.
+
+### Ticket moves and the flag guard
+
+- On a pass, tickets move to `On Prod` only from `on_prod_from` (default
+  `On Staging`). A ticket already Rolling Out or Done (a follow-up commit)
+  stays; nothing leaves `QA Failed`.
+- The AC5 flag guard accepts a Feature flag's non-environment condition only
+  when every property is the QA Cohort, `qa_cohort_id` (PostHog cohort id,
+  created by SIG-2749). Another cohort, or no `qa_cohort_id` with Feature
+  tickets to check, fails the guard. Every page of PostHog's flag search is
+  read.
+- The guard reads the PostHog **prod** project, `posthog_project_id_prod`
+  (default `256388`). Decision (Alex, 2026-11-09) 10: each flag also exists
+  in the dev project (`275880`), on for everyone; nothing here reads it.
+- If the flag guard fails after a passed smoke, tickets do not move and a
+  critical Slack alert (`<!channel>`) goes out. Nothing is rolled back: a
+  widened flag is a PostHog change that an image rollback does not undo. A
+  failed ticket move after a passed smoke gets a plain alert.
+- A `refused` plan (no staging pass on record, a tag rolled back from
+  before, or prod runs a release tag the candidate does not contain) alerts
+  Slack too: later resume runs report `nothing` for the same reason.
+- If a deploy-prod run or the final "prod runs the tag" check fails or times
+  out, `scripts/prod-partial.sh` waits (up to 10 minutes) for any deploy-prod
+  run still going (it pushes the tag before its rollout check), then re-reads
+  the tags prod runs:
+  - some dispatched services run the new tag: a failed Deployment.
+    `partial_deployment` is `true`, `moved_services` lists them and
+    `prod_smoke_passed` is `false`, so SIG-2771's rollback restores exactly
+    them. Critical Slack alert naming them.
+  - none does: prod is unchanged, nothing to roll back.
+  - unknown (tags unreadable, or a run still going or never found while its
+    service is not on the tag yet): never guessed. Critical Slack alert, no
+    automatic rollback, `prod_smoke_passed` stays empty; a human checks.
+
+### Idempotency and concurrency
+
+- A service already running the tag is not dispatched again. If every service
+  runs it (a re-run after the deploy), the decision is `already_deployed`:
+  no window check, no Terraform gate, straight to release, smoke and verdict.
+  The previous tag comes from deploy-prod's own commit message (`Previous:`).
+- deployment-release.yml reuses the Release for the version.
+- The `deploy` job holds `deployment-prod-<repo>`, never cancelled. The
+  caller's workflow-level `release-train-<repo>` group serialises whole train
+  runs, so one Deployment's smoke and verdict never overlap another's deploy.
+
+### Finding the deploy-prod run
+
+deploy-prod.yml takes `service` and `tag` today, with no `run_key` input and
+no `run-name`. `prod-deploy.sh` correlates, best first: the run id the
+dispatch API returns (`return_run_details`); a run titled with
+`<run_key>-<service>`; exactly one new plain-titled run on `main` that did not
+exist before the dispatch (more than one: fail as ambiguous, never guess). A
+dispatch rejected with HTTP 422 for an unknown field starts nothing and is
+retried without it. Required change in signapse-core-k8s: add a `run_key`
+input and `run-name: ... [${{ inputs.run_key }}]` to deploy-prod.yml, like
+rollback.yml.
+
+### Outputs (for SIG-2771)
+
+`decision`, `deployed`, `release_tag`, `version`, `sha`,
+`tickets`, `dispatched_services`, `previous_tags` (`{service: tag}`),
+`run_key` (service S was dispatched with `<run_key>-<S>`), `deploy_runs`,
+`terraform_gate`, `terraform_run_url`, `linear_release_id`,
+`linear_release_url`, `prod_smoke_passed` (`true`/`false` once deployed;
+`false` after a partial Deployment), `partial_deployment`, `moved_services`,
+`smoke_report_url`. The rollback job chains on
+`needs.prod.outputs.prod_smoke_passed == 'false'`.
+
+### Sentry production deploy marker
+
+The production deploy marker now comes from deployment-release.yml after the
+actual Deployment. `retag-release.yml` gained `sentry_environment` (default
+`production`, so the legacy ready-for-prod flow is unchanged). A qa-passed
+repo that still calls retag-release sets `sentry_environment: ''` so cutting
+the tag records no production deploy. The qa-passed train itself tags through
+the API and never calls retag-release.
+
 ## Caller template (`.github/workflows/release-train.yml` in the product repo)
 
 The event router (SIG-2758) dispatches this file with `ticket` and
@@ -483,6 +630,41 @@ jobs:
       E2E_STAGING_SIGNSTUDIO_USER_EMAIL: ${{ secrets.E2E_STAGING_SIGNSTUDIO_USER_EMAIL }}
       E2E_STAGING_SIGNSTUDIO_USER_PASSWORD: ${{ secrets.E2E_STAGING_SIGNSTUDIO_USER_PASSWORD }}
       E2E_LINEAR_API_KEY: ${{ secrets.E2E_LINEAR_API_KEY }}
+
+  # Dark Deployment to prod (SIG-2769). Fresh after a staging pass; resume
+  # (release_tag empty) on runs where staging was not attempted, which is how
+  # a deferred Deployment reaches prod in the next window.
+  prod:
+    needs: [train, staging]
+    # Fresh after a staging pass; resume whenever staging was not attempted
+    # (nothing new, deferred, or the train failed), never after a staging
+    # failure or a cancelled run.
+    if: >-
+      !cancelled() &&
+      (needs.staging.outputs.staging_passed == 'true' || needs.staging.result == 'skipped')
+    uses: signapse/reusable-workflows/.github/workflows/release-train-prod.yml@main
+    permissions:
+      contents: read
+    with:
+      release_tag: ${{ needs.staging.outputs.staging_passed == 'true' && needs.train.outputs.release_tag || '' }}
+      resume_tag: ${{ needs.train.outputs.staged_tag }}
+      tickets: ${{ needs.staging.outputs.staging_passed == 'true' && needs.train.outputs.rc_tickets || needs.train.outputs.staged_tickets }}
+      qa_cohort_id: ${{ vars.POSTHOG_QA_COHORT_ID }}   # AC5 guard
+      prod_services: '["signstream-api","signstream-websocket"]'   # deploy-prod.yml service names
+      slack_channel: '#signstream-releases'
+      read_app_id: ${{ vars.PIPELINE_READ_APP_ID }}
+      prodzilla_app_id: ${{ vars.PRODZILLA_APP_ID }}
+      # deployment_release_since: <sha>   # only for the pipeline's first Deployment
+    secrets:
+      LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+      READ_APP_PRIVATE_KEY: ${{ secrets.READ_APP_PRIVATE_KEY }}
+      PRODZILLA_APP_PRIVATE_KEY: ${{ secrets.PRODZILLA_APP_PRIVATE_KEY }}
+      SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+      SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+      POSTHOG_READ_API_KEY: ${{ secrets.POSTHOG_READ_API_KEY }}
+      E2E_PROD_SIGNSTUDIO_ADMIN_API_TOKEN: ${{ secrets.E2E_PROD_SIGNSTUDIO_ADMIN_API_TOKEN }}
+      E2E_PROD_SIGNSTUDIO_USER_EMAIL: ${{ secrets.E2E_PROD_SIGNSTUDIO_USER_EMAIL }}
+      E2E_PROD_SIGNSTUDIO_USER_PASSWORD: ${{ secrets.E2E_PROD_SIGNSTUDIO_USER_PASSWORD }}
 ```
 
 `prod_services` and `read_app_id` (with secret `READ_APP_PRIVATE_KEY`) are

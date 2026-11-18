@@ -48,6 +48,16 @@ on:
         required: false
         type: string
         default: ''
+      sentry_environment:
+        description: >-
+          Environment of the Sentry deploy marker recorded with the release.
+          Default production (legacy ready-for-prod flow: cutting the tag is
+          the prod deploy). qa-passed callers set '' : the tag is cut on
+          Promotion to staging, and release-train-prod.yml records the
+          production deploy when the Deployment actually happens (SIG-2769).
+        required: false
+        type: string
+        default: 'production'
     secrets:
       SENTRY_AUTH_TOKEN:
         required: false
@@ -151,5 +161,6 @@ jobs:
           SENTRY_PROJECT: ${{ inputs.sentry_project }}
         with:
           version: ${{ github.event.release.tag_name || inputs.tag }}
-          environment: production
+          # Empty: release only, no deploy marker.
+          environment: ${{ inputs.sentry_environment }}
           set_commits: auto
