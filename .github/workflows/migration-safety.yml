@@ -1,0 +1,83 @@
+name: Migration Safety (reusable)
+
+# Fails a pull request whose SQL migrations would break a rollback to the
+# previous code (DROP / RENAME / ALTER COLUMN TYPE / SET NOT NULL ...), unless
+# a reviewer clears it. See docs/MIGRATION-SAFETY.md.
+#
+# The caller owns `on:` and MUST include pull_request_review, so a reviewer's
+# override re-runs the check:
+#
+#   on:
+#     pull_request:
+#     pull_request_review:
+#       types: [submitted, edited, dismissed]
+#   jobs:
+#     migration-safety:
+#       uses: signapse/reusable-workflows/.github/workflows/migration-safety.yml@main
+#       permissions:
+#         contents: read
+#         pull-requests: read
+#       with:
+#         reusable_workflows_ref: main   # same ref as the @ pin above
+
+on:
+  workflow_call:
+    inputs:
+      migration_paths:
+        description: >-
+          Extended regex over repo-relative paths of migration files. Default
+          matches golang-migrate and goose (`.../migrations/*.sql`, also
+          `.../language_migrations/*.sql`) and Flyway
+          (`.../db/migration/*.sql`). `*.down.sql` and Flyway `U*__*.sql` are
+          always skipped.
+        required: false
+        type: string
+        default: '(^|/)[A-Za-z0-9_-]*migrations?/.+\.sql$'
+      reusable_workflows_ref:
+        description: >-
+          Ref of signapse/reusable-workflows to load the check scripts from.
+          Must match the ref in the caller's `uses: ...migration-safety.yml@<ref>`
+          (e.g. `v1`); a workflow call cannot see its own ref, so the default
+          `main` would otherwise run main's rules under a pinned workflow.
+        required: false
+        type: string
+        default: 'main'
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  check:
+    name: Migration safety
+    if: github.event.pull_request
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: migration-safety-${{ github.repository }}-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Checkout check scripts
+        uses: actions/checkout@v4
+        with:
+          repository: signapse/reusable-workflows
+          ref: ${{ inputs.reusable_workflows_ref }}
+          path: _rw
+          persist-credentials: false
+
+      - name: Check migrations
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          MIGRATION_PATH_REGEX: ${{ inputs.migration_paths }}
+          GH_TOKEN: ${{ github.token }}
+        run: bash _rw/actions/migration-safety/scripts/migration-safety.sh

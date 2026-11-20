@@ -477,6 +477,25 @@ jobs:
 | `disable-gitleaks` | boolean | `false` | Disable Gitleaks |
 | `extra-super-linter-env` | string | `''` | Extra Super-Linter env vars |
 
+### 7. Migration Safety (`migration-safety.yml`)
+
+Fails a PR whose SQL migrations would break a rollback to the previous code (DROP / RENAME / ALTER COLUMN TYPE / SET NOT NULL), unless a reviewer approves with `allow-destructive-migration` on a line of its own in the review. Silent when a PR changes no migrations. Adoption, the full rule list, the override, and expand/contract: [docs/MIGRATION-SAFETY.md](docs/MIGRATION-SAFETY.md).
+
+```yaml
+on:
+  pull_request:
+  pull_request_review:
+    types: [submitted, edited, dismissed]
+jobs:
+  migration-safety:
+    uses: signapse/reusable-workflows/.github/workflows/migration-safety.yml@main
+    permissions:
+      contents: read
+      pull-requests: read
+    with:
+      reusable_workflows_ref: main   # must match the @ref above, or the scripts come from main
+```
+
 ### 8. Main Push · dev smoke and QA hand-off (`main-push-dev.yml`)
 
 Opt-in companion to `main-push.yml`, called as a second job in the same caller run. It waits for dev to run the new `main-<n>-<sha>` tag, runs signapse-e2e `@smoke` on dev, and moves the build's tickets to `On Dev · Ready for QA` once every PR linked to each ticket, in any repo, is merged and passed its own dev smoke. On build, deploy or smoke failure it leaves tickets alone and comments on the merged PRs (plus Slack when `slack_channel` is set). The full caller example, secrets and the known gap (a ticket whose other linked PR is in a repo without this workflow can stay in In Review; re-run `tickets-to-dev-qa`) are in the header of [`main-push-dev.yml`](.github/workflows/main-push-dev.yml).
