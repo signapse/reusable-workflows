@@ -76,7 +76,7 @@ on:
         default: false
 
       jscpd-threshold:
-        description: 'JSCPD duplication threshold percentage (0-100). Set to 0 to use repo .jscpd.json or jscpd default'
+        description: "JSCPD duplication threshold percentage (0-100). Set to 0 to use the repo's .github/linters/.jscpd.json, or Super-Linter's default (0%)"
         required: false
         type: number
         default: 0
