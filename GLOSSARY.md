@@ -96,7 +96,7 @@ The GitHub App identity the Risk Gate approves as. The only bot whose approval c
 _Avoid_: CodeRabbit, which comments but never approves
 
 **Risk Comment**:
-A one-line inline comment on a single risky snippet, naming the system and what to check. At most five per pull request; tests, docs and Low-tier lines get none.
+An inline comment on one risky changed line. It leads with what to check (at most 10 words), then gives the tier, the Change kind and why (at most 12 words). There are at most five per pull request, and tests, docs and Low-tier pull requests get none.
 
 **Risk Floor**:
 The lowest tier a pull request can get, fixed by the files it touches and what they contain, worked out without AI. The Risk Check may raise a tier above it, never lower it.
