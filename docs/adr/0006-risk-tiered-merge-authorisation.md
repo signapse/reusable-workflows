@@ -8,7 +8,7 @@ deciders: Alexandru Balau
 
 Pull requests can wait days for a human approval, and the rule is the same for every change: one approval, whether the change fixes a typo or touches billing. Review effort isn't matched to what a change could break.
 
-For pull requests made through the Work Dashboard, we replace "one approval from anyone or any bot" with authorisation by Risk tier. Every other pull request keeps human review. A Standard change (Low) is pre-authorised by the procedure: the Risk Gate approves it and it auto-merges once CI is green. A Writer-authorised change (Medium) merges once the Writer resolves every Risk Comment. A Significant change (High) needs another engineer, who reads only the Risk Comments. The Risk Check's summary is the recorded impact assessment ISO 27001 A.8.32 asks for. Tiering decides merging to `main` only; production still moves through the delivery pipeline (ADR 0001–0004).
+For pull requests made through the Work Dashboard, we replace "one approval from anyone or any bot" with authorisation by Risk tier. Every other pull request keeps human review. A Standard change (Low) is pre-authorised by the procedure: the Risk Gate approves it and it auto-merges once CI is green. A Writer-authorised change (Medium) merges once the Writer posts a Risk Acceptance (`/accept-risk`) for its current diff. A Significant change (High) needs another engineer, who reads only the Risk Comments. The Risk Check's summary is the recorded impact assessment ISO 27001 A.8.32 asks for. Tiering decides merging to `main` only; production still moves through the delivery pipeline (ADR 0001–0004).
 
 ## Considered Options
 

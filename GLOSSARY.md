@@ -67,7 +67,11 @@ A Low-tier pull request. The change-management procedure pre-authorises it, so t
 _Avoid_: auto-approved PR, trivial change
 
 **Writer-authorised change**:
-A Medium-tier pull request. It merges once the Writer has resolved every Risk Comment.
+A Medium-tier pull request. It merges once the Writer posts a Risk Acceptance for its current diff.
+
+**Risk Acceptance**:
+The Writer's `/accept-risk` comment, posted after reading the Risk Comments, tied to the patch-id of the Risk Rating it accepts. A new diff cancels it; a rebase that leaves the changes the same keeps it.
+_Avoid_: sign-off, resolving the Risk Comments
 
 **Significant change**:
 A High-tier pull request. It needs an approval from an engineer other than the Writer, who reads the Risk Comments rather than the whole diff.
