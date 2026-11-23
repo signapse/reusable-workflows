@@ -48,6 +48,17 @@ function main() {
   const catalogue = JSON.parse(readFileSync(new URL('catalogue.json', import.meta.url), 'utf8'));
   const fl = floor({ repo: repo.split('/')[1], files: d.files }, catalogue);
   const { check, approve } = gate({ rating, prAuthor, headSha, patchId: d.patchId, floor: fl, mode, acceptance });
+
+  // The Risk Bot's own approvals, matched by its login. A run that doesn't approve withdraws them, first: a higher
+  // Risk Rating for the same head comes with no push, so nothing else would dismiss them. Shadow and off too.
+  const botApprovals = ghAll(`repos/${repo}/pulls/${number}/reviews`).filter(r => r.user?.login === `${slug}[bot]` && r.state === 'APPROVED');
+  if (!approve) {
+    for (const { id } of botApprovals) {
+      if (!Number.isInteger(id)) throw new Error('Risk Gate: a review has no numeric id');
+      gh(['-X', 'PUT', `repos/${repo}/pulls/${number}/reviews/${id}/dismissals`], { message: `Risk Gate: ${check?.title ?? 'off'}; approval withdrawn`, event: 'DISMISS' });
+      console.log(`Risk Gate: withdrew the Risk Bot's approval (review ${id})`);
+    }
+  }
   if (!check) return console.log('Risk Gate: off');
 
   // Create or update the Risk Bot's own "Risk Gate" check on the head.
@@ -60,8 +71,7 @@ function main() {
 
   // Approve the judged head (commit_id pins it), once.
   if (!approve) return;
-  const approved = ghAll(`repos/${repo}/pulls/${number}/reviews`).some(r => r.user?.login === `${slug}[bot]` && r.state === 'APPROVED' && r.commit_id === headSha);
-  if (approved) return console.log('Risk Gate: the Risk Bot already approved this head');
+  if (botApprovals.some(r => r.commit_id === headSha)) return console.log('Risk Gate: the Risk Bot already approved this head');
   gh(['-X', 'POST', `repos/${repo}/pulls/${number}/reviews`], { commit_id: headSha, event: 'APPROVE', body: `Risk Gate: ${check.title}` });
 }
 

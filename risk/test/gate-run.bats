@@ -14,7 +14,7 @@ setup() {
 echo "gh $*" >>"$CALLS"
 case "$*" in *--input*) cat >>"$CALLS"; echo >>"$CALLS" ;; esac
 case "$*" in
-  *"-X POST"* | *"-X PATCH"*) echo '{"id":1}' ;;
+  *"-X POST"* | *"-X PATCH"* | *"-X PUT"*) echo '{"id":1}' ;;
   *" repos/signapse/app/pulls/7") cat "$GH_DATA/pr.json" ;;
   *" repos/signapse/app/issues/7/comments") cat "$GH_DATA/comments.json" ;;
   *" repos/signapse/app/pulls/7/reviews") cat "$GH_DATA/reviews.json" ;;
@@ -63,6 +63,9 @@ rate() {
 
 calls() { grep -c -- "$1" "$CALLS" || true; }
 
+# approved_by LOGIN ID [COMMIT]: one APPROVED review, as the slurped reviews list.
+approved_by() { echo "[[{\"id\":$2,\"user\":{\"login\":\"$1\"},\"state\":\"APPROVED\",\"commit_id\":\"${3:-$HEAD_SHA}\",\"body\":\"Risk Gate: Low: approved by the Risk Bot\"}]]"; }
+
 @test "live: a valid Low Risk Rating creates the Risk Gate check and approves the head" {
   RISK_GATE_MODE=live run node "$RISK/gate-run.js"
   [ "$status" -eq 0 ]
@@ -78,12 +81,14 @@ calls() { grep -c -- "$1" "$CALLS" || true; }
   git cat-file -e "$HEAD_SHA^{commit}"
 }
 
-@test "shadow: the same rating creates the check but never approves" {
+@test "shadow: the same rating creates the check, never approves, and withdraws a standing Risk Bot approval" {
+  approved_by signapse-risk-bot[bot] 99 >"$GH_DATA/reviews.json"
   RISK_GATE_MODE=shadow run node "$RISK/gate-run.js"
   [ "$status" -eq 0 ]
   [[ "$output" == *"Risk Gate: Low (shadow): would be approved"* ]]
   [ "$(calls '^gh api -X POST repos/signapse/app/check-runs --input -$')" -eq 1 ]
-  [ "$(calls 'pulls/7/reviews')" -eq 0 ]
+  [ "$(calls '^gh api -X PUT repos/signapse/app/pulls/7/reviews/99/dismissals --input -$')" -eq 1 ]
+  [ "$(calls '^gh api -X POST repos/signapse/app/pulls/7/reviews')" -eq 0 ]
 }
 
 @test "issue_comment: updates the Risk Bot's own check and does not approve a head it already approved" {
@@ -102,7 +107,33 @@ calls() { grep -c -- "$1" "$CALLS" || true; }
   RISK_GATE_MODE=live run node "$RISK/gate-run.js"
   [ "$status" -eq 0 ]
   [[ "$output" == *"Risk Gate: Medium: waiting for the Writer's Risk Acceptance"* ]]
-  [ "$(calls 'pulls/7/reviews')" -eq 0 ]
+  [ "$(calls '^gh api -X POST repos/signapse/app/pulls/7/reviews')" -eq 0 ]
+  [ "$(calls 'dismissals')" -eq 0 ]
+}
+
+@test "live: a High Risk Rating for an approved head withdraws the Risk Bot's approval and approves nothing" {
+  # The Writer raised the rating to High with no push: same head, same patch-id. Another engineer's approval, even
+  # one whose text looks like the Gate's, is left alone: only the Risk Bot's login counts.
+  rate high
+  echo "[[{\"id\":98,\"user\":{\"login\":\"engineer\"},\"state\":\"APPROVED\",\"commit_id\":\"$HEAD_SHA\",\"body\":\"Risk Gate: Low: approved by the Risk Bot\"},
+         {\"id\":99,\"user\":{\"login\":\"signapse-risk-bot[bot]\"},\"state\":\"APPROVED\",\"commit_id\":\"$HEAD_SHA\"},
+         {\"id\":100,\"user\":{\"login\":\"signapse-risk-bot[bot]\"},\"state\":\"DISMISSED\",\"commit_id\":\"$HEAD_SHA\"}]]" >"$GH_DATA/reviews.json"
+  RISK_GATE_MODE=live run node "$RISK/gate-run.js"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Risk Gate: High: needs another engineer's approval"* ]]
+  [ "$(calls 'dismissals')" -eq 1 ]
+  [ "$(calls '^gh api -X PUT repos/signapse/app/pulls/7/reviews/99/dismissals --input -$')" -eq 1 ]
+  grep -q "{\"message\":\"Risk Gate: High: needs another engineer's approval; approval withdrawn\",\"event\":\"DISMISS\"}" "$CALLS"
+  [ "$(calls '^gh api -X POST repos/signapse/app/pulls/7/reviews')" -eq 0 ]
+}
+
+@test "off: posts no check but still withdraws a standing Risk Bot approval" {
+  approved_by signapse-risk-bot[bot] 99 >"$GH_DATA/reviews.json"
+  RISK_GATE_MODE=off run node "$RISK/gate-run.js"
+  [ "$status" -eq 0 ]
+  [ "$(calls '^gh api -X PUT repos/signapse/app/pulls/7/reviews/99/dismissals --input -$')" -eq 1 ]
+  [ "$(calls 'check-runs')" -eq 0 ]
+  [ "$(calls '^gh api -X POST')" -eq 0 ]
 }
 
 @test "issue_comment on an issue that is not a pull request: no GitHub calls at all" {

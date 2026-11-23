@@ -1,7 +1,8 @@
 name: Risk Gate (reusable)
 
 # Checks the Writer's Risk Rating against the pull request's diff, raises its tier to the Risk Floor, posts a
-# "Risk Gate" check that never fails and, in live mode, approves as the Risk Bot. No AI in it. It never checks out or
+# "Risk Gate" check that never fails and, in live mode, approves as the Risk Bot. A run that doesn't approve withdraws
+# any approval the Risk Bot still has on the pull request. No AI in it. It never checks out or
 # runs the pull request's code: the head is fetched as git objects and diffed. See risk/README.md for the caller
 # (pull_request_target + issue_comment, so a pull request can't edit the Gate that judges it) and ADR 0007.
 
