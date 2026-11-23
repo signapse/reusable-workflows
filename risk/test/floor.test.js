@@ -80,6 +80,17 @@ test('rubricTier: the highest tier any present kind earns on that system tier', 
   assert.equal(rubricTier({ ...none, auth: false, 'ui-copy': true }, 1), 'low');
 });
 
+test('rubricTier: every High cell of the Rubric stays High', () => {
+  // Lowering a High row must fail CI. auth, money, data and infra-deploy are High on every system tier, and no
+  // calibration PR depends on them (or on secret-config, dependency, or Tier 1 contract and input-rejection) alone,
+  // so the golden table in regression.test.js can't see them lowered; this pin does. Raises pass; when the Rubric
+  // raises a cell to High, add it here.
+  const high = { auth: [1, 2, 3], money: [1, 2, 3], data: [1, 2, 3], 'infra-deploy': [1, 2, 3], contract: [1, 2], 'secret-config': [1, 2], 'input-rejection': [1, 2], dependency: [1], 'live-behaviour': [1] };
+  for (const [kind, systemTiers] of Object.entries(high)) {
+    for (const systemTier of systemTiers) assert.equal(rubricTier({ [kind]: true }, systemTier), 'high', `${kind} on Tier ${systemTier}`);
+  }
+});
+
 test('rubricTier: refuses a system tier outside 1-3 rather than rating Low', () => {
   assert.throws(() => rubricTier({ auth: true }, undefined));
   assert.throws(() => rubricTier({ auth: true }, 4));
