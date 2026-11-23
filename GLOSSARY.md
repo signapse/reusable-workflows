@@ -63,7 +63,7 @@ Low, Medium or High: how much harm merging a pull request could do, which decide
 _Avoid_: severity, risk score, risk level
 
 **Standard change**:
-A Low-tier pull request. The change-management procedure pre-authorises it, so the Risk Bot approves it and it merges once CI is green.
+A Low-tier pull request. The change-management procedure pre-authorises it, so the Risk Gate approves it and it merges once CI is green.
 _Avoid_: auto-approved PR, trivial change
 
 **Writer-authorised change**:
@@ -77,11 +77,14 @@ The engineer accountable for a pull request: its author or, for a factory pull r
 _Avoid_: author (ambiguous for factory pull requests), owner
 
 **Risk Check**:
-The classification of a pull request in a context separate from whoever wrote it, against the Catalogue and Rubric on `main`. Its summary is the change's recorded impact assessment.
+The AI classification of a pull request, run by the Work Dashboard in a context separate from the agent or person who wrote it, against the Catalogue and Rubric on `main`. Its summary is the change's recorded impact assessment.
 _Avoid_: risk review, risk audit (the audits are the factory's code and security reviews)
 
+**Risk Gate**:
+The GitHub Action, with no AI in it, that raises a Risk Check's tier to the Risk Floor, waits for CI, and approves as the Risk Bot when the tier allows.
+
 **Risk Bot**:
-The GitHub App that runs the Risk Check, posts Risk Comments and approves Standard changes. The only bot whose approval counts.
+The GitHub App identity the Risk Gate approves as. The only bot whose approval counts.
 _Avoid_: CodeRabbit, which comments but never approves
 
 **Risk Comment**:
