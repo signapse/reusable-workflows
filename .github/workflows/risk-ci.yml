@@ -1,0 +1,23 @@
+name: risk CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - 'risk/**'
+      - '.github/workflows/risk-ci.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Run risk core tests (node:test, no dependencies)
+        working-directory: risk
+        run: node --test
