@@ -91,7 +91,11 @@ _Avoid_: CodeRabbit, which comments but never approves
 A one-line inline comment on a single risky snippet, naming the system and what to check. At most five per pull request; tests, docs and Low-tier lines get none.
 
 **Risk Floor**:
-The lowest tier a pull request can get, fixed by the files it touches. The Risk Check may raise a tier above it, never lower it.
+The lowest tier a pull request can get, fixed by the files it touches and what they contain, worked out without AI. The Risk Check may raise a tier above it, never lower it.
+
+**Change kind**:
+A category of change the Rubric scores, such as auth, money, data, contract, secret or config, dependency, infra or deploy, live-path behaviour, other behaviour, UI copy, or tests and docs.
+_Avoid_: change type, category
 
 **Catalogue**:
 Signapse's systems, each with a system tier (1 critical, 2 important, 3 standard), its repos and paths, an owner and the reason for its tier.
