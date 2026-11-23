@@ -1,6 +1,6 @@
 # Delivery Pipeline
 
-How a Linear ticket's code travels from merge to every user: dev, staging, a dark prod deployment, then a flag rollout.
+How a Linear ticket's code travels from pull request to every user: a merge authorised by its risk tier, then dev, staging, a dark prod deployment and a flag rollout.
 
 ## Promotion
 
@@ -55,6 +55,54 @@ The 24 hours after a Rollout reaches every user, during which Sentry's error rat
 **Prodzilla**:
 The whole release bot: the release train that forms and promotes Release Candidates, plus the event router that carries Linear and Slack events into GitHub and PostHog.
 _Avoid_: release bot, release train (that is only one part)
+
+## Merge
+
+**Risk tier**:
+Low, Medium or High: how much harm merging a pull request could do, which decides who must authorise the merge. Set by the Risk Check, never by the Writer.
+_Avoid_: severity, risk score, risk level
+
+**Standard change**:
+A Low-tier pull request. The change-management procedure pre-authorises it, so the Risk Bot approves it and it merges once CI is green.
+_Avoid_: auto-approved PR, trivial change
+
+**Writer-authorised change**:
+A Medium-tier pull request. It merges once the Writer has resolved every Risk Comment.
+
+**Significant change**:
+A High-tier pull request. It needs an approval from an engineer other than the Writer, who reads the Risk Comments rather than the whole diff.
+
+**Writer**:
+The engineer accountable for a pull request: its author or, for a factory pull request, the engineer who started the factory run.
+_Avoid_: author (ambiguous for factory pull requests), owner
+
+**Risk Check**:
+The classification of a pull request in a context separate from whoever wrote it, against the Catalogue and Rubric on `main`. Its summary is the change's recorded impact assessment.
+_Avoid_: risk review, risk audit (the audits are the factory's code and security reviews)
+
+**Risk Bot**:
+The GitHub App that runs the Risk Check, posts Risk Comments and approves Standard changes. The only bot whose approval counts.
+_Avoid_: CodeRabbit, which comments but never approves
+
+**Risk Comment**:
+A one-line inline comment on a single risky snippet, naming the system and what to check. At most five per pull request; tests, docs and Low-tier lines get none.
+
+**Risk Floor**:
+The lowest tier a pull request can get, fixed by the files it touches. The Risk Check may raise a tier above it, never lower it.
+
+**Catalogue**:
+Signapse's systems, each with a system tier (1 critical, 2 important, 3 standard), its repos and paths, an owner and the reason for its tier.
+_Avoid_: service list, inventory
+
+**Rubric**:
+The rules that turn a system tier and a kind of change into a Risk tier.
+
+**Shadow mode**:
+The Risk Check posts its tier and Risk Comments but approves nothing, so its ratings can be compared with engineers' before it is trusted.
+
+**Emergency merge**:
+A merge without the authorisation its tier needs, allowed only under the emergency procedure and reviewed afterwards.
+_Avoid_: admin bypass
 
 ## Tickets
 
