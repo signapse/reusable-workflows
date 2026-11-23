@@ -6,6 +6,7 @@ on:
     paths:
       - 'risk/**'
       - '.github/workflows/risk-ci.yml'
+      - '.github/workflows/risk-gate.yml'
 
 permissions:
   contents: read
@@ -21,3 +22,9 @@ jobs:
       - name: Run risk core tests (node:test, no dependencies)
         working-directory: risk
         run: node --test
+      - name: Install bats
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bats
+      - name: Run the Risk Gate end-to-end test (bats, stubbed gh)
+        run: bats risk/test

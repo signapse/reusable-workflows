@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { diff } from '../diff.js';
@@ -28,7 +28,10 @@ test('diff: files and text from merge-base to head, with a patch-id', t => {
   git('checkout', '-qb', 'feature');
   commit({ 'app.js': 'one\nTWO\nthree\n', 'new.js': 'x\n' }, 'change');
   const d = diff(dir, 'main', 'feature');
-  assert.deepEqual(d.files, [{ path: 'app.js', status: 'M' }, { path: 'new.js', status: 'A' }]);
+  assert.deepEqual(d.files.map(({ path, status }) => ({ path, status })), [{ path: 'app.js', status: 'M' }, { path: 'new.js', status: 'A' }]);
+  assert.equal(d.files.map(f => f.patch).join(''), d.text);
+  assert.match(d.files[0].patch, /^diff --git a\/app\.js b\/app\.js\n[\s\S]*^\+TWO$/m);
+  assert.match(d.files[1].patch, /^diff --git a\/new\.js b\/new\.js\n[\s\S]*^\+x$/m);
   assert.match(d.text, /^diff --git a\/app\.js b\/app\.js/m);
   assert.match(d.text, /^\+TWO$/m);
   assert.match(d.patchId, /^[0-9a-f]{40}$/);
@@ -58,6 +61,19 @@ test('diff: a new patch-id when the changes change, binary files included', t =>
   git('checkout', '-qb', 'b', 'main');
   const binary2 = diff(dir, 'main', commit({ 'logo.bin': Buffer.from([0, 1, 4]) }, 'other binary')).patchId;
   assert.equal(new Set([binary1, text1, text2, binary2]).size, 4);
+});
+
+test('diff: each file gets its own patch, whatever its name, and a type change keeps both halves', t => {
+  const { dir, git, commit } = repo(t);
+  git('checkout', '-qb', 'feature');
+  rmSync(join(dir, 'other.js'));
+  symlinkSync('app.js', join(dir, 'other.js'));
+  const odd = ['we ird"q.js', 'tab\tx.js', 'é.js', 'x b.js'];
+  const d = diff(dir, 'main', commit(Object.fromEntries(odd.map(p => [p, `+${p}\n`])), 'odd'));
+  assert.deepEqual(d.files.map(f => f.status), ['T', 'A', 'A', 'A', 'A']);
+  assert.equal(d.files.map(f => f.patch).join(''), d.text);
+  assert.equal(d.files[0].patch.match(/^diff --git /gm).length, 2, 'the delete and the add of other.js');
+  for (const f of d.files.slice(1)) assert.ok(f.patch.includes(`++${f.path}`), f.path);
 });
 
 test('diff: an empty diff has no patch-id', t => {
