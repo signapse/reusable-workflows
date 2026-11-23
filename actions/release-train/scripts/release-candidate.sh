@@ -44,8 +44,12 @@
 #   {base, last_release_tag, head_sha, outcome, already_promoted,
 #    rc: {sha, image_tag, run_number, run_url, release_tag} | null,
 #    tickets: [{id, title, url, state}],          # every live ticket from <base> to the RC
+#    new_tickets: [id],                            # those of them in commits after last_release_tag
 #    untracked_commits: [{sha, subject, revert?}],# ticketless and revert commits up to the RC
 #    reverted: [{sha, subject, tickets, reverted_by}],  # reverted commits walked
+#    staged: {sha, image_tag, release_tag, tickets: [ids]} | null,
+#                       # newest build up to the RC that already carries a
+#                       # release tag: what prod may deploy (resume mode)
 #    blocked_by: {id, title, url, state, reason, sha, subject} | null,
 #    commits: [{sha, subject, tickets, build, kind}]}   # every commit walked
 # outcome: selected | already_promoted (the RC already carries a release tag:
@@ -168,6 +172,7 @@ tickets_pending='[]'
 reverted='[]'
 holes='[]'   # live reverting commits not walked yet: no build is selectable
 rc='null'
+staged='null'
 blocked='null'
 
 while IFS= read -r sha; do
@@ -250,6 +255,11 @@ while IFS= read -r sha; do
     untracked=$(jq -nc --argjson a "$untracked" --argjson b "$untracked_pending" '$a + $b')
     tickets_pending='[]'
     untracked_pending='[]'
+    if [ -n "$tag" ]; then
+      # shellcheck disable=SC2016 # jq bindings, not shell expansion.
+      staged=$(jq -nc --argjson rc "$rc" --argjson t "$tickets" \
+        '{sha: $rc.sha, image_tag: $rc.image_tag, release_tag: $rc.release_tag, tickets: [$t[].id]}')
+    fi
   elif [ "$build" != 'null' ]; then
     log "build of ${sha:0:7} is not selectable: it still contains reverted code (revert not merged yet)"
   fi
@@ -257,8 +267,15 @@ done < <(git rev-list --first-parent --reverse "${LAST_TAG}..${head_sha}")
 
 already=false
 outcome=none
+new_tickets='[]'
 if [ "$rc" != 'null' ]; then
   outcome=selected
+  # Tickets in commits after the last Promotion, up to the RC: the ones this
+  # Promotion brings to staging (its hotfix check, promotion-plan.sh).
+  since=$(git rev-list --first-parent "${last_release:-$LAST_TAG}..$(printf '%s' "$rc" | jq -r .sha)" | jq -R . | jq -sc .)
+  # shellcheck disable=SC2016 # jq bindings, not shell expansion.
+  new_tickets=$(jq -nc --argjson c "$commits" --argjson s "$since" --argjson t "$tickets" \
+    '[$t[].id] as $live | [$c[] | select(.sha as $x | $s | index($x)) | .tickets[] | select(. as $i | $live | index($i))] | unique')
   if [ -n "$(printf '%s' "$rc" | jq -r .release_tag)" ]; then
     already=true
     outcome=already_promoted
@@ -276,9 +293,11 @@ jq -nc \
   --argjson tickets "$tickets" \
   --argjson untracked "$untracked" \
   --argjson reverted "$reverted" \
+  --argjson staged "$staged" \
   --argjson blocked "$blocked" \
   --argjson commits "$commits" \
+  --argjson new_tickets "$new_tickets" \
   '{base: $base, last_release_tag: $last_release, head_sha: $head_sha,
     outcome: $outcome, already_promoted: $already,
-    rc: $rc, tickets: $tickets, untracked_commits: $untracked, reverted: $reverted,
-    blocked_by: $blocked, commits: $commits}'
+    rc: $rc, tickets: $tickets, new_tickets: $new_tickets, untracked_commits: $untracked, reverted: $reverted,
+    staged: $staged, blocked_by: $blocked, commits: $commits}'
