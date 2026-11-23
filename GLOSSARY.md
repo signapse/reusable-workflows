@@ -113,7 +113,7 @@ _Avoid_: service list, inventory
 The rules that turn a system tier and a kind of change into a Risk tier.
 
 **Shadow mode**:
-The Risk Check posts its tier and Risk Comments but approves nothing, so its ratings can be compared with engineers' before it is trusted.
+The Risk Gate mode (`RISK_GATE_MODE=shadow`) in which Risk Ratings and the Risk Gate check are posted but nothing is approved and every pull request keeps human review, so the ratings can be compared with engineers' before they are trusted. `off` posts nothing; `live` approves.
 
 **Emergency merge**:
 A merge without the authorisation its tier needs, allowed only under the emergency procedure and reviewed afterwards.
