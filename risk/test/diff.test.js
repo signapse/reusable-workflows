@@ -63,6 +63,15 @@ test('diff: a new patch-id when the changes change, binary files included', t =>
   assert.equal(new Set([binary1, text1, text2, binary2]).size, 4);
 });
 
+test('diff: a whitespace-only change gets a new patch-id, so a re-indent needs a new Risk Acceptance', t => {
+  const { dir, git, commit } = repo(t);
+  git('checkout', '-qb', 'nested');
+  const nested = diff(dir, 'main', commit({ 'config.yml': 'a:\n  b: 1\n' }, 'b under a')).patchId;
+  git('checkout', '-qb', 'flat', 'main');
+  const flat = diff(dir, 'main', commit({ 'config.yml': 'a:\nb: 1\n' }, 'b beside a')).patchId;
+  assert.notEqual(nested, flat, 'same text, different indent: --stable gave both one patch-id');
+});
+
 test('diff: each file gets its own patch, whatever its name, and a type change keeps both halves', t => {
   const { dir, git, commit } = repo(t);
   git('checkout', '-qb', 'feature');

@@ -18,10 +18,30 @@ const run = (cmd, args, input) => execFileSync(cmd, args, { input, encoding: 'ut
 const gh = (args, body) => JSON.parse(run('gh', ['api', ...args, ...(body ? ['--input', '-'] : [])], body && JSON.stringify(body)) || 'null');
 const ghAll = path => gh(['--paginate', '--slurp', path]).flat();
 
+// A comment posted, edited or deleted all re-judge the pull request as it is now: an edit can raise a Risk Rating, and
+// a deletion can take back a Risk Acceptance. The workflow runs this only for the pull request author's comments.
 function prNumber(event) {
   if (eventName === 'pull_request_target') return event.pull_request?.number;
   if (eventName === 'issue_comment') return event.issue?.pull_request ? event.issue.number : null;
   throw new Error(`Risk Gate: unsupported event ${eventName}`);
+}
+
+// The Risk Bot's own approvals, matched by its login, never by the review text.
+const botApprovals = number => ghAll(`repos/${repo}/pulls/${number}/reviews`).filter(r => r.user?.login === `${slug}[bot]` && r.state === 'APPROVED');
+
+// Dismisses each of them, carrying on past one that fails, then throws if any failed.
+function withdraw(number, approvals, why) {
+  const failed = [];
+  for (const { id } of approvals) {
+    try {
+      if (!Number.isInteger(id)) throw new Error('the review has no numeric id');
+      gh(['-X', 'PUT', `repos/${repo}/pulls/${number}/reviews/${id}/dismissals`], { message: `Risk Gate: ${why}; approval withdrawn`, event: 'DISMISS' });
+      console.log(`Risk Gate: withdrew the Risk Bot's approval (review ${id})`);
+    } catch (err) {
+      failed.push(`review ${id}: ${err.message}`);
+    }
+  }
+  if (failed.length) throw new Error(`Risk Gate: could not withdraw the Risk Bot's approval (${failed.join('; ')})`);
 }
 
 function main() {
@@ -31,6 +51,21 @@ function main() {
   if (number === null) return console.log('Risk Gate: not a pull request comment, nothing to do');
   if (!Number.isInteger(number) || number < 1) throw new Error('Risk Gate: the event has no pull request number');
 
+  // A run that fails (a fetch race, a GitHub error, a bad mode) must not leave an approval standing: withdraw the Risk
+  // Bot's own, best effort, then fail the run so it shows.
+  try {
+    judge(number);
+  } catch (err) {
+    try {
+      withdraw(number, botApprovals(number), 'the run failed');
+    } catch (withdrawErr) {
+      console.error(withdrawErr.message);
+    }
+    throw err;
+  }
+}
+
+function judge(number) {
   // The pull request, its head and its author from the API, for both events: a run judges the PR as it is now.
   const pr = gh([`repos/${repo}/pulls/${number}`]);
   if (pr.state !== 'open') return console.log(`Risk Gate: #${number} is ${pr.state}, nothing to do`);
@@ -49,16 +84,10 @@ function main() {
   const fl = floor({ repo: repo.split('/')[1], files: d.files }, catalogue);
   const { check, approve } = gate({ rating, prAuthor, headSha, patchId: d.patchId, floor: fl, mode, acceptance });
 
-  // The Risk Bot's own approvals, matched by its login. A run that doesn't approve withdraws them, first: a higher
-  // Risk Rating for the same head comes with no push, so nothing else would dismiss them. Shadow and off too.
-  const botApprovals = ghAll(`repos/${repo}/pulls/${number}/reviews`).filter(r => r.user?.login === `${slug}[bot]` && r.state === 'APPROVED');
-  if (!approve) {
-    for (const { id } of botApprovals) {
-      if (!Number.isInteger(id)) throw new Error('Risk Gate: a review has no numeric id');
-      gh(['-X', 'PUT', `repos/${repo}/pulls/${number}/reviews/${id}/dismissals`], { message: `Risk Gate: ${check?.title ?? 'off'}; approval withdrawn`, event: 'DISMISS' });
-      console.log(`Risk Gate: withdrew the Risk Bot's approval (review ${id})`);
-    }
-  }
+  // A run that doesn't approve withdraws the Risk Bot's approvals, first: a higher Risk Rating for the same head comes
+  // with no push, so nothing else would dismiss them. Shadow and off too.
+  const approvals = botApprovals(number);
+  if (!approve) withdraw(number, approvals, check?.title ?? 'off');
   if (!check) return console.log('Risk Gate: off');
 
   // Create or update the Risk Bot's own "Risk Gate" check on the head.
@@ -71,7 +100,7 @@ function main() {
 
   // Approve the judged head (commit_id pins it), once.
   if (!approve) return;
-  if (botApprovals.some(r => r.commit_id === headSha)) return console.log('Risk Gate: the Risk Bot already approved this head');
+  if (approvals.some(r => r.commit_id === headSha)) return console.log('Risk Gate: the Risk Bot already approved this head');
   gh(['-X', 'POST', `repos/${repo}/pulls/${number}/reviews`], { commit_id: headSha, event: 'APPROVE', body: `Risk Gate: ${check.title}` });
 }
 

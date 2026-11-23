@@ -29,23 +29,28 @@ permissions:
 jobs:
   gate:
     name: Risk Gate
-    # Off: stop. A comment only matters when it is the pull request author's (a Risk Rating or a Risk Acceptance).
+    # Off: stop. A comment only matters when it is the pull request author's (a Risk Rating or a Risk Acceptance), and
+    # posting, editing or deleting one all re-run the Gate: comment.user is the comment's author, not who edited or
+    # deleted it. A payload with no comment author re-runs it too.
     # Dependabot's runs get no Actions secrets, so no Risk Bot token; its pull requests never have a Risk Rating.
     if: >-
       inputs.mode != 'off' && github.actor != 'dependabot[bot]' && (github.event_name == 'pull_request_target' ||
-      (github.event.issue.pull_request && github.event.comment.user.login == github.event.issue.user.login))
+      (github.event.issue.pull_request && (!github.event.comment.user ||
+      github.event.comment.user.login == github.event.issue.user.login)))
     runs-on: ubuntu-latest
     timeout-minutes: 10
     concurrency:
       group: risk-gate-${{ github.repository }}-${{ github.event.pull_request.number || github.event.issue.number }}
       cancel-in-progress: false
     steps:
+      # Scoped to the calling repo only, whatever else the Risk Bot is installed on.
       - name: Mint the Risk Bot token
         id: bot
         uses: actions/create-github-app-token@v2
         with:
           app-id: ${{ secrets.RISK_BOT_APP_ID }}
           private-key: ${{ secrets.RISK_BOT_PRIVATE_KEY }}
+          repositories: ${{ github.event.repository.name }}
           permission-checks: write
           permission-pull-requests: write
 

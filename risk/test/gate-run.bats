@@ -1,7 +1,7 @@
 #!/usr/bin/env bats
 # End to end: a throwaway origin holding a base and a PR head at refs/pull/7/head, a base-branch clone to run in, a
 # stubbed `gh` that answers from canned JSON and logs every call (with its --input body), and gate-run.js run
-# against a fake event.
+# against a fake event. GH_FAIL makes the gh calls containing it fail, as a GitHub 5xx would.
 
 setup() {
   export RISK="$BATS_TEST_DIRNAME/.."
@@ -13,6 +13,7 @@ setup() {
 #!/usr/bin/env bash
 echo "gh $*" >>"$CALLS"
 case "$*" in *--input*) cat >>"$CALLS"; echo >>"$CALLS" ;; esac
+if [ -n "${GH_FAIL:-}" ] && [[ "$*" == *"$GH_FAIL"* ]]; then echo "gh: HTTP 502: Bad Gateway" >&2; exit 1; fi
 case "$*" in
   *"-X POST"* | *"-X PATCH"* | *"-X PUT"*) echo '{"id":1}' ;;
   *" repos/signapse/app/pulls/7") cat "$GH_DATA/pr.json" ;;
@@ -48,20 +49,27 @@ EOS
 
 teardown() { rm -rf "$TMP"; }
 
-# rate TIER: the PR author's Risk Rating for the head, as the only comment, written with the risk core itself.
+# rate TIER [accept]: the PR author's Risk Rating for the head, written with the risk core itself, and with `accept`
+# their Risk Acceptance of its patch-id after it.
 rate() {
-  TIER="$1" node --input-type=module -e '
-    const { RISK, TMP, BASE_SHA, HEAD_SHA, TIER } = process.env;
+  TIER="$1" ACCEPT="${2:-}" node --input-type=module -e '
+    const { RISK, TMP, BASE_SHA, HEAD_SHA, TIER, ACCEPT } = process.env;
     const { diff } = await import(`${RISK}/diff.js`);
     const { formatRating } = await import(`${RISK}/rating.js`);
     const { patchId } = diff(`${TMP}/writer`, BASE_SHA, HEAD_SHA);
     const body = formatRating({ version: 1, tier: TIER, patchId, headSha: HEAD_SHA, kinds: ["ui-copy"], floorTier: "low",
       model: "claude-sonnet-5-5", rulesSha: "c".repeat(40), certain: true, summary: "ui-copy on unlisted (Tier 2)", findingCount: 0 });
-    console.log(JSON.stringify([[{ user: { login: "someone-else" }, body: "LGTM" }, { user: { login: "writer" }, body }]]));
+    const accepted = ACCEPT ? [{ user: { login: "writer" }, body: `/accept-risk ${patchId}` }] : [];
+    console.log(JSON.stringify([[{ user: { login: "someone-else" }, body: "LGTM" }, { user: { login: "writer" }, body }, ...accepted]]));
   ' >"$GH_DATA/comments.json"
 }
 
 calls() { grep -c -- "$1" "$CALLS" || true; }
+
+# comment_event ACTION: an issue_comment event for the PR author's comment.
+comment_event() {
+  printf '{"action":"%s","issue":{"number":7,"pull_request":{"url":"x"},"user":{"login":"writer"}},"comment":{"user":{"login":"writer"},"body":"x"}}' "$1" >"$TMP/event.json"
+}
 
 # approved_by LOGIN ID [COMMIT]: one APPROVED review, as the slurped reviews list.
 approved_by() { echo "[[{\"id\":$2,\"user\":{\"login\":\"$1\"},\"state\":\"APPROVED\",\"commit_id\":\"${3:-$HEAD_SHA}\",\"body\":\"Risk Gate: Low: approved by the Risk Bot\"}]]"; }
@@ -141,4 +149,67 @@ approved_by() { echo "[[{\"id\":$2,\"user\":{\"login\":\"$1\"},\"state\":\"APPRO
   GITHUB_EVENT_NAME=issue_comment RISK_GATE_MODE=live run node "$RISK/gate-run.js"
   [ "$status" -eq 0 ]
   [ ! -e "$CALLS" ]
+}
+
+@test "a run that fails after the event is read still withdraws the Risk Bot's approval, then fails: fetch race" {
+  # The head moved after the API answered: the head the Gate was told about isn't in what it fetched.
+  printf '{"number":7,"state":"open","user":{"login":"writer"},"head":{"sha":"%s"},"base":{"sha":"%s"}}' "$(printf 'f%.0s' {1..40})" "$BASE_SHA" >"$GH_DATA/pr.json"
+  approved_by signapse-risk-bot[bot] 99 >"$GH_DATA/reviews.json"
+  RISK_GATE_MODE=live run node "$RISK/gate-run.js"
+  [ "$status" -ne 0 ]
+  [ "$(calls '^gh api -X PUT repos/signapse/app/pulls/7/reviews/99/dismissals --input -$')" -eq 1 ]
+  grep -q '{"message":"Risk Gate: the run failed; approval withdrawn","event":"DISMISS"}' "$CALLS"
+  [ "$(calls '^gh api -X POST')" -eq 0 ]
+}
+
+@test "a run that fails after the event is read still withdraws the Risk Bot's approval, then fails: GitHub 5xx" {
+  approved_by signapse-risk-bot[bot] 99 "$BASE_SHA" >"$GH_DATA/reviews.json"
+  GH_FAIL='check-runs' RISK_GATE_MODE=live run node "$RISK/gate-run.js"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"HTTP 502"* ]]
+  [ "$(calls '^gh api -X PUT repos/signapse/app/pulls/7/reviews/99/dismissals --input -$')" -eq 1 ]
+  [ "$(calls '^gh api -X POST repos/signapse/app/pulls/7/reviews')" -eq 0 ]
+}
+
+@test "a run that fails after the event is read still withdraws the Risk Bot's approval, then fails: bad mode" {
+  approved_by signapse-risk-bot[bot] 99 >"$GH_DATA/reviews.json"
+  RISK_GATE_MODE=bogus run node "$RISK/gate-run.js"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"mode must be one of off, shadow, live"* ]]
+  [ "$(calls '^gh api -X PUT repos/signapse/app/pulls/7/reviews/99/dismissals --input -$')" -eq 1 ]
+  [ "$(calls '^gh api -X POST')" -eq 0 ]
+}
+
+@test "issue_comment edited: a Risk Rating edited up to High withdraws the approval the Low rating earned" {
+  RISK_GATE_MODE=live run node "$RISK/gate-run.js"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Risk Gate: Low: approved by the Risk Bot"* ]]
+  # The Writer edits the same comment to High: no push, same head and patch-id.
+  rate high
+  approved_by signapse-risk-bot[bot] 99 >"$GH_DATA/reviews.json"
+  comment_event edited
+  : >"$CALLS"
+  GITHUB_EVENT_NAME=issue_comment RISK_GATE_MODE=live run node "$RISK/gate-run.js"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Risk Gate: High: needs another engineer's approval"* ]]
+  [ "$(calls '^gh api -X PUT repos/signapse/app/pulls/7/reviews/99/dismissals --input -$')" -eq 1 ]
+  [ "$(calls '^gh api -X POST repos/signapse/app/pulls/7/reviews')" -eq 0 ]
+}
+
+@test "issue_comment deleted: deleting the Risk Acceptance withdraws the Medium approval it earned" {
+  rate medium accept
+  RISK_GATE_MODE=live run node "$RISK/gate-run.js"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Risk Gate: Medium: approved by the Risk Bot"* ]]
+  [ "$(calls '^gh api -X POST repos/signapse/app/pulls/7/reviews --input -$')" -eq 1 ]
+  # The Writer deletes the acceptance; the approval it earned still stands.
+  rate medium
+  approved_by signapse-risk-bot[bot] 99 >"$GH_DATA/reviews.json"
+  comment_event deleted
+  : >"$CALLS"
+  GITHUB_EVENT_NAME=issue_comment RISK_GATE_MODE=live run node "$RISK/gate-run.js"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Risk Gate: Medium: waiting for the Writer's Risk Acceptance"* ]]
+  [ "$(calls '^gh api -X PUT repos/signapse/app/pulls/7/reviews/99/dismissals --input -$')" -eq 1 ]
+  [ "$(calls '^gh api -X POST repos/signapse/app/pulls/7/reviews')" -eq 0 ]
 }
