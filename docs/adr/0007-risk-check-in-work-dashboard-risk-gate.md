@@ -10,7 +10,7 @@ CodeRabbit, which we already pay for, can rate merge risk and auto-approve Low-r
 
 The Risk Check runs in the Work Dashboard, as a third audit next to code-review and security-review. Each engineer runs it on their own Claude plan, for their own pull requests only, so it costs no Claude API spend. It is a separate `claude -p` process: it sees the diff and the repo but not the writing agent's reasoning, and it reads the Catalogue and Rubric from `main`.
 
-The Writer's machine therefore produces the rating but never authorises the merge. That job belongs to the Risk Gate, a GitHub Action in this repo with no AI in it. It works out the Risk Floor from the changed paths, raises the posted tier to that floor, waits for CI, and approves as the Risk Bot app. The app's private key stays in GitHub secrets, so a forged "Low" can only ever pass files whose floor is Low.
+The Writer's machine therefore produces the rating but never authorises the merge. That job belongs to the Risk Gate, a GitHub Action in this repo with no AI in it. It runs from the base branch only (`pull_request_target` and `issue_comment`), so a pull request can't edit it, and it never runs the pull request's code. It accepts only the latest Risk Rating by the pull request's author for the current head, and only if the rating's patch-id matches the diff it computes itself with the shared `risk/diff.js`. It then works out the Risk Floor with `risk/floor.js`, raises the rating's tier to that floor, and approves as the Risk Bot app. The required checks and auto-merge, not the Gate, keep the merge waiting until CI is green. The app's private key stays in GitHub secrets, so a forged "Low" can only ever pass files whose floor is Low.
 
 ## Considered Options
 
@@ -24,4 +24,7 @@ The Writer's machine therefore produces the rating but never authorises the merg
 - Only pull requests made through the Work Dashboard get a Risk Check. Everyone else keeps human review until they move to the dashboard.
 - The check runs once per pull request, after the other two audits pass and before the PR is marked ready, and runs again only if the code changes. It uses Sonnet, and Opus only when the Risk Floor is Tier 1.
 - If the Writer's plan hits its usage limit, no rating gets posted and the pull request waits for a human. That is the safe failure.
-- Each Risk Comment records the model and a fingerprint of the prompt, so an auditor or the monthly sample can check how a rating was made.
+- Each Risk Rating records the model and a fingerprint of the prompt, so an auditor or the monthly sample can check how it was made.
+- **We accept this risk:** the Writer's machine produces the rating, so a Writer could post a fake "Low" by hand. It can only pass files whose Risk Floor is Low. Its record gives it away, because it has no matching fingerprint and no run in the dashboard, and the monthly sample includes ratings.
+- The Gate adds a "Risk Gate" check that never fails: LOW approved, MEDIUM waiting for the Writer's sign-off, HIGH needs a second engineer, or no Risk Check. Pull requests made outside the dashboard in pilot repos aren't blocked by it.
+- The Risk Bot app has only `pull_requests: write`, `contents: read` and `checks: write`, and is installed only on the pilot repos (as in ADR 0005). `risk/**` and the Gate workflow need code-owner review.

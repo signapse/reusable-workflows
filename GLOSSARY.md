@@ -80,8 +80,12 @@ _Avoid_: author (ambiguous for factory pull requests), owner
 The AI classification of a pull request, run by the Work Dashboard in a context separate from the agent or person who wrote it, against the Catalogue and Rubric on `main`. Its summary is the change's recorded impact assessment.
 _Avoid_: risk review, risk audit (the audits are the factory's code and security reviews)
 
+**Risk Rating**:
+The Risk Check's result for one head commit: its tier, findings and record, posted by the Writer as a single pull request comment. The Risk Gate trusts only the latest one by the pull request's author whose diff matches the head.
+_Avoid_: verdict, score
+
 **Risk Gate**:
-The GitHub Action, with no AI in it, that raises a Risk Check's tier to the Risk Floor, waits for CI, and approves as the Risk Bot when the tier allows.
+The GitHub Action, with no AI in it, that checks a Risk Rating against the diff, raises its tier to the Risk Floor, and approves as the Risk Bot when the tier allows. Required checks, not the Gate, hold the merge until CI is green.
 
 **Risk Bot**:
 The GitHub App identity the Risk Gate approves as. The only bot whose approval counts.
