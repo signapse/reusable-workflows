@@ -1,6 +1,6 @@
 # Delivery Pipeline
 
-How a Linear ticket's code travels from merge to every user: dev, staging, a dark prod deployment, then a flag rollout.
+How a Linear ticket's code travels from pull request to every user: a merge authorised by its risk tier, then dev, staging, a dark prod deployment and a flag rollout.
 
 ## Promotion
 
@@ -55,6 +55,69 @@ The 24 hours after a Rollout reaches every user, during which Sentry's error rat
 **Prodzilla**:
 The whole release bot: the release train that forms and promotes Release Candidates, plus the event router that carries Linear and Slack events into GitHub and PostHog.
 _Avoid_: release bot, release train (that is only one part)
+
+## Merge
+
+**Risk tier**:
+Low, Medium or High: how much harm merging a pull request could do, which decides who must authorise the merge. Set by the Risk Check, never by the Writer.
+_Avoid_: severity, risk score, risk level
+
+**Standard change**:
+A Low-tier pull request. The change-management procedure pre-authorises it, so the Risk Gate approves it and it merges once CI is green.
+_Avoid_: auto-approved PR, trivial change
+
+**Writer-authorised change**:
+A Medium-tier pull request. It merges once the Writer posts a Risk Acceptance for its current diff.
+
+**Risk Acceptance**:
+The Writer's `/accept-risk` comment, posted after reading the Risk Comments, tied to the patch-id of the Risk Rating it accepts. A new diff cancels it; a rebase that leaves the changes the same keeps it.
+_Avoid_: sign-off, resolving the Risk Comments
+
+**Significant change**:
+A High-tier pull request. It needs an approval from an engineer other than the Writer, who reads the Risk Comments rather than the whole diff.
+
+**Writer**:
+The engineer accountable for a pull request: its author or, for a factory pull request, the engineer who started the factory run.
+_Avoid_: author (ambiguous for factory pull requests), owner
+
+**Risk Check**:
+The AI classification of a pull request, run by the Work Dashboard in a context separate from the agent or person who wrote it, against the Catalogue and Rubric on `main`. Its summary is the change's recorded impact assessment.
+_Avoid_: risk review, risk audit (the audits are the factory's code and security reviews)
+
+**Risk Rating**:
+The Risk Check's result for one head commit: its tier, findings and record, posted by the Writer as a single pull request comment. The Risk Gate trusts only the latest one by the pull request's author whose diff matches the head.
+_Avoid_: verdict, score
+
+**Risk Gate**:
+The GitHub Action, with no AI in it, that checks a Risk Rating against the diff, raises its tier to the Risk Floor, and approves as the Risk Bot when the tier allows. Required checks, not the Gate, hold the merge until CI is green.
+
+**Risk Bot**:
+The GitHub App identity the Risk Gate approves as. The only bot whose approval counts.
+_Avoid_: CodeRabbit, which comments but never approves
+
+**Risk Comment**:
+An inline comment on one risky changed line. It leads with what to check (at most 10 words), then gives the tier, the Change kind and why (at most 12 words). There are at most five per pull request, and tests, docs and Low-tier pull requests get none.
+
+**Risk Floor**:
+The lowest tier a pull request can get, fixed by the files it touches and what they contain, worked out without AI. The Risk Check may raise a tier above it, never lower it.
+
+**Change kind**:
+A category of change the Rubric scores, such as auth, money, data, contract, secret or config, dependency, infra or deploy, live-path behaviour, other behaviour, UI copy, or tests and docs.
+_Avoid_: change type, category
+
+**Catalogue**:
+Signapse's systems, each with a system tier (1 critical, 2 important, 3 standard), its repos and paths, an owner and the reason for its tier.
+_Avoid_: service list, inventory
+
+**Rubric**:
+The rules that turn a system tier and a kind of change into a Risk tier.
+
+**Shadow mode**:
+The Risk Gate mode (`RISK_GATE_MODE=shadow`) in which Risk Ratings and the Risk Gate check are posted but nothing is approved and every pull request keeps human review, so the ratings can be compared with engineers' before they are trusted. `off` posts nothing; `live` approves.
+
+**Emergency merge**:
+A merge without the authorisation its tier needs, allowed only under the emergency procedure and reviewed afterwards.
+_Avoid_: admin bypass
 
 ## Tickets
 
