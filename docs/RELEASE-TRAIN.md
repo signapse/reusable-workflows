@@ -385,9 +385,16 @@ make every legacy `ready-for-prod` caller depend on it.
 Inputs: `tickets` (required), `slack_channel` (required), `release_tag`. The
 label and column names are the defaults `release-train.yml` uses, so the two
 cannot disagree. Secrets:
-`LINEAR_API_KEY`, `SLACK_BOT_TOKEN`, and the four forwarded to the suite
-(`E2E_STAGING_SIGNSTUDIO_ADMIN_API_TOKEN`, `E2E_STAGING_SIGNSTUDIO_USER_EMAIL`,
-`E2E_STAGING_SIGNSTUDIO_USER_PASSWORD`, `E2E_LINEAR_API_KEY`).
+`LINEAR_API_KEY`, `SLACK_BOT_TOKEN`, and the optional ones forwarded to the
+suite (`E2E_STAGING_SIGNSTUDIO_ADMIN_API_TOKEN`,
+`E2E_STAGING_SIGNSTUDIO_USER_EMAIL`, `E2E_STAGING_SIGNSTUDIO_USER_PASSWORD`,
+the Website Plugin accounts `E2E_STAGING_WEBSITE_PLUGIN_USER_EMAIL`,
+`E2E_STAGING_WEBSITE_PLUGIN_USER_PASSWORD`,
+`E2E_STAGING_WEBSITE_PLUGIN_WIZARD_USER_EMAIL`,
+`E2E_STAGING_WEBSITE_PLUGIN_WIZARD_USER_PASSWORD`, and `E2E_LINEAR_API_KEY`).
+A test that needs an account the caller does not pass fails with the suite's
+"Missing E2E_..." error. The prod run forwards only the SignStudio accounts:
+signapse-e2e has no prod Website Plugin accounts.
 
 ## Dark Deployment to prod (SIG-2769)
 
@@ -747,6 +754,10 @@ jobs:
       E2E_STAGING_SIGNSTUDIO_ADMIN_API_TOKEN: ${{ secrets.E2E_STAGING_SIGNSTUDIO_ADMIN_API_TOKEN }}
       E2E_STAGING_SIGNSTUDIO_USER_EMAIL: ${{ secrets.E2E_STAGING_SIGNSTUDIO_USER_EMAIL }}
       E2E_STAGING_SIGNSTUDIO_USER_PASSWORD: ${{ secrets.E2E_STAGING_SIGNSTUDIO_USER_PASSWORD }}
+      E2E_STAGING_WEBSITE_PLUGIN_USER_EMAIL: ${{ secrets.E2E_STAGING_WEBSITE_PLUGIN_USER_EMAIL }}
+      E2E_STAGING_WEBSITE_PLUGIN_USER_PASSWORD: ${{ secrets.E2E_STAGING_WEBSITE_PLUGIN_USER_PASSWORD }}
+      E2E_STAGING_WEBSITE_PLUGIN_WIZARD_USER_EMAIL: ${{ secrets.E2E_STAGING_WEBSITE_PLUGIN_WIZARD_USER_EMAIL }}
+      E2E_STAGING_WEBSITE_PLUGIN_WIZARD_USER_PASSWORD: ${{ secrets.E2E_STAGING_WEBSITE_PLUGIN_WIZARD_USER_PASSWORD }}
       E2E_LINEAR_API_KEY: ${{ secrets.E2E_LINEAR_API_KEY }}
 
   # Dark Deployment to prod (SIG-2769). Fresh after a staging pass; resume
