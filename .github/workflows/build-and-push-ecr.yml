@@ -239,6 +239,10 @@ jobs:
           DOCKER_BUILDKIT: 0
           GITHUB_TOKEN_SECRET: ${{ secrets.private_modules_token }}
           COLLECTED_BUILD_ARGS: ${{ steps.collect-args.outputs.build_args }}
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          DOCKERFILE_PATH: ${{ inputs.dockerfile_path }}
+          ECR_REPOSITORY_URI: ${{ inputs.ecr_repository_uri }}
+          DOCKER_CONTEXT: ${{ inputs.docker_context }}
         run: |
           # Parse build args if provided
           BUILD_ARGS=()
@@ -255,36 +259,43 @@ jobs:
             BUILD_ARGS+=(--build-arg "GITHUB_TOKEN=${GITHUB_TOKEN_SECRET}")
           fi
 
-          echo "Building Docker image with tag: ${{ inputs.image_tag }}"
+          echo "Building Docker image with tag: ${IMAGE_TAG}"
           echo "Build args ($(( ${#BUILD_ARGS[@]} / 2 ))):"
           for ((i=1; i<${#BUILD_ARGS[@]}; i+=2)); do echo "  - ${BUILD_ARGS[$i]%%=*}"; done
 
           # Build image with latest tag
           docker build "${BUILD_ARGS[@]}" \
-            -f ${{ inputs.dockerfile_path }} \
-            -t ${{ inputs.ecr_repository_uri }}:latest \
-            ${{ inputs.docker_context }}
+            -f "${DOCKERFILE_PATH}" \
+            -t "${ECR_REPOSITORY_URI}:latest" \
+            "${DOCKER_CONTEXT}"
 
       - name: Tag Docker Image
         if: ${{ !inputs.use_buildx }}
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          ECR_REPOSITORY_URI: ${{ inputs.ecr_repository_uri }}
         run: |
           # Tag with specified version
-          docker tag ${{ inputs.ecr_repository_uri }}:latest \
-            ${{ inputs.ecr_repository_uri }}:${{ inputs.image_tag }}
+          docker tag "${ECR_REPOSITORY_URI}:latest" \
+            "${ECR_REPOSITORY_URI}:${IMAGE_TAG}"
 
-          echo "Tagged image with: ${{ inputs.image_tag }}"
+          echo "Tagged image with: ${IMAGE_TAG}"
 
       - name: Push Docker Images to ECR
         if: ${{ !inputs.use_buildx }}
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          ECR_REPOSITORY_URI: ${{ inputs.ecr_repository_uri }}
+          PUSH_LATEST: ${{ inputs.push_latest }}
         run: |
           # Push versioned tag
-          echo "Pushing ${{ inputs.ecr_repository_uri }}:${{ inputs.image_tag }}"
-          docker push ${{ inputs.ecr_repository_uri }}:${{ inputs.image_tag }}
+          echo "Pushing ${ECR_REPOSITORY_URI}:${IMAGE_TAG}"
+          docker push "${ECR_REPOSITORY_URI}:${IMAGE_TAG}"
 
           # Push latest tag if enabled
-          if [ "${{ inputs.push_latest }}" == "true" ]; then
-            echo "Pushing ${{ inputs.ecr_repository_uri }}:latest"
-            docker push ${{ inputs.ecr_repository_uri }}:latest
+          if [ "${PUSH_LATEST}" == "true" ]; then
+            echo "Pushing ${ECR_REPOSITORY_URI}:latest"
+            docker push "${ECR_REPOSITORY_URI}:latest"
           fi
 
       # --- Security scanning (optional) ---
@@ -311,17 +322,20 @@ jobs:
           trivyignores: '.trivyignore'
 
       - name: Create deploy_info.json
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          ECR_REPOSITORY_URI: ${{ inputs.ecr_repository_uri }}
         run: |
           cat <<EOF > deploy_info.json
           {
-            "image_uri_latest": "${{ inputs.ecr_repository_uri }}:latest",
-            "image_uri_release": "${{ inputs.ecr_repository_uri }}:${{ inputs.image_tag }}",
-            "version": "${{ inputs.image_tag }}",
-            "commit_sha": "${{ github.sha }}",
-            "repository": "${{ github.repository }}",
-            "workflow_run_id": "${{ github.run_id }}",
-            "workflow_run_number": "${{ github.run_number }}",
-            "actor": "${{ github.actor }}",
+            "image_uri_latest": "${ECR_REPOSITORY_URI}:latest",
+            "image_uri_release": "${ECR_REPOSITORY_URI}:${IMAGE_TAG}",
+            "version": "${IMAGE_TAG}",
+            "commit_sha": "${GITHUB_SHA}",
+            "repository": "${GITHUB_REPOSITORY}",
+            "workflow_run_id": "${GITHUB_RUN_ID}",
+            "workflow_run_number": "${GITHUB_RUN_NUMBER}",
+            "actor": "${GITHUB_ACTOR}",
             "timestamp": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
           }
           EOF

@@ -32,10 +32,14 @@ jobs:
             ${{ runner.os }}-gradle-
 
       - name: Make gradlew executable
-        run: chmod +x ${{ inputs.gradle-subdirectory }}/gradlew
+        env:
+          GRADLE_SUBDIRECTORY: ${{ inputs.gradle-subdirectory }}
+        run: chmod +x "${GRADLE_SUBDIRECTORY}/gradlew"
 
       - name: Build and Test
-        run: ${{ inputs.gradle-subdirectory }}/gradlew test
+        env:
+          GRADLE_SUBDIRECTORY: ${{ inputs.gradle-subdirectory }}
+        run: '"${GRADLE_SUBDIRECTORY}/gradlew" test'
 
       - name: Archive Test Results
         if: always()
