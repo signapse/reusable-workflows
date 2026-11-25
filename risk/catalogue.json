@@ -1,0 +1,211 @@
+{
+  "_note": "Signapse's systems by tier. Tier 1 = critical, 2 = important, 3 = standard. Paths narrow a system inside a repo; a repo with no paths is the whole repo.",
+  "systems": [
+    {
+      "id": "auth",
+      "tier": 1,
+      "repos": [
+        "signapse-auth-monorepo",
+        "backend-auth0",
+        "authentication-service-api"
+      ],
+      "owner": "alex-balau",
+      "why": "Every product's login and API access; a bug locks customers out or lets the wrong user in."
+    },
+    {
+      "id": "billing",
+      "tier": 1,
+      "repos": [
+        "billing-service-api"
+      ],
+      "owner": "oking02",
+      "why": "Money: credits, subscriptions, Stripe."
+    },
+    {
+      "id": "prod-infra",
+      "tier": 1,
+      "repos": [
+        "signapse-core-terraform",
+        "signapse-core-k8s",
+        "sign-infrastructure"
+      ],
+      "owner": "alepeltier",
+      "why": "Infrastructure and deploys for every service; one bad object froze all dev deploys for 5 days (SIG-3070)."
+    },
+    {
+      "id": "shared-ci",
+      "tier": 1,
+      "repos": [
+        "reusable-workflows"
+      ],
+      "owner": "alepeltier",
+      "why": "Every repo runs it at @main, including the Risk Gate."
+    },
+    {
+      "id": "live-path",
+      "tier": 1,
+      "repos": [
+        "sign-stream-api",
+        "stream-generator",
+        "live-stream-service"
+      ],
+      "owner": "oking02",
+      "why": "Real-time SignStream for live broadcasts; a fault is visible on air."
+    },
+    {
+      "id": "customer-plugin",
+      "tier": 1,
+      "repos": [
+        "website-translation-plugin"
+      ],
+      "owner": "alepeltier",
+      "why": "Runs inside customers' own websites from the CDN."
+    },
+    {
+      "id": "contracts",
+      "tier": 1,
+      "repos": [
+        "service-contracts",
+        "go-common"
+      ],
+      "owner": "oking02",
+      "why": "Shared by many services; a break fans out."
+    },
+    {
+      "id": "live-path-teams",
+      "tier": 1,
+      "repos": [
+        "teams-media-bot"
+      ],
+      "paths": [
+        "**/*Frame*.cs",
+        "**/*Pacer*.cs",
+        "**/MediaGateway*.cs",
+        "**/*Audio*.cs",
+        "**/*Video*.cs"
+      ],
+      "owner": "StefanSolves",
+      "why": "Signer video and audio inside live Teams meetings: on air like sign-stream-api (SIG-3075, teams-media-bot#47)."
+    },
+    {
+      "id": "signstream-app",
+      "tier": 2,
+      "repos": [
+        "sign-stream-platform",
+        "sign-stream-platform-api",
+        "dev-portal",
+        "mcp-platform-api",
+        "logs-service"
+      ],
+      "owner": "alex-balau",
+      "why": "Customer-facing SignStream web app, BFF and developer surfaces."
+    },
+    {
+      "id": "video-conferencing",
+      "tier": 2,
+      "repos": [
+        "sign-stream-vc-portal",
+        "teams-media-bot"
+      ],
+      "owner": "StefanSolves",
+      "why": "Signer in Teams meetings; teams-media-bot had incidents (SIG-3070)."
+    },
+    {
+      "id": "signstudio",
+      "tier": 2,
+      "repos": [
+        "video-translation-platform",
+        "video-translation-api",
+        "translation-service-api",
+        "translation-platform-api",
+        "connect"
+      ],
+      "owner": "alepeltier",
+      "why": "Customer video translation."
+    },
+    {
+      "id": "website-portal",
+      "tier": 2,
+      "repos": [
+        "website-translation-portal",
+        "website-translation-platform-api"
+      ],
+      "owner": "alepeltier",
+      "why": "Plugin customers' portal and BFF."
+    },
+    {
+      "id": "accounts",
+      "tier": 2,
+      "repos": [
+        "account-service-api",
+        "account-platform-api",
+        "signapse-accounts",
+        "feedback-api",
+        "notification-service"
+      ],
+      "owner": "alex-balau",
+      "why": "Users, orgs and customer feedback."
+    },
+    {
+      "id": "ai-pipeline",
+      "tier": 2,
+      "repos": [
+        "text2gloss",
+        "gloss-translation-sagemaker",
+        "gloss-translation-stitching-CPU"
+      ],
+      "owner": "ml-team",
+      "why": "Translation quality for every product."
+    },
+    {
+      "id": "connectors",
+      "tier": 2,
+      "repos": [
+        "salesforce-connector",
+        "hubspot-connector",
+        "system-events"
+      ],
+      "owner": "alepeltier",
+      "why": "Send customer data to third parties."
+    },
+    {
+      "id": "hub-content",
+      "tier": 2,
+      "repos": [
+        "hub-platform-api"
+      ],
+      "paths": [
+        "**/gloss*/**",
+        "**/sign*/**",
+        "**/sentence*/**",
+        "**/paragraph*/**"
+      ],
+      "owner": "alepeltier",
+      "why": "Writes the gloss data text2gloss reads (SIG-3070)."
+    },
+    {
+      "id": "hub",
+      "tier": 3,
+      "repos": [
+        "hub-next",
+        "hub-platform-api"
+      ],
+      "owner": "alepeltier",
+      "why": "Staff-only tools."
+    },
+    {
+      "id": "internal",
+      "tier": 3,
+      "repos": [
+        "signapse-e2e",
+        "go-template",
+        "template-api",
+        "dora-metrics",
+        "pipeline-benchmarks",
+        "architecture-decisions"
+      ],
+      "owner": "alex-balau",
+      "why": "Tests, templates and internal tooling."
+    }
+  ]
+}

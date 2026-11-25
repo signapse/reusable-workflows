@@ -1,0 +1,86 @@
+name: Risk Gate (reusable)
+
+# Checks the Writer's Risk Rating against the pull request's diff, raises its tier to the Risk Floor, posts a
+# "Risk Gate" check that never fails and, in live mode, approves as the Risk Bot. A run that doesn't approve withdraws
+# any approval the Risk Bot still has on the pull request. No AI in it. It never checks out or
+# runs the pull request's code: the head is fetched as git objects and diffed. See risk/README.md for the caller
+# (pull_request_target + issue_comment, so a pull request can't edit the Gate that judges it) and ADR 0007.
+
+on:
+  workflow_call:
+    inputs:
+      mode:
+        description: off, shadow or live. Callers pass the RISK_GATE_MODE repo variable, or off when it is unset.
+        required: false
+        type: string
+        default: 'off'
+    secrets:
+      # Not required, so a caller can be added while the mode is still off.
+      RISK_BOT_APP_ID:
+        description: The Risk Bot GitHub App's ID. Needed unless the mode is off.
+        required: false
+      RISK_BOT_PRIVATE_KEY:
+        description: The Risk Bot GitHub App's private key. Needed unless the mode is off.
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    name: Risk Gate
+    # Off: stop. A comment only matters when it is the pull request author's (a Risk Rating or a Risk Acceptance), and
+    # posting, editing or deleting one all re-run the Gate: comment.user is the comment's author, not who edited or
+    # deleted it. A payload with no comment author re-runs it too.
+    # Dependabot's runs get no Actions secrets, so no Risk Bot token; its pull requests never have a Risk Rating.
+    if: >-
+      inputs.mode != 'off' && github.actor != 'dependabot[bot]' && (github.event_name == 'pull_request_target' ||
+      (github.event.issue.pull_request && (!github.event.comment.user ||
+      github.event.comment.user.login == github.event.issue.user.login)))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: risk-gate-${{ github.repository }}-${{ github.event.pull_request.number || github.event.issue.number }}
+      cancel-in-progress: false
+    steps:
+      # Scoped to the calling repo only, whatever else the Risk Bot is installed on.
+      - name: Mint the Risk Bot token
+        id: bot
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.RISK_BOT_APP_ID }}
+          private-key: ${{ secrets.RISK_BOT_PRIVATE_KEY }}
+          repositories: ${{ github.event.repository.name }}
+          permission-checks: write
+          permission-pull-requests: write
+
+      # The base, never the head. Keeps github.token (contents: read) so gate-run.js can fetch the head's objects.
+      # On issue_comment there is no base SHA in the event: this is the default branch, and gate-run.js fetches the
+      # pull request's base SHA itself.
+      - name: Check out the calling repo at the base
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 0
+          path: repo
+
+      # The Gate, the risk core, the Catalogue and the Rubric, always from main: rulesSha is this checkout's HEAD.
+      - name: Check out the Risk Gate and its rules
+        uses: actions/checkout@v4
+        with:
+          repository: signapse/reusable-workflows
+          ref: main
+          path: _rw
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Run the Risk Gate
+        working-directory: repo
+        env:
+          GH_TOKEN: ${{ steps.bot.outputs.token }}
+          RISK_GATE_MODE: ${{ inputs.mode }}
+          RISK_BOT_SLUG: ${{ steps.bot.outputs.app-slug }}
+        run: node ../_rw/risk/gate-run.js
