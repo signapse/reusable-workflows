@@ -811,6 +811,225 @@ failed". Find the run that replaced it (or dispatch again) and wait for its
 verdict. Do not report a Terraform failure or block the Promotion on it. The
 Terraform gate re-dispatches (see [Terraform gate](#terraform-gate)).
 
+## Lambda services (SIG-3189)
+
+A repo whose services are AWS Lambda functions sets `lambda_functions` on
+`release-train.yml` and `release-train-prod.yml`. Its build is still promoted
+as one Release Candidate, with no rebuild, and rolled back the same way; only
+where the bytes live and who deploys them changes. Without
+`lambda_functions` nothing on the k8s path changes.
+
+```json
+[{"name": "platform-api", "package": "zip",
+  "function": "{env}-website-translation-v2-platform-api",
+  "s3_bucket": {"dev": "dev-global-lambda-s3", "stg": "staging-global-lambda-s3", "prod": "production-global-lambda-s3"},
+  "s3_prefix": "website-translation-platform-api"},
+ {"name": "screenshot", "package": "image",
+  "function": "{env}-website-translation-v2-screenshot",
+  "image_repository": "827204657141.dkr.ecr.eu-west-2.amazonaws.com/website-translation-screenshot"}]
+```
+
+`function` and `s3_bucket` are a string (`{env}` becomes `dev`, `stg` or
+`prod`) or an object keyed by environment (`scripts/lambda-config.sh`).
+`name` is what the run reports in `previous_tags`, `moved_services` and the
+rollback results.
+
+### Artefacts: built once
+
+| Package | Build (main-push) | Release artefact |
+|---|---|---|
+| `zip` | `s3://<dev bucket>/<s3_prefix>/main-<n>-<sha>.zip` | `s3://<env bucket>/<s3_prefix>/<release tag>.zip` in the staging and prod buckets |
+| `image` | `<image_repository>:main-<n>-<sha>` | `<image_repository>:<release tag>` (`ecr-retag.sh`, as for k8s) |
+
+The build workflow (`build_workflow`) uploads the ZIP under
+`main-${{ github.run_number }}-${{ github.sha }}.zip` and tags the image the
+same way, in one run, so the selection's `rc_image_tag` names both.
+`go-lambda-deploy.yml` already takes that as `s3_key`.
+
+`s3-artefact-copy.sh` is the ZIP counterpart of `ecr-retag.sh`: it downloads
+the source, puts the same bytes under the release name with
+`If-None-Match: *` and a SHA-256 checksum, reads the result back and compares
+SHA-256. A release artefact that already holds the same bytes is a no-op; one
+holding other bytes is refused (the error names the `delete-object` that
+clears a stray one); a lookup that fails for any reason but "no such key"
+stops before any write.
+
+### What prod runs: tags on the function
+
+Prod's release tag is read from the prod functions, not signapse-core-k8s
+(`lambda-tags.sh`; `prod-tags.sh` hands over to it when `LAMBDA_FUNCTIONS` is
+set, so `selection-base.sh`, `prod-plan.sh` and the checks after the deploy are
+unchanged). The train writes these tags (`lib/lambda.sh`):
+
+| Tag | Meaning |
+|---|---|
+| `release-tag` | The release tag the function runs. A prod function without it stops the run: tag it for the first Deployment. |
+| `release-previous-tag` | What it ran before (`previous_tags`; the rollback restores it). |
+| `release-previous-code` | That earlier code: the `CodeSha256` of a ZIP, the resolved image URI (`repo@sha256:…`) of an image. The rollback must restore exactly it. |
+| `release-deploying` | Set while a deploy is under way, so a re-run after a crash keeps the previous values above. |
+| `release-rolled-back-from` | Tags the rollback moved the function off, newest first. `prod-plan.sh` refuses them (fresh) or reports `nothing` (resume), as for a `Rolled-back-from:` trailer in signapse-core-k8s. |
+
+A hand deploy or hand rollback must set `release-tag` (and, for a rollback,
+add the tag to `release-rolled-back-from`), or the train cannot know about it.
+
+### Promotion to staging
+
+After the plan, the Terraform gate and clearing the staging verdicts, as for
+k8s:
+
+1. **Release artefacts** (`lambda-deploy.sh` with `ARTEFACTS_ONLY=true`,
+   staging role): every ZIP build is copied from the dev bucket to
+   `<prefix>/<release tag>.zip` in the staging bucket.
+2. **Tag** (`promotion-tag.sh`): the image functions' repositories are
+   re-tagged in ECR (none for a ZIP-only repo), then git.
+3. **Deploy to staging** (`lambda-deploy.sh`, staging role), in place of the
+   Flux wait: each staging function is pointed at its artefact (a ZIP by S3
+   key, an image by the digest the re-tag returned), the train waits for
+   `function-updated-v2`, reads the function back and requires the release
+   artefact's `CodeSha256` or digest, then sets `release-tag`. Staging tests
+   run only after every function reports it. `staging_watch_paths` and
+   `staging_version_url` are not used.
+4. Tickets move to On Staging, as for k8s.
+
+Re-runs: the copy, the re-tag and the deploy are no-ops for what is already in
+place, so "Re-run failed jobs" finishes an attempt.
+
+### Dark Deployment to prod and rollback
+
+`release-train-prod.yml` plans, guards the flags and runs the prod Terraform
+gate as for k8s. Then, instead of dispatching deploy-prod.yml,
+`lambda-deploy.sh` copies staging's `<prefix>/<tag>.zip` to the prod bucket
+(SHA-256 checked, so prod runs the bytes staging tested), records
+`release-previous-tag`/`-code`, updates each prod function (an image by
+`<repo>:<tag>`, which `ecr-retag.sh` never moves) and checks it reports the
+new code. A failure after some functions moved is a partial Deployment
+(`partial_deployment`, `moved_services`); a function whose state could not be
+read is unknown and is never rolled back automatically. The Linear and Sentry
+release, the smoke, the verdict, the ticket moves and the Slack alerts are the
+k8s path's.
+
+The rollback job runs `lambda-rollback.sh`: for each function still on the
+release tag, the previous ZIP (`<prefix>/<previous tag>.zip` in the prod
+bucket) or the previous image digest, checked against
+`release-previous-code`, then `release-tag` back to the previous tag and the
+release tag added to `release-rolled-back-from`. A function on another tag is
+`not_current`, one with no previous tag `no_previous_tag`: both need a human.
+Results use `prod-rollback.sh`'s shape, so the Linear Release (`Rolled back`),
+the incident.io incident and the ticket moves are unchanged.
+
+### Prod approval for Lambda services
+
+There is no k8s `prod` environment for a Lambda service, and GitHub rejects
+required reviewers on environments of private repos on our plan (HTTP 422,
+25 Nov 2026). The gate is therefore:
+
+1. **The prod Terraform gate** (`prod-apply` in signapse-core-terraform, Prod
+   approvers), which every Deployment that changes prod passes before
+   anything is deployed. That is the human approval.
+2. **The caller's `production` environment** (`lambda_environment`): the
+   deploy, verdict and rollback jobs run in it. Restrict its deployment
+   branches to `main`, and make the prod role's OIDC trust accept only
+   `repo:signapse/<repo>:environment:production`. Then nothing but this
+   workflow, on `main`, can assume the prod role: not a branch, not a PR,
+   not another workflow in the repo. No reviewers, so an automatic rollback
+   never waits.
+
+The select job reads prod with a separate read-only role
+(`lambda_prod_read_role_arn`, `lambda:GetFunction` only), because it runs
+outside that environment on every run.
+
+### IAM and manual setup
+
+| Role | Account | Trust (GitHub OIDC `sub`) | Permissions |
+|---|---|---|---|
+| `lambda_prod_read_role_arn` (new) | prod | `repo:signapse/<repo>:ref:refs/heads/main` | `lambda:GetFunction` on the prod functions |
+| `lambda_stg_role_arn` | staging | `repo:signapse/<repo>:ref:refs/heads/main` | `s3:GetObject` on `<dev bucket>/<prefix>/*`; `s3:GetObject`, `s3:PutObject` on `<staging bucket>/<prefix>/*`; `s3:ListBucket` on the staging bucket; `lambda:GetFunction`, `lambda:UpdateFunctionCode`, `lambda:TagResource`, `lambda:UntagResource` on the staging functions; `ecr:BatchGetImage`, `ecr:GetDownloadUrlForLayer` on the image repositories |
+| `lambda_prod_role_arn` | prod | `repo:signapse/<repo>:environment:production` only | the same on `<staging bucket>/<prefix>/*` (read), `<prod bucket>/<prefix>/*` (read, write), the prod bucket (list) and the prod functions |
+| `iam_role_arn` | shared ECR | as today | `ecr:BatchGetImage`, `ecr:DescribeImages`, `ecr:PutImage` on the image repositories |
+
+`s3:ListBucket` on the destination bucket matters: without it S3 answers a
+missing key with AccessDenied, and the copy stops rather than guess.
+
+Also, outside this repo:
+
+- **Bucket policies**: the dev bucket lets the staging role read
+  `<prefix>/*`, the staging bucket lets the prod role read `<prefix>/*`.
+- **Lifecycle**: keep `main-*.zip` builds long enough to be selected (weeks,
+  not days), and never expire `<release tag>.zip`: the rollback needs the
+  previous one.
+- **ECR**: the image repositories' policy lets the staging and prod accounts'
+  Lambda service pull (already true where an image function runs today);
+  `IMMUTABLE` tags are recommended, as for k8s.
+- **Terraform**: each function ignores what the train owns:
+  `lifecycle { ignore_changes = [s3_key, s3_object_version, source_code_hash, image_uri, tags["release-tag"], tags["release-previous-tag"], tags["release-previous-code"], tags["release-deploying"], tags["release-rolled-back-from"]] }`.
+  Otherwise an apply puts the old code back or strips the tags (the train
+  then stops: no `release-tag`).
+- **First Deployment**: copy the ZIP prod runs to
+  `<prod bucket>/<prefix>/<tag>.zip` and check its SHA-256 against the
+  function's `CodeSha256`, then tag every prod function
+  `release-tag=<tag>` (the git release tag it was built from).
+
+### Caller template (Lambda service)
+
+```yaml
+# .github/workflows/release-train.yml in the product repo: as the k8s template
+# above for on:, run-name, concurrency and permissions; these jobs differ.
+jobs:
+  train:
+    uses: signapse/reusable-workflows/.github/workflows/release-train.yml@main
+    with:
+      selection_mode: qa-passed
+      ticket: ${{ inputs.ticket }}
+      trigger_id: ${{ inputs.trigger_id }}
+      build_workflow: deploy-dev.yml    # uploads main-<n>-<sha>.zip, tags the image main-<n>-<sha>
+      lambda_functions: ${{ vars.LAMBDA_FUNCTIONS }}   # the JSON above; a repo variable keeps the three callers in step
+      lambda_stg_role_arn: arn:aws:iam::401297296362:role/github-access
+      lambda_prod_read_role_arn: arn:aws:iam::430916267664:role/<prod read-only role>
+      iam_role_arn: arn:aws:iam::827204657141:role/github-actions-connect   # image functions only
+      read_app_id: ${{ vars.PIPELINE_READ_APP_ID }}
+      prodzilla_app_id: ${{ vars.PRODZILLA_APP_ID }}
+    secrets:
+      LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+      READ_APP_PRIVATE_KEY: ${{ secrets.READ_APP_PRIVATE_KEY }}
+      PRODZILLA_APP_PRIVATE_KEY: ${{ secrets.PRODZILLA_APP_PRIVATE_KEY }}
+      SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+
+  staging:   # unchanged from the k8s template
+    needs: train
+    if: needs.train.outputs.promoted == 'true'
+    uses: signapse/reusable-workflows/.github/workflows/release-train-staging.yml@main
+    # ... as above
+
+  prod:
+    needs: [train, staging]
+    if: >-
+      !cancelled() &&
+      (needs.staging.outputs.staging_passed == 'true' || needs.staging.result == 'skipped')
+    uses: signapse/reusable-workflows/.github/workflows/release-train-prod.yml@main
+    permissions:
+      contents: read
+      id-token: write   # the prod Lambda role
+    with:
+      release_tag: ${{ needs.staging.outputs.staging_passed == 'true' && needs.train.outputs.release_tag || '' }}
+      resume_tag: ${{ needs.train.outputs.staged_tag }}
+      tickets: ${{ needs.staging.outputs.staging_passed == 'true' && needs.train.outputs.rc_tickets || needs.train.outputs.staged_tickets }}
+      lambda_functions: ${{ vars.LAMBDA_FUNCTIONS }}
+      lambda_prod_role_arn: arn:aws:iam::430916267664:role/github-access
+      lambda_environment: production     # deployment branches: main only
+      qa_cohort_id: ${{ vars.POSTHOG_QA_COHORT_ID }}
+      slack_channel: '#website-plugin-releases'
+      read_app_id: ${{ vars.PIPELINE_READ_APP_ID }}
+      prodzilla_app_id: ${{ vars.PRODZILLA_APP_ID }}
+    secrets:
+      # as the k8s template
+```
+
+The train jobs run with the caller's grant, which already has
+`id-token: write`. The prod job must grant it too: the deploy, verdict and
+rollback jobs inherit the caller job's permissions (they declare none, so k8s
+callers are unaffected). `qa-failed-revert.yml` does not read Lambda functions
+yet (follow-up): a Lambda repo does not call it until then.
+
 ## Prerequisites for switching a repo
 
 - The build workflow tags images `main-<run_number>-<sha>`, as the reusable
@@ -842,9 +1061,9 @@ Repos that do not meet these yet stay on `ready-for-prod`:
 
 - **website-translation-portal:** its main image bakes in dev settings, and
   prod uses a separate build.
-- **website-translation-platform-api:** it deploys a Lambda ZIP through
-  `deploy-dev.yml` and has no image to re-tag. It needs a Lambda-aware
-  Release Candidate contract first.
+- **website-translation-platform-api:** Lambda services are supported now
+  (see [Lambda services](#lambda-services-sig-3189)); it switches in SIG-3193
+  once the manual steps there are done.
 
 ## Migrating a caller
 

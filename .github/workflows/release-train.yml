@@ -19,6 +19,10 @@ name: Release Train (reusable)
 #     reports `deferred` and does nothing; the next hourly run promotes.
 #     When `promoted` is 'true', the caller runs release-train-staging.yml
 #     (SIG-2767: signapse-e2e on staging, Staging Passed/Failed on the tickets).
+#     Lambda services (SIG-3189, lambda_functions set): prod's tag comes from
+#     the prod functions' tags; the Promotion copies each ZIP build to its
+#     release name in the staging bucket (SHA-256 checked) and deploys the
+#     staging functions itself instead of waiting for Flux.
 #     Caller template: docs/RELEASE-TRAIN.md.
 #
 #   ready-for-prod (default, legacy until SIG-2773): composes TrainState from
@@ -159,6 +163,33 @@ on:
         required: false
         type: number
         default: 20
+      lambda_functions:
+        description: >-
+          qa-passed, Lambda services (SIG-3189): JSON array of the repo's
+          Lambda functions, ZIP or container image (see
+          scripts/lambda-config.sh and docs/RELEASE-TRAIN.md "Lambda
+          services"). Set: prod's tag is read from the prod functions' tags,
+          the Promotion copies each ZIP build to <prefix>/<release tag>.zip,
+          re-tags each image, then deploys staging itself and checks every
+          function runs the new code (no Flux, no staging_watch_paths).
+          Empty: the k8s path, unchanged.
+        required: false
+        type: string
+        default: ''
+      lambda_stg_role_arn:
+        description: 'qa-passed, Lambda services: staging role that reads the dev bucket, writes the staging bucket and updates and tags the staging functions.'
+        required: false
+        type: string
+        default: ''
+      lambda_prod_read_role_arn:
+        description: >-
+          qa-passed, Lambda services: role in the prod account with
+          lambda:GetFunction on the prod functions only, to read the tag
+          prod runs. Not the prod deploy role: this job runs outside the
+          production environment.
+        required: false
+        type: string
+        default: ''
       gitops_repo:
         description: 'qa-passed: repo holding the prod (and Flux) image tags.'
         required: false
@@ -390,7 +421,7 @@ jobs:
 
       - name: Split GitOps repo
         id: gitops
-        if: inputs.selection_base == ''
+        if: inputs.selection_base == '' && inputs.lambda_functions == ''
         env:
           GITOPS_REPO: ${{ inputs.gitops_repo }}
           READ_APP_ID: ${{ inputs.read_app_id }}
@@ -410,7 +441,7 @@ jobs:
 
       - name: Mint read-only app token
         id: app
-        if: inputs.selection_base == ''
+        if: inputs.selection_base == '' && inputs.lambda_functions == ''
         uses: actions/create-github-app-token@v2
         with:
           app-id: ${{ inputs.read_app_id }}
@@ -418,6 +449,21 @@ jobs:
           owner: ${{ steps.gitops.outputs.owner }}
           repositories: ${{ steps.gitops.outputs.name }}
           permission-contents: read
+
+      # Lambda services (SIG-3189): prod's tag is on the prod functions.
+      - name: Check Lambda selection inputs
+        if: inputs.selection_base == '' && inputs.lambda_functions != ''
+        env:
+          ROLE: ${{ inputs.lambda_prod_read_role_arn }}
+        run: |
+          set -euo pipefail
+          [ -n "$ROLE" ] || { echo "::error::qa-passed selection for Lambda services reads the prod functions' release-tag and needs lambda_prod_read_role_arn (or selection_base). See docs/RELEASE-TRAIN.md"; exit 1; }
+
+      - uses: aws-actions/configure-aws-credentials@v6
+        if: inputs.selection_base == '' && inputs.lambda_functions != ''
+        with:
+          role-to-assume: ${{ inputs.lambda_prod_read_role_arn }}
+          aws-region: ${{ inputs.aws_region }}
 
       # Walk base: the release tag prod runs (ADR 0001). Everything after it
       # is checked again on every run, so a tag that failed staging or was
@@ -428,6 +474,7 @@ jobs:
           GH_TOKEN: ${{ steps.app.outputs.token }}
           SELECTION_BASE: ${{ inputs.selection_base }}
           PROD_SERVICES: ${{ inputs.prod_services }}
+          LAMBDA_FUNCTIONS: ${{ inputs.lambda_functions }}
           GITOPS_REPO: ${{ inputs.gitops_repo }}
           GITOPS_REF: ${{ inputs.gitops_ref }}
           RELEASE_TAG_PATTERN: ${{ inputs.release_tag_pattern }}
@@ -517,7 +564,10 @@ jobs:
           persist-credentials: false
 
       - name: Check Promotion inputs
+        id: inputs
         env:
+          LAMBDA_FUNCTIONS: ${{ inputs.lambda_functions }}
+          LAMBDA_STG_ROLE_ARN: ${{ inputs.lambda_stg_role_arn }}
           SERVICES: ${{ inputs.services }}
           IAM_ROLE_ARN: ${{ inputs.iam_role_arn }}
           WATCH_PATHS: ${{ inputs.staging_watch_paths }}
@@ -528,11 +578,20 @@ jobs:
         run: |
           set -euo pipefail
           missing=()
-          jq -e 'type == "array" and length > 0' <<< "$SERVICES" > /dev/null 2>&1 || missing+=(services)
-          [ -n "$IAM_ROLE_ARN" ] || missing+=(iam_role_arn)
-          [ -n "$WATCH_PATHS" ] || missing+=(staging_watch_paths)
-          [ -n "$VERSION_URL" ] || missing+=(staging_version_url)
-          [ -n "$READ_APP_ID" ] || missing+=(read_app_id)
+          if [ -n "$LAMBDA_FUNCTIONS" ]; then
+            # Lambda services (SIG-3189): ECR only for image functions; the
+            # deploy is checked on the functions, not through Flux.
+            ecr=$("$GITHUB_WORKSPACE/_rw/actions/release-train/scripts/lambda-config.sh" stg | jq -c '[.[] | select(.package == "image") | .ecr_repository]')
+            echo "ecr_services=$ecr" >> "$GITHUB_OUTPUT"
+            [ "$ecr" = '[]' ] || [ -n "$IAM_ROLE_ARN" ] || missing+=("iam_role_arn (image functions are re-tagged in ECR)")
+            [ -n "$LAMBDA_STG_ROLE_ARN" ] || missing+=(lambda_stg_role_arn)
+          else
+            jq -e 'type == "array" and length > 0' <<< "$SERVICES" > /dev/null 2>&1 || missing+=(services)
+            [ -n "$IAM_ROLE_ARN" ] || missing+=(iam_role_arn)
+            [ -n "$WATCH_PATHS" ] || missing+=(staging_watch_paths)
+            [ -n "$VERSION_URL" ] || missing+=(staging_version_url)
+            [ -n "$READ_APP_ID" ] || missing+=(read_app_id)
+          fi
           [ -n "$PRODZILLA_APP_ID" ] || missing+=(prodzilla_app_id)
           [ "$PRODZILLA_KEY_SET" = true ] || missing+=("secret PRODZILLA_APP_PRIVATE_KEY")
           [ -f .signapse/pipeline.yml ] || missing+=(".signapse/pipeline.yml with product:")
@@ -603,8 +662,34 @@ jobs:
           slack_channel: ${{ inputs.slack_releases_channel || vars.SLACK_RELEASES_CHANNEL || '#releases' }}
           context: Promotion of ${{ github.repository }} ${{ needs.select.outputs.rc_image_tag }} to staging
 
+      # Lambda services (SIG-3189): put each ZIP build under its release
+      # name in the staging bucket before the git tag, as ECR is below.
+      # Same bytes (SHA-256 checked), never a rebuild, never a moved artefact.
+      - name: Assume the staging Lambda role
+        if: steps.plan.outputs.deferred == 'false' && inputs.lambda_functions != ''
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ inputs.lambda_stg_role_arn }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Copy the ZIP builds to ${{ steps.plan.outputs.tag }}
+        if: steps.plan.outputs.deferred == 'false' && inputs.lambda_functions != ''
+        env:
+          LAMBDA_FUNCTIONS: ${{ inputs.lambda_functions }}
+          TAG: ${{ steps.plan.outputs.tag }}
+          RC_IMAGE_TAG: ${{ needs.select.outputs.rc_image_tag }}
+        run: |
+          set -euo pipefail
+          res=$(ARTEFACTS_ONLY=true TARGET_ENV=stg SOURCE_ENV=dev SOURCE_ARTEFACT="$RC_IMAGE_TAG" \
+            "$GITHUB_WORKSPACE/_rw/actions/release-train/scripts/lambda-deploy.sh")
+          {
+            echo "### Lambda release artefacts"
+            jq -r --arg b "$RC_IMAGE_TAG" '.functions[] | select(.package == "zip") | "- `\(.service)`: `\(.artefact)` (CodeSha256 `\(.expected)`), from `\($b).zip`"' <<< "$res"
+          } >> "$GITHUB_STEP_SUMMARY"
+          [ "$(jq -r .ok <<< "$res")" = true ] || { echo "::error::$(jq -r .reason <<< "$res")"; exit 1; }
+
       - uses: aws-actions/configure-aws-credentials@v6
-        if: steps.plan.outputs.deferred == 'false'
+        if: steps.plan.outputs.deferred == 'false' && (inputs.lambda_functions == '' || steps.inputs.outputs.ecr_services != '[]')
         with:
           role-to-assume: ${{ inputs.iam_role_arn }}
           aws-region: ${{ inputs.aws_region }}
@@ -633,8 +718,10 @@ jobs:
           RC_SHA: ${{ needs.select.outputs.rc_sha }}
           RC_IMAGE_TAG: ${{ needs.select.outputs.rc_image_tag }}
           TAG: ${{ steps.plan.outputs.tag }}
-          SERVICES: ${{ inputs.services }}
-          ECR_REPO_PREFIX: ${{ inputs.ecr_repo_prefix }}
+          # Lambda services: the image functions' repositories, no prefix.
+          SERVICES: ${{ inputs.lambda_functions != '' && steps.inputs.outputs.ecr_services || inputs.services }}
+          ECR_REPO_PREFIX: ${{ inputs.lambda_functions == '' && inputs.ecr_repo_prefix || '' }}
+          LAMBDA_FUNCTIONS: ${{ inputs.lambda_functions }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
@@ -653,9 +740,39 @@ jobs:
             jq -r '.images[] | "| `\(.repository)` | `\(.source_digest)` | `\(.tag_digest)` |"' <<< "$res"
           } >> "$GITHUB_STEP_SUMMARY"
 
+      # Lambda services (SIG-3189): no Flux. The train points each staging
+      # function at the release artefact itself, waits for the update and
+      # checks the function reports the new code (CodeSha256 for a ZIP, the
+      # promoted digest for an image) and release-tag, before staging tests.
+      - uses: aws-actions/configure-aws-credentials@v6
+        if: steps.plan.outputs.deferred == 'false' && inputs.lambda_functions != ''
+        with:
+          role-to-assume: ${{ inputs.lambda_stg_role_arn }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Deploy ${{ steps.plan.outputs.tag }} to the staging functions
+        if: steps.plan.outputs.deferred == 'false' && inputs.lambda_functions != ''
+        env:
+          LAMBDA_FUNCTIONS: ${{ inputs.lambda_functions }}
+          TAG: ${{ steps.plan.outputs.tag }}
+          RC_IMAGE_TAG: ${{ needs.select.outputs.rc_image_tag }}
+          IMAGE_DIGESTS: ${{ steps.tag.outputs.image_digest }}
+        run: |
+          set -euo pipefail
+          res=$(TARGET_ENV=stg SOURCE_ENV=dev SOURCE_ARTEFACT="$RC_IMAGE_TAG" \
+            "$GITHUB_WORKSPACE/_rw/actions/release-train/scripts/lambda-deploy.sh")
+          {
+            echo
+            echo "| Staging function | Runs | Before |"
+            echo "|---|---|---|"
+            jq -r '.functions[] | "| `\(.function)` | `\(.code)` | `\(.previous_tag | if . == "" then "?" else . end)` |"' <<< "$res"
+          } >> "$GITHUB_STEP_SUMMARY"
+          [ "$(jq -r .ok <<< "$res")" = true ] || { echo "::error::$(jq -r .reason <<< "$res")"; exit 1; }
+          echo "Staging runs \`${TAG}\` on every function." >> "$GITHUB_STEP_SUMMARY"
+
       - name: Split GitOps repo
         id: gitops
-        if: steps.plan.outputs.deferred == 'false'
+        if: steps.plan.outputs.deferred == 'false' && inputs.lambda_functions == ''
         env:
           GITOPS_REPO: ${{ inputs.gitops_repo }}
         run: |
@@ -665,7 +782,7 @@ jobs:
 
       - name: Mint read-only app token
         id: app
-        if: steps.plan.outputs.deferred == 'false'
+        if: steps.plan.outputs.deferred == 'false' && inputs.lambda_functions == ''
         uses: actions/create-github-app-token@v2
         with:
           app-id: ${{ inputs.read_app_id }}
@@ -675,7 +792,7 @@ jobs:
           permission-contents: read
 
       - name: Wait for staging to run ${{ steps.plan.outputs.tag }}
-        if: steps.plan.outputs.deferred == 'false'
+        if: steps.plan.outputs.deferred == 'false' && inputs.lambda_functions == ''
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}
           GITOPS_REPO: ${{ inputs.gitops_repo }}

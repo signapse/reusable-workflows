@@ -12,7 +12,9 @@
 # steps are idempotent, so a re-run of a failed attempt finishes the job.
 #
 # Env:
-#   SERVICES           JSON array of ECR repository names (required)
+#   SERVICES           JSON array of ECR repository names (required; may be
+#                      [] when LAMBDA_FUNCTIONS is set)
+#   LAMBDA_FUNCTIONS   set for Lambda services (SIG-3189)
 #   ECR_REPO_PREFIX    prefix joined with "/" (e.g. signstream), may be empty
 #   GITHUB_REPOSITORY  owner/repo to tag
 #   GH_TOKEN           contents:write on GITHUB_REPOSITORY
@@ -32,8 +34,11 @@ need aws
 [[ "$RC_SHA" =~ ^[0-9a-f]{40}$ ]] || die "rc sha must be a full 40-char sha, got '$RC_SHA'"
 HERE="$(dirname "$0")"
 
-repos=$(printf '%s' "${SERVICES:-}" | jq -r --arg p "${ECR_REPO_PREFIX:-}" \
-  'if type == "array" and length > 0 then .[] | (if $p == "" then . else "\($p)/\(.)" end) else error("empty") end' 2>/dev/null) \
+# Lambda services (SIG-3189) may have no image at all: their ZIPs were copied
+# to the release name before this script (lambda-deploy.sh), so an empty
+# SERVICES is allowed there and only git is tagged.
+repos=$(printf '%s' "${SERVICES:-}" | jq -r --arg p "${ECR_REPO_PREFIX:-}" --argjson lambda "$([ -n "${LAMBDA_FUNCTIONS:-}" ] && echo true || echo false)" \
+  'if type == "array" and (length > 0 or $lambda) then .[] | (if $p == "" then . else "\($p)/\(.)" end) else error("empty") end' 2>/dev/null) \
   || die "SERVICES must be a non-empty JSON array of ECR repository names"
 
 # 1. ECR: same manifest, new tag, digests verified.
@@ -70,4 +75,4 @@ fi
 
 # shellcheck disable=SC2016 # jq bindings, not shell expansion.
 jq -nc --arg t "$TAG" --arg s "$RC_SHA" --argjson i "$images" \
-  '{tag: $t, sha: $s, digests: ($i | map({(.repository): .tag_digest}) | add), images: $i}'
+  '{tag: $t, sha: $s, digests: ($i | map({(.repository): .tag_digest}) | add // {}), images: $i}'
