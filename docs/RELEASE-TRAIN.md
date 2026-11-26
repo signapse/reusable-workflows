@@ -553,7 +553,7 @@ handling":
 rollback
   prod-rollback.sh         AC1: signapse-core-k8s rollback.yml per service (Prodzilla, actions: write),
                            all dispatched, then waited on; restored tag checked against previous_tags
-  release-rolled-back.sh   AC2: Linear Release -> `Rolled back` (canceled-type stage)
+  release-rolled-back.sh   AC2: Linear Release -> `Canceled` (Linear's built-in canceled stage)
   rollback-incident.sh     AC3/AC5: incident.io incident, Cause = Deployment, link to the run
   rollback-tickets.sh      AC4/AC5: comment + QA Failed on every ticket (never out of Done),
                            QA Passed removed from those in QA Failed (qa-failed-tickets.sh),
@@ -612,7 +612,7 @@ rollback
   test incident instead, for trying the path out.
 - **Release.** `linear_release_id` from the release job; if recording the
   Release failed, the Release is looked up by version in the pipeline. A
-  Release moves to `Rolled back` only here, when prod's image was actually
+  Release moves to `Canceled` (`rolled_back_stage`) only here, when prod's image was actually
   rolled back. A `/rollout-abort` does not touch the Release: it turns the
   flag off, the code stays dark-deployed and the ticket goes back to
   `On Prod`.
@@ -914,7 +914,7 @@ bucket) or the previous image digest, checked against
 `release-previous-code`, then `release-tag` back to the previous tag and the
 release tag added to `release-rolled-back-from`. A function on another tag is
 `not_current`, one with no previous tag `no_previous_tag`: both need a human.
-Results use `prod-rollback.sh`'s shape, so the Linear Release (`Rolled back`),
+Results use `prod-rollback.sh`'s shape, so the Linear Release (`Canceled`),
 the incident.io incident and the ticket moves are unchanged.
 
 ### Prod approval for Lambda services

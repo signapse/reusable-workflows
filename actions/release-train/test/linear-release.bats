@@ -212,7 +212,7 @@ EOF
   [ "$status" -eq 0 ]
   [ "$(jq -c '.tickets' <<<"$output")" = '["SIG-103","SIG-104"]' ]
   [ "$(jq -r '.since' <<<"$output")" = "$(git rev-parse v0.0.1)" ]
-  # lookup excludes this version (re-runs) and canceled stages (Rolled back)
+  # lookup excludes this version (re-runs) and canceled-type stages (Canceled)
   grep -q '^prev-releases .*"v":"test-repo@v0.0.3".*"p":"test-repo@"' "$STATE/calls"
 }
 

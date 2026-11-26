@@ -7,13 +7,14 @@
 # Records one Deployment as one Release in the product's Linear release
 # pipeline. Idempotent on <version>: if the pipeline already has a Release
 # with that version it is reused (its stage is left alone, so a re-run never
-# pulls a Release back from Rolling Out / Released / Rolled back).
+# pulls a Release back from Rolling Out / Released / Canceled).
 #
 #   1. Resolve the pipeline by exact name (LINEAR_PIPELINE, else
 #      `linear_pipeline` in $PIPELINE_CONFIG, default .signapse/pipeline.yml).
 #   2. Commit range <since>..<until>. <since> defaults to the commitSha of the
 #      pipeline's latest Release from this repo (same prefix) that is not
-#      this version and not in a canceled stage (Rolled back): the last thing
+#      this version and not in a canceled-type stage (Canceled, where a
+#      rolled-back Release goes): the last thing
 #      from this repo that actually reached prod.
 #      Not the previous git tag: a Release Candidate that failed staging is
 #      tagged but never deployed, and its tickets must land in the next Release.

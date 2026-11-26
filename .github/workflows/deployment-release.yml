@@ -75,7 +75,7 @@ on:
         required: false
     outputs:
       linear_release_id:
-        description: 'Linear Release id (for moving stages / marking Rolled back later).'
+        description: 'Linear Release id (for moving stages, e.g. to Canceled after a rollback).'
         value: ${{ jobs.linear-release.outputs.id }}
       linear_release_url:
         description: 'Linear Release URL.'
