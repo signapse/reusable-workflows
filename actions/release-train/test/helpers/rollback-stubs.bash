@@ -79,13 +79,14 @@ EOS
 # Linear requests whose query contains $1, as compact JSON lines.
 linear_calls() { jq -c --arg q "$1" 'select(.query | contains($q))' "$TMP/linear.log"; }
 
-# A Release in Deployed, in a pipeline with Deployed / Rolling Out / Released / Rolled back.
+# A Release in Deployed, in a pipeline with Deployed / Rolling Out / Released / Canceled
+# (Linear's built-in canceled stage; custom stages can only be Started-type).
 write_release() { # write_release [stage-name]
   jq -nc --arg s "${1:-Deployed}" '{id: "rel-1", url: "https://linear.app/signapse/release/rel-1", version: "1.4.0",
-    stage: {id: ("stage-" + ($s | ascii_downcase | gsub(" "; "-"))), name: $s, type: (if $s == "Rolled back" then "canceled" else "started" end)},
+    stage: {id: ("stage-" + ($s | ascii_downcase | gsub(" "; "-"))), name: $s, type: (if $s == "Canceled" then "canceled" else "started" end)},
     pipeline: {name: "SignStream", stages: {nodes: [
       {id: "stage-deployed", name: "Deployed", type: "started"},
       {id: "stage-rolling-out", name: "Rolling Out", type: "started"},
       {id: "stage-released", name: "Released", type: "completed"},
-      {id: "stage-rolled-back", name: "Rolled back", type: "canceled"}]}}}' > "$TMP/release.json"
+      {id: "stage-canceled", name: "Canceled", type: "canceled"}]}}}' > "$TMP/release.json"
 }

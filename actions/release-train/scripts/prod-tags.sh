@@ -30,6 +30,7 @@
 #   GITOPS_REF     default main
 #   GH_TOKEN       contents:read on GITOPS_REPO (the read-only pipeline app)
 # Stdout: [{service, path, current_tag, on_tag, rolled_back, deployed_previous}]
+# LAMBDA_FUNCTIONS set: lambda-tags.sh answers instead, from the functions.
 # Exits 1 when a service has no prod patch file or the API fails: a guess
 # here could deploy over, or skip, a service.
 # --require-all: prints nothing when prod runs <release-tag> on every service;
@@ -37,6 +38,11 @@
 
 # shellcheck source=SCRIPTDIR/../lib/common.sh
 source "$(dirname "$0")/../lib/common.sh"
+
+# Lambda services (SIG-3189): the functions' own tags say what prod runs.
+if [ -n "${LAMBDA_FUNCTIONS:-}" ]; then
+  exec "$(dirname "$0")/lambda-tags.sh" "$@"
+fi
 
 REQUIRE_ALL=false
 if [ "${1:-}" = --require-all ]; then

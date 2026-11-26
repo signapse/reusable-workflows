@@ -3,8 +3,9 @@
 #
 # Marks a Deployment's Linear Release as rolled back (SIG-2771, AC2) by moving
 # it to the pipeline's canceled-type stage named STAGE_NAME (default
-# `Rolled back`). dora-metrics counts a Release in that stage (or any
-# canceled-type stage) as a failed change.
+# `Canceled`, Linear's built-in stage: custom stages can only be of the
+# Started type, so there is no "Rolled back" stage). dora-metrics counts a
+# Release in a canceled-type stage as a failed change.
 #
 # Which Release: RELEASE_ID (deployment-release.yml's linear_release_id) when
 # set. When recording the Release failed earlier in the run, it is looked up by
@@ -17,7 +18,7 @@
 #   RELEASE_ID       Linear Release id (may be empty)
 #   VERSION          the Release's version (the release tag); for the lookup
 #   LINEAR_PIPELINE  Linear release pipeline name; for the lookup
-#   STAGE_NAME       default "Rolled back"
+#   STAGE_NAME       default "Canceled"
 #   LINEAR_API_KEY   required
 # Stdout: {ok, release_id, url, version, from_stage, stage, changed, reason}
 # Exit 0 when the Release is in the stage, 1 otherwise (the object is still printed).
@@ -33,7 +34,7 @@ need curl
 RELEASE_ID="${RELEASE_ID:-}"
 VERSION="${VERSION:-}"
 LINEAR_PIPELINE="${LINEAR_PIPELINE:-}"
-STAGE_NAME="${STAGE_NAME:-Rolled back}"
+STAGE_NAME="${STAGE_NAME:-Canceled}"
 
 release_json='{}'
 from=""

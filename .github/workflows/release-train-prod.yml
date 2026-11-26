@@ -28,10 +28,18 @@ name: Release Train prod (reusable)
 #             (scripts/prod-partial.sh; unknown -> alert, no rollback).
 #   rollback  only after a failed smoke or a partial Deployment (SIG-2771): rollback.yml in
 #             signapse-core-k8s per service, checked against the previous
-#             tags; Linear Release -> Rolled back; incident.io incident (P3
+#             tags; Linear Release -> Canceled; incident.io incident (P3
 #             Minor, or P2 Major when the rollback did not restore everything)
 #             with Cause = Deployment; tickets -> QA Failed (Done tickets stay
 #             in Done with QA Passed); Slack alert. Always red.
+#
+# Lambda services (SIG-3189, lambda_functions set): what prod runs is read
+# from the prod functions' tags; step 4 is scripts/lambda-deploy.sh (staging's
+# release ZIP copied to the prod bucket with a SHA-256 check, each function
+# updated and read back) and the rollback is scripts/lambda-rollback.sh. The
+# deploy, verdict and rollback jobs run in the caller's lambda_environment,
+# which the prod role's OIDC trust requires. docs/RELEASE-TRAIN.md
+# "Lambda services".
 #
 # Two ways in (see scripts/prod-plan.sh):
 #   fresh   release_tag set: staging just passed for it in this run.
@@ -95,9 +103,44 @@ on:
         description: >-
           JSON array of signapse-core-k8s deploy-prod.yml `service` choices this
           repo's images run as in prod (e.g. ["signstream-api","signstream-websocket"]).
-          Every one is deployed with the release tag.
-        required: true
+          Every one is deployed with the release tag. Required unless
+          lambda_functions is set.
+        required: false
         type: string
+        default: ''
+      lambda_functions:
+        description: >-
+          Lambda services (SIG-3189): the same JSON array as the train's
+          lambda_functions. Set: what prod runs is read from the prod
+          functions' tags; the deploy copies staging's <prefix>/<tag>.zip to
+          the prod bucket (SHA-256 checked) and points each function at it
+          (images: <repo>:<tag>), with no deploy-prod.yml; the rollback points
+          them back at the previous artefact. Empty: the k8s path, unchanged.
+        required: false
+        type: string
+        default: ''
+      lambda_prod_role_arn:
+        description: >-
+          Lambda services: prod role that reads the staging bucket, writes the
+          prod bucket and updates and tags the prod functions. Its trust
+          policy should accept only this repo's lambda_environment (see
+          docs/RELEASE-TRAIN.md "Prod approval for Lambda services").
+        required: false
+        type: string
+        default: ''
+      lambda_environment:
+        description: >-
+          Lambda services: the caller repo's GitHub environment the deploy,
+          verdict and rollback jobs run in, so the prod role's OIDC trust can
+          require it. Restrict its deployment branches to release_branch.
+        required: false
+        type: string
+        default: 'production'
+      aws_region:
+        description: 'Lambda services: region of the functions and buckets.'
+        required: false
+        type: string
+        default: 'eu-west-2'
       slack_channel:
         description: 'Channel for deploy and flag-guard failure alerts. Empty uses slack_releases_channel / SLACK_RELEASES_CHANNEL / #releases.'
         required: false
@@ -230,10 +273,14 @@ on:
         type: string
         default: 'QA Passed'
       rolled_back_stage:
-        description: 'Canceled-type stage of the Linear release pipeline that marks a Release rolled back.'
+        description: >-
+          Canceled-type stage of the Linear release pipeline that marks a
+          Release rolled back: Linear's built-in Canceled. Linear allows custom
+          stages only in the Started group, so a stage named "Rolled back"
+          cannot be canceled-type.
         required: false
         type: string
-        default: 'Rolled back'
+        default: 'Canceled'
       incident_io_minor_severity_id:
         description: >-
           incident.io severity for an automatic rollback that restored every
@@ -347,6 +394,9 @@ jobs:
     name: Deploy to prod
     runs-on: ubuntu-latest
     timeout-minutes: 240
+    # Lambda services only (SIG-3189): the prod role trusts this environment.
+    # Empty for k8s callers, which then run with no environment as before.
+    environment: ${{ inputs.lambda_functions != '' && inputs.lambda_environment || '' }}
     # One prod Deployment per repo, never cancelled midway (spec "Guardrails").
     # The caller's workflow-level release-train-<repo> group serialises whole
     # train runs, so smoke and verdict of one Deployment never interleave
@@ -354,8 +404,11 @@ jobs:
     concurrency:
       group: deployment-prod-${{ github.repository }}
       cancel-in-progress: false
-    permissions:
-      contents: read
+    # No `permissions:` on purpose (SIG-3189), like release-train.yml's
+    # select and promote: the job inherits the caller's grant. Lambda callers
+    # grant id-token: write (the prod role); asking for it here would fail
+    # every k8s caller at startup, before any `if:`. The k8s template's
+    # `permissions: contents: read` keeps this job read-only as before.
     outputs:
       decision: ${{ steps.plan.outputs.decision }}
       release_tag: ${{ steps.plan.outputs.release_tag }}
@@ -370,8 +423,8 @@ jobs:
       terraform_gate: ${{ steps.terraform.outputs.gate }}
       terraform_run_url: ${{ steps.terraform.outputs.run_url }}
       deployed: ${{ steps.verify.outputs.deployed || 'false' }}
-      partial_deployment: ${{ steps.partial.outputs.partial || 'false' }}
-      moved_services: ${{ steps.partial.outputs.moved || '[]' }}
+      partial_deployment: ${{ steps.partial.outputs.partial || steps.lambda.outputs.partial || 'false' }}
+      moved_services: ${{ steps.partial.outputs.moved || steps.lambda.outputs.moved || '[]' }}
       gitops_owner: ${{ steps.cfg.outputs.owner }}
       gitops_name: ${{ steps.cfg.outputs.name }}
     steps:
@@ -394,6 +447,8 @@ jobs:
       - name: Check prod inputs
         id: cfg
         env:
+          LAMBDA_FUNCTIONS: ${{ inputs.lambda_functions }}
+          LAMBDA_PROD_ROLE_ARN: ${{ inputs.lambda_prod_role_arn }}
           PROD_SERVICES: ${{ inputs.prod_services }}
           READ_APP_ID: ${{ inputs.read_app_id }}
           PRODZILLA_APP_ID: ${{ inputs.prodzilla_app_id }}
@@ -401,7 +456,12 @@ jobs:
         run: |
           set -euo pipefail
           missing=()
-          jq -e 'type == "array" and length > 0' <<< "$PROD_SERVICES" > /dev/null 2>&1 || missing+=(prod_services)
+          if [ -n "$LAMBDA_FUNCTIONS" ]; then
+            "$GITHUB_WORKSPACE/_rw/actions/release-train/scripts/lambda-config.sh" prod > /dev/null || missing+=("a valid lambda_functions")
+            [ -n "$LAMBDA_PROD_ROLE_ARN" ] || missing+=(lambda_prod_role_arn)
+          else
+            jq -e 'type == "array" and length > 0' <<< "$PROD_SERVICES" > /dev/null 2>&1 || missing+=(prod_services)
+          fi
           [ -n "$READ_APP_ID" ] || missing+=(read_app_id)
           [ -n "$PRODZILLA_APP_ID" ] || missing+=(prodzilla_app_id)
           [ -f .signapse/pipeline.yml ] || missing+=(".signapse/pipeline.yml with product:")
@@ -424,6 +484,14 @@ jobs:
           repositories: ${{ steps.cfg.outputs.name }}
           permission-contents: read
 
+      # Lambda services (SIG-3189): the plan reads the prod functions' tags.
+      - name: Assume the prod Lambda role (plan)
+        if: inputs.lambda_functions != ''
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ inputs.lambda_prod_role_arn }}
+          aws-region: ${{ inputs.aws_region }}
+
       - name: Plan the Deployment
         id: plan
         env:
@@ -431,6 +499,7 @@ jobs:
           RESUME_TAG: ${{ inputs.resume_tag }}
           TICKETS: ${{ inputs.tickets }}
           PROD_SERVICES: ${{ inputs.prod_services }}
+          LAMBDA_FUNCTIONS: ${{ inputs.lambda_functions }}
           RELEASE_TAG_PATTERN: ${{ inputs.release_tag_pattern }}
           HOTFIX_LABEL: ${{ inputs.hotfix_label }}
           LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
@@ -526,7 +595,7 @@ jobs:
       # deploy-prod.yml pushes the tag with its own Flux app.
       - name: Mint Prodzilla token for ${{ inputs.gitops_repo }}
         id: prodzilla
-        if: steps.plan.outputs.dispatch == 'true' && steps.plan.outputs.to_deploy != '[]'
+        if: steps.plan.outputs.dispatch == 'true' && steps.plan.outputs.to_deploy != '[]' && inputs.lambda_functions == ''
         uses: actions/create-github-app-token@v2
         with:
           app-id: ${{ inputs.prodzilla_app_id }}
@@ -537,7 +606,7 @@ jobs:
 
       - name: Deploy ${{ steps.plan.outputs.release_tag }} with ${{ inputs.deploy_workflow }} (AC1)
         id: dispatch
-        if: steps.plan.outputs.dispatch == 'true' && steps.plan.outputs.to_deploy != '[]'
+        if: steps.plan.outputs.dispatch == 'true' && steps.plan.outputs.to_deploy != '[]' && inputs.lambda_functions == ''
         env:
           GH_TOKEN: ${{ steps.prodzilla.outputs.token }}
           TAG: ${{ steps.plan.outputs.release_tag }}
@@ -570,6 +639,56 @@ jobs:
             exit 1
           fi
 
+      # Lambda services (SIG-3189): the train deploys the functions itself.
+      # Fresh credentials: the Terraform gate's wait can outlast the plan's.
+      - name: Assume the prod Lambda role (deploy)
+        if: steps.plan.outputs.go == 'true' && inputs.lambda_functions != ''
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ inputs.lambda_prod_role_arn }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Deploy ${{ steps.plan.outputs.release_tag }} to the prod functions (AC1)
+        id: lambda
+        if: steps.plan.outputs.dispatch == 'true' && steps.plan.outputs.to_deploy != '[]' && inputs.lambda_functions != ''
+        env:
+          LAMBDA_FUNCTIONS: ${{ inputs.lambda_functions }}
+          TAG: ${{ steps.plan.outputs.release_tag }}
+          PREVIOUS_TAGS: ${{ steps.plan.outputs.previous_tags }}
+        run: |
+          set -euo pipefail
+          res=$(TARGET_ENV=prod SOURCE_ENV=stg SOURCE_ARTEFACT="$TAG" "$GITHUB_WORKSPACE/_rw/actions/release-train/scripts/lambda-deploy.sh") \
+            || res=$(jq -nc '{ok: false, unknown: true, moved: [], functions: [], reason: "the deploy script failed; see the log"}')
+          {
+            echo
+            echo "### Prod functions"
+            jq -r '.functions[] | "- `\(.service)` (`\(.function)`): runs `\(.code)`\(if .changed then ", updated" else "" end); before: `\(.previous_tag)` `\(.previous_code)`"' <<< "$res"
+          } >> "$GITHUB_STEP_SUMMARY"
+          [ "$(jq -r .ok <<< "$res")" != true ] || exit 0
+          # The same three answers as prod-partial.sh, known here directly:
+          # the script reads every function back after updating it.
+          moved=$(jq -c .moved <<< "$res")
+          if [ "$(jq -r .unknown <<< "$res")" = true ]; then
+            state=unknown
+          elif [ "$moved" != '[]' ]; then
+            state=partial
+          else
+            state=none
+          fi
+          reason=$(jq -r '.reason + (if (.moved | length) > 0 then "; already on the new tag: " + (.moved | join(", ")) else "" end)' <<< "$res")
+          {
+            echo "state=$state"
+            echo "moved=$moved"
+            echo "reason=$reason"
+            [ "$state" != partial ] || echo "partial=true"
+          } >> "$GITHUB_OUTPUT"
+          echo "::error::$(jq -r .reason <<< "$res")"
+          case "$state" in
+            partial) echo "**Partial Deployment:** ${reason}; prod_smoke_passed=false, the rollback restores them." >> "$GITHUB_STEP_SUMMARY" ;;
+            unknown) echo "**Partial Deployment, state unknown:** ${reason}. No automatic rollback." >> "$GITHUB_STEP_SUMMARY" ;;
+          esac
+          exit 1
+
       # Installation tokens last an hour. The Terraform gate (up to 50 min,
       # prod-apply approval included) and the deploy-prod runs (up to
       # deploy_timeout_minutes each) can outlast the tokens minted above, so
@@ -592,6 +711,7 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.read_after.outputs.token }}
           PROD_SERVICES: ${{ inputs.prod_services }}
+          LAMBDA_FUNCTIONS: ${{ inputs.lambda_functions }}
           GITOPS_REPO: ${{ inputs.gitops_repo }}
           GITOPS_REF: ${{ inputs.gitops_ref }}
           TAG: ${{ steps.plan.outputs.release_tag }}
@@ -614,7 +734,7 @@ jobs:
       - name: Mint Prodzilla token (after a failed deploy)
         id: prodzilla_after
         if: >-
-          always() && steps.plan.outputs.go == 'true' &&
+          always() && steps.plan.outputs.go == 'true' && inputs.lambda_functions == '' &&
           (steps.dispatch.outcome == 'failure' || steps.dispatch.outcome == 'cancelled' || steps.verify.outcome == 'failure')
         uses: actions/create-github-app-token@v2
         with:
@@ -627,7 +747,7 @@ jobs:
       - name: Services already on ${{ steps.plan.outputs.release_tag }} after a failure
         id: partial
         if: >-
-          always() && steps.plan.outputs.go == 'true' &&
+          always() && steps.plan.outputs.go == 'true' && inputs.lambda_functions == '' &&
           (steps.dispatch.outcome == 'failure' || steps.dispatch.outcome == 'cancelled' || steps.verify.outcome == 'failure')
         env:
           GH_TOKEN: ${{ steps.prodzilla_after.outputs.token }}
@@ -674,8 +794,8 @@ jobs:
           SLACK_CHANNEL: ${{ inputs.slack_channel || inputs.slack_releases_channel || vars.SLACK_RELEASES_CHANNEL || '#releases' }}
           TAG: ${{ steps.plan.outputs.release_tag }}
           RUNS: ${{ steps.dispatch.outputs.runs }}
-          PARTIAL_STATE: ${{ steps.partial.outputs.state }}
-          PARTIAL_REASON: ${{ steps.partial.outputs.reason }}
+          PARTIAL_STATE: ${{ steps.partial.outputs.state || steps.lambda.outputs.state }}
+          PARTIAL_REASON: ${{ steps.partial.outputs.reason || steps.lambda.outputs.reason }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
@@ -751,8 +871,13 @@ jobs:
     if: always() && needs.deploy.outputs.deployed == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    permissions:
-      contents: read
+    # Lambda services: the "prod still runs the tag" check reads the prod functions.
+    environment: ${{ inputs.lambda_functions != '' && inputs.lambda_environment || '' }}
+    # No `permissions:` on purpose (SIG-3189), like release-train.yml's
+    # select and promote: the job inherits the caller's grant. Lambda callers
+    # grant id-token: write (the prod role); asking for it here would fail
+    # every k8s caller at startup, before any `if:`. The k8s template's
+    # `permissions: contents: read` keeps this job read-only as before.
     outputs:
       # No default: empty means unknown (this job died before reading the
       # smoke), which must not roll back a Deployment that may be healthy.
@@ -838,12 +963,20 @@ jobs:
           repositories: ${{ needs.deploy.outputs.gitops_name }}
           permission-contents: read
 
+      - name: Assume the prod Lambda role
+        if: steps.smoke.outputs.passed == 'true' && inputs.lambda_functions != ''
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ inputs.lambda_prod_role_arn }}
+          aws-region: ${{ inputs.aws_region }}
+
       - name: Prod still runs ${{ needs.deploy.outputs.release_tag }}
         id: ontag
         if: steps.smoke.outputs.passed == 'true'
         env:
           GH_TOKEN: ${{ steps.read.outputs.token }}
           PROD_SERVICES: ${{ inputs.prod_services }}
+          LAMBDA_FUNCTIONS: ${{ inputs.lambda_functions }}
           GITOPS_REPO: ${{ inputs.gitops_repo }}
           GITOPS_REF: ${{ inputs.gitops_ref }}
           TAG: ${{ needs.deploy.outputs.release_tag }}
@@ -979,8 +1112,14 @@ jobs:
         needs.deploy.outputs.partial_deployment == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 90
-    permissions:
-      contents: read
+    # Lambda services: the rollback updates the prod functions itself. The
+    # environment has no required reviewers, so it never waits.
+    environment: ${{ inputs.lambda_functions != '' && inputs.lambda_environment || '' }}
+    # No `permissions:` on purpose (SIG-3189), like release-train.yml's
+    # select and promote: the job inherits the caller's grant. Lambda callers
+    # grant id-token: write (the prod role); asking for it here would fail
+    # every k8s caller at startup, before any `if:`. The k8s template's
+    # `permissions: contents: read` keeps this job read-only as before.
     outputs:
       rolled_back: ${{ steps.rollback.outputs.ok || 'false' }}
       results: ${{ steps.rollback.outputs.results || '[]' }}
@@ -1041,6 +1180,7 @@ jobs:
       # rollback.yml pushes the tag with its own Flux app.
       - name: Mint Prodzilla token for ${{ inputs.gitops_repo }}
         id: prodzilla
+        if: inputs.lambda_functions == ''
         continue-on-error: true
         uses: actions/create-github-app-token@v2
         with:
@@ -1067,7 +1207,7 @@ jobs:
 
       - name: Read the tags prod runs
         id: current
-        if: ${{ !cancelled() && steps.read.outputs.token != '' }}
+        if: ${{ !cancelled() && steps.read.outputs.token != '' && inputs.lambda_functions == '' }}
         continue-on-error: true
         env:
           GH_TOKEN: ${{ steps.read.outputs.token }}
@@ -1079,12 +1219,24 @@ jobs:
           set -euo pipefail
           echo "tags=$("$GITHUB_WORKSPACE/_rw/actions/release-train/scripts/prod-tags.sh" "$RELEASE_TAG" | jq -c .)" >> "$GITHUB_OUTPUT"
 
+      # Lambda services (SIG-3189): lambda-rollback.sh re-reads each function
+      # itself and only moves one still on the release tag.
+      - name: Assume the prod Lambda role
+        if: ${{ !cancelled() && inputs.lambda_functions != '' }}
+        continue-on-error: true
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ inputs.lambda_prod_role_arn }}
+          aws-region: ${{ inputs.aws_region }}
+
       - name: Roll back with rollback.yml (AC1)
         id: rollback
         if: ${{ !cancelled() }}
         env:
+          LAMBDA_FUNCTIONS: ${{ inputs.lambda_functions }}
           GH_TOKEN: ${{ steps.prodzilla.outputs.token }}
           SERVICES: ${{ needs.deploy.outputs.partial_deployment == 'true' && needs.deploy.outputs.moved_services || inputs.prod_services }}
+          PARTIAL: ${{ needs.deploy.outputs.partial_deployment }}
           PREVIOUS_TAGS: ${{ needs.deploy.outputs.previous_tags }}
           RELEASE_TAG: ${{ needs.deploy.outputs.release_tag }}
           CURRENT_TAGS: ${{ steps.current.outputs.tags }}
@@ -1098,7 +1250,14 @@ jobs:
           # awk, not $((...)): the input is a number and may be fractional.
           TIMEOUT_SECONDS=$(awk -v m="$TIMEOUT_MINUTES" 'BEGIN { printf "%d", m * 60 }')
           export TIMEOUT_SECONDS
-          if [ -z "$GH_TOKEN" ]; then
+          if [ -n "$LAMBDA_FUNCTIONS" ]; then
+            # Every function, unless a partial Deployment named the moved ones.
+            [ "$PARTIAL" = true ] || SERVICES=$("$GITHUB_WORKSPACE/_rw/actions/release-train/scripts/lambda-config.sh" prod | jq -c 'map(.name)')
+            export SERVICES
+            res=$("$GITHUB_WORKSPACE/_rw/actions/release-train/scripts/lambda-rollback.sh") \
+              || res=$(jq -nc --argjson s "$SERVICES" '{ok: false, needs_human: true, reason: "the rollback script failed; see the log",
+                results: [$s[] | {service: ., ok: false, result: "error", restored: "", run_url: "", reason: "the rollback script failed; see the log"}]}')
+          elif [ -z "$GH_TOKEN" ]; then
             res=$(jq -nc --argjson s "$SERVICES" '{ok: false, needs_human: true, reason: "no Prodzilla token, nothing was dispatched",
               results: [$s[] | {service: ., ok: false, result: "not_dispatched", restored: "", run_url: "", reason: "not rolled back: the Prodzilla token could not be minted"}]}')
           else

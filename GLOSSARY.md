@@ -41,7 +41,7 @@ The GitHub team `prod-approvers`, the required reviewers on the `prod-apply` env
 _Avoid_: releasers team, `tech`
 
 **Rollout**:
-Raising a feature flag in stages from the QA Cohort to every user, started by the QA team after their review. Not limited to the deploy window. Aborting a Rollout turns the flag off: the code stays dark-deployed, the ticket goes back to On Prod and the Linear Release is not marked Rolled back (only a prod image rollback does that).
+Raising a feature flag in stages from the QA Cohort to every user, started by the QA team after their review. Not limited to the deploy window. Aborting a Rollout turns the flag off: the code stays dark-deployed, the ticket goes back to On Prod and the Linear Release stays where it is (only a prod image rollback moves it to the Canceled stage).
 
 **Deploy window**:
 The hours in which Promotion may run. It gates Promotion only, never a Rollout step.

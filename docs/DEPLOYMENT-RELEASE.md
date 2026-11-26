@@ -34,7 +34,7 @@ sentry_project: signstream    # Sentry project slug; omit for no Sentry release 
 
 ### Commit range
 
-The Release lists tickets from commits in `since..sha`. By default `since` is the `commitSha` of the latest Release in the pipeline from **this repo** (same version prefix), ignoring this version and Releases in a canceled stage (`Rolled back`). In other words, it's the last commit that actually reached prod. It deliberately isn't the previous git tag: a Release Candidate that failed staging is tagged but never deployed, so its tickets belong in the next Release. A pipeline's first Deployment has no earlier Release, so pass `since` explicitly there. On a re-run of a version that already has a Release, only Releases created before it count, so the range stays the same even if newer Deployments exist. A range with more than 250 ticket refs is refused before anything is created (usually a wrong `since`). A new Release gets its `commitSha` only after every ticket is attached, so a run that fails half-way is never used as the starting point; re-running the same version finishes it.
+The Release lists tickets from commits in `since..sha`. By default `since` is the `commitSha` of the latest Release in the pipeline from **this repo** (same version prefix), ignoring this version and Releases in a canceled-type stage (`Canceled`, where a rolled-back Release goes). In other words, it's the last commit that actually reached prod. It deliberately isn't the previous git tag: a Release Candidate that failed staging is tagged but never deployed, so its tickets belong in the next Release. A pipeline's first Deployment has no earlier Release, so pass `since` explicitly there. On a re-run of a version that already has a Release, only Releases created before it count, so the range stays the same even if newer Deployments exist. A range with more than 250 ticket refs is refused before anything is created (usually a wrong `since`). A new Release gets its `commitSha` only after every ticket is attached, so a run that fails half-way is never used as the starting point; re-running the same version finishes it.
 
 Runs for the same repository and version are serialised (`concurrency`), so concurrent calls can't create two Releases. GitHub keeps only one pending run per group: a third run for the same version cancels the one still waiting, so that caller's Deployment shows a cancelled job. That is not a failure; the run that went ahead records the same Release.
 
@@ -59,7 +59,7 @@ Runs for the same repository and version are serialised (`concurrency`), so conc
 | Output | Description |
 |---|---|
 | `release_version` | The version recorded in Linear and Sentry, e.g. `sign-stream-api@1.4.0`. |
-| `linear_release_id` | Linear Release id. Use it with `releaseUpdate(id, {stageId})` to move the Release to `Rolling Out` / `Released` / `Rolled back`. |
+| `linear_release_id` | Linear Release id. Use it with `releaseUpdate(id, {stageId})` to move the Release to `Rolling Out` / `Released` / `Canceled`. |
 | `linear_release_url` | Linear Release URL. |
 | `linear_release_created` | `true` when this run created the Release, `false` when it already existed. |
 | `tickets` | JSON array of ticket ids attached, e.g. `["SIG-1","SIG-2"]`. |
@@ -103,13 +103,13 @@ Each Production pipeline needs these stages. Stage `type` matters: Linear sets `
 | `Deployed` | `started` | this workflow |
 | `Rolling Out` | `started` | Rollout |
 | `Released` | `completed` | Stability Window, once every ticket is Done |
-| `Rolled back` | `canceled` | automatic rollback |
+| `Canceled` | `canceled` | automatic rollback (Linear's built-in stage) |
 
-Linear has no separate release status field: a Release's lifecycle is its stage, and `Rolled back` is a stage of type `canceled`.
+Linear has no separate release status field: a Release's lifecycle is its stage. Custom stages can only be added to the Started group; Planned, Released (completed) and Canceled are fixed. So a rolled-back Release goes to the built-in `Canceled` stage: "Rolled back" is only wording (the run's summary, Slack and the incident), never a stage name.
 
 ## Manual steps (not done by this change)
 
-1. In Linear (SIG-2748): create the Production pipelines and add the stages above to each. Confirm a continuous pipeline accepts `started` and `canceled` stages; if it does not, make the pipelines scheduled.
+1. In Linear (SIG-2748): create the Production pipelines and add the custom Started stages above (`Deployed`, `Rolling Out`) to each; `Released` and `Canceled` are built in.
 2. Check the Engineering team's workflow automations for a "release completed" rule, and that it should fire on `Released` only.
 3. GitHub: make `LINEAR_API_KEY` (workspace API key with write access to issues and releases) and `SENTRY_AUTH_TOKEN` (`project:releases`, `org:read`) available to each product repo that calls this workflow.
 4. Add `linear_pipeline` and `sentry_project` to each product repo's `.signapse/pipeline.yml`.

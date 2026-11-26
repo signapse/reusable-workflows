@@ -14,6 +14,8 @@
 #                    Deployment through the train, when prod runs a tag this
 #                    repo does not have.
 #   PROD_SERVICES    JSON array of deploy-prod.yml service names (prod-tags.sh)
+#   LAMBDA_FUNCTIONS instead of PROD_SERVICES for Lambda services: prod's tag
+#                    is read from the functions (lambda-tags.sh, SIG-3189)
 #   GITOPS_REPO, GITOPS_REF, GH_TOKEN   see prod-tags.sh
 #   RELEASE_TAG_PATTERN  default ^v?[0-9]+\.[0-9]+\.[0-9]+$
 # Runs in a full checkout of the product repo; HEAD is the walk's head.
@@ -48,8 +50,8 @@ if [ -n "${SELECTION_BASE:-}" ]; then
   exit 0
 fi
 
-[ -n "${PROD_SERVICES:-}" ] && [ "$PROD_SERVICES" != '[]' ] \
-  || die "prod_services is required: the walk starts at the tag prod runs (or set selection_base)"
+[ -n "${PROD_SERVICES:-}" ] && [ "$PROD_SERVICES" != '[]' ] || [ -n "${LAMBDA_FUNCTIONS:-}" ] \
+  || die "prod_services (or lambda_functions) is required: the walk starts at the tag prod runs (or set selection_base)"
 services=$("$HERE/prod-tags.sh")
 
 base=""

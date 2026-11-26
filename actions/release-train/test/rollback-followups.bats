@@ -2,7 +2,7 @@
 # shellcheck disable=SC2030,SC2031,SC2016 # each @test runs in its own subshell on purpose; literal backticks in expected text.
 # What follows a failed prod smoke (SIG-2771), with curl stubbed
 # (helpers/rollback-stubs.bash):
-#   release-rolled-back.sh  AC2: Linear Release -> Rolled back
+#   release-rolled-back.sh  AC2: Linear Release -> Canceled (rolled back)
 #   rollback-incident.sh    AC3/AC5: incident.io incident, Minor or Major
 #   rollback-tickets.sh     AC4/AC5: tickets -> QA Failed, Slack alert
 load 'helpers/load'
@@ -26,31 +26,31 @@ field() { tail -n1 <<< "$output" | jq -r "$@"; }
 
 # --- AC2: Linear Release ---------------------------------------------------
 
-@test "AC2: moves the Release to the canceled-type stage Rolled back" {
+@test "AC2: moves the Release to the built-in canceled-type stage Canceled" {
   write_release Deployed
   RELEASE_ID=rel-1 run "$S/release-rolled-back.sh"
   [ "$status" -eq 0 ]
   [ "$(field .changed)" = true ]
   [ "$(field .from_stage)" = Deployed ]
-  [ "$(linear_calls releaseUpdate | jq -c .variables)" = '{"id":"rel-1","input":{"stageId":"stage-rolled-back"}}' ]
+  [ "$(linear_calls releaseUpdate | jq -c .variables)" = '{"id":"rel-1","input":{"stageId":"stage-canceled"}}' ]
 }
 
-@test "AC2: idempotent, a Release already Rolled back is left alone" {
-  write_release "Rolled back"
+@test "AC2: idempotent, a Release already Canceled is left alone" {
+  write_release Canceled
   RELEASE_ID=rel-1 run "$S/release-rolled-back.sh"
   [ "$status" -eq 0 ]
   [ "$(field .changed)" = false ]
   [ -z "$(linear_calls releaseUpdate)" ]
 }
 
-@test "AC2: a Rolled back stage that is not canceled-type is reported, moved or not" {
+@test "AC2: a configured stage that is not canceled-type is reported, moved or not" {
   write_release Deployed
-  jq '(.pipeline.stages.nodes[] | select(.name == "Rolled back") | .type) = "completed"' "$TMP/release.json" > "$TMP/r" && mv "$TMP/r" "$TMP/release.json"
+  jq '(.pipeline.stages.nodes[] | select(.name == "Canceled") | .type) = "completed"' "$TMP/release.json" > "$TMP/r" && mv "$TMP/r" "$TMP/release.json"
   RELEASE_ID=rel-1 run "$S/release-rolled-back.sh"
   [ "$status" -eq 1 ]
   [ "$(field .changed)" = true ]
   [[ "$(field .reason)" == *"not canceled"* ]]
-  jq '.stage = {name: "Rolled back"}' "$TMP/release.json" > "$TMP/r" && mv "$TMP/r" "$TMP/release.json"
+  jq '.stage = {name: "Canceled"}' "$TMP/release.json" > "$TMP/r" && mv "$TMP/r" "$TMP/release.json"
   RELEASE_ID=rel-1 run "$S/release-rolled-back.sh"
   [ "$status" -eq 1 ]
   [ "$(field .changed)" = false ]
@@ -61,7 +61,7 @@ field() { tail -n1 <<< "$output" | jq -r "$@"; }
   write_release Deployed
   RELEASE_ID=rel-1 STAGE_NAME="Reverted" run "$S/release-rolled-back.sh"
   [ "$status" -eq 1 ]
-  [[ "$(field .reason)" == *"has no stage 'Reverted' (has: Deployed, Rolling Out, Released, Rolled back)"* ]]
+  [[ "$(field .reason)" == *"has no stage 'Reverted' (has: Deployed, Rolling Out, Released, Canceled)"* ]]
   [ -z "$(linear_calls releaseUpdate)" ]
 }
 
